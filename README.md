@@ -8,6 +8,14 @@ Harness-agnostic. The scripts are plain Python 3 stdlib. Any scheduler can run
 them: cron, systemd, OpenClaw, Hermes Agent, Claude Code, or a human typing
 commands. See [SETUP.md](SETUP.md) for three worked tracks.
 
+**Built for the Singapore internship market, and wired for it.** Discovery
+targets InternSG and company career pages, the ranker scores a Singapore base
+highest and treats overseas postings as a 0.3 penalty, and the demo profile is a
+Singapore student. Running it elsewhere works, but you will be editing
+`scripts/rubric.yaml`, the `InternSG` source list in `scripts/discover.py`, and
+the `NRIC_SG` handling. That is a port, not a config change, so look at it before
+you clone.
+
 ## The core rule
 
 Nothing leaves your machine without a human-approved merge.
@@ -54,6 +62,7 @@ default.
   agent drains, and the drain still stops at captchas and unseen questions.
 - Does not bypass bot detection, captchas, or rate limits.
 - Does not scrape at scale. Discovery is a handful of boards you name.
+- Is not market-neutral. See the note at the top: it is built for Singapore.
 - Does not store passports, national IDs, or birthdates. By design, see
   `SANITIZATION.md`.
 - Does not promise a job. It reduces the cost of applying carefully.

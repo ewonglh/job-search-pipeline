@@ -131,45 +131,45 @@ assert dict(skipped_d)[21] == "already active for this application", skipped_d
 # A tracker row is this PR's own only when its pr/pr_number agrees. An older
 # submission at the same company must not mark a later PR as already handled:
 # that skip kept the PR out of queue.yaml, so the posting looked untailored and
-# tailor.py opened a duplicate PR for it (#272 missed, #388 opened).
+# tailor.py opened a duplicate PR for it.
 TRACKER_TWO_ROWS = """
 - company: Orion Games
   role: AI Engineer Intern (Model & Product Evaluation)
-  link: https://www.linkedin.com/jobs/view/4479088052
+  link: https://www.linkedin.com/jobs/view/3999000001
   status: applied
   applied_date: 2026-10-20
-  variant: variants/garena-ai-engineer-intern-model-product-evaluation/resume.tex
+  variant: variants/orion-games-ai-engineer-intern/resume.tex
   pr: https://github.com/demo-user/resume/pull/196
   pr_number: 196
 """
-garena_pr = {
+orion_pr = {
     "number": 272, "title": "Tailor resume: Orion Games — Intern, Game Programmer",
-    "headRefName": "app/garena", "mergedAt": "2026-11-02T15:32:44Z",
+    "headRefName": "app/orion-games", "mergedAt": "2026-11-02T15:32:44Z",
     "url": "https://github.com/demo-user/resume/pull/272",
     "mergedBy": {"login": "demo-user"},
     "body": "https://www.linkedin.com/jobs/view/3999000001",
-    "files": [{"path": "variants/garena-intern-game-programmer/resume.tex"}],
+    "files": [{"path": "variants/orion-games-game-programmer-intern/resume.tex"}],
 }
-assert q.extract_entry(garena_pr, TRACKER_TWO_ROWS) is None, \
+assert q.extract_entry(orion_pr, TRACKER_TWO_ROWS) is None, \
     "a company-slug match must not claim another PR's tracker row"
-_, g_added, g_skipped = q.enqueue([], [dict(garena_pr, _tracker=TRACKER_TWO_ROWS)])
+_, g_added, g_skipped = q.enqueue([], [dict(orion_pr, _tracker=TRACKER_TWO_ROWS)])
 assert [it["pr_number"] for it in g_added] == [272], (g_added, g_skipped)
 assert g_skipped == [], g_skipped
 # the row that really is this PR's still skips (same PR, submitted)
-same = dict(garena_pr, number=196, url="https://github.com/demo-user/resume/pull/196",
-            headRefName="app/garena-ai-engineer-intern-model-product-evaluation")
+same = dict(orion_pr, number=196, url="https://github.com/demo-user/resume/pull/196",
+            headRefName="app/orion-games-ai-engineer-intern")
 _, s_added, s_skipped = q.enqueue([], [dict(same, _tracker=TRACKER_TWO_ROWS)])
 assert s_added == [] and dict(s_skipped)[196] == "already submitted in tracker", s_skipped
 # identity: URL wins when present, pr_number when only that is set, blank = this PR
-assert q.entry_matches_pr({"pr": garena_pr["url"] + "/"}, garena_pr)
+assert q.entry_matches_pr({"pr": orion_pr["url"] + "/"}, orion_pr)
 assert not q.entry_matches_pr({"pr": "https://github.com/demo-user/resume/pull/196"},
-                               garena_pr)
-assert q.entry_matches_pr({"pr_number": 272}, garena_pr)
-assert not q.entry_matches_pr({"pr_number": 196}, garena_pr)
-assert q.entry_matches_pr({"company": "X"}, garena_pr)
-assert q.entry_matches_pr({"pr_number": 272}, garena_pr), \
+                               orion_pr)
+assert q.entry_matches_pr({"pr_number": 272}, orion_pr)
+assert not q.entry_matches_pr({"pr_number": 196}, orion_pr)
+assert q.entry_matches_pr({"company": "X"}, orion_pr)
+assert q.entry_matches_pr({"pr_number": 272}, orion_pr), \
     "a pr_number that agrees identifies this PR"
-assert not q.entry_matches_pr({"pr_number": 196}, garena_pr)
+assert not q.entry_matches_pr({"pr_number": 196}, orion_pr)
 assert q.entry_pr_number({"pr": "https://github.com/demo-user/resume/pull/7"}) == 7
 
 # ---------------------------------------------------------------- next / sort

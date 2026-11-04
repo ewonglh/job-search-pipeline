@@ -85,7 +85,10 @@ SENIOR_RE = re.compile(
     re.I,
 )
 YEARS_RE = re.compile(r"\b(?:[5-9]|[1-9]\d)\s*\+?\s*years?\b", re.I)
-LOCATION_OK_RE = re.compile(r"\b(?:sg|singapore|remote)\b", re.I)
+# Location terms accepted by the filter. Override with JOBSEARCH_LOCATION_RE
+# (a regex) to target another market, e.g. "\b(?:london|uk|remote)\b".
+LOCATION_OK_RE = re.compile(
+    os.environ.get("JOBSEARCH_LOCATION_RE", r"\b(?:sg|singapore|remote)\b"), re.I)
 _MONTHS = {m: i for i, m in enumerate(
     ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
      "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"], 1)}

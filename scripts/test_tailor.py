@@ -153,12 +153,12 @@ finally:
 
 # ------------------------------------------------- pr_index: merged links in flight
 # Duplicate tailoring came from the guard listing only OPEN PRs: a posting whose
-# PR already MERGED looked untailored and was re-selected (#272 merged, #388 the
-# duplicate). pr_index covers all states; merged/closed links count as in flight.
+# PR already MERGED looked untailored and was re-selected (the merged PR
+# looked untailored, so a duplicate was opened). pr_index covers all states; merged/closed links count as in flight.
 import subprocess as _sp
 
 ROWS = [
-    {"number": 272, "state": "MERGED", "headRefName": "app/garena",
+    {"number": 272, "state": "MERGED", "headRefName": "app/orion-games",
      "body": "https://www.linkedin.com/jobs/view/3999000001",
      "mergedAt": "2026-11-02T15:32:44Z",
      "url": "https://github.com/demo-user/resume/pull/272"},
@@ -212,14 +212,14 @@ finally:
     t.subprocess.run, t.PR_INDEX_CACHE = _real_run, _real_cache
     _sh.rmtree(_idx_dir)
 
-# the 3999000001 posting (Orion Games, PR #272 MERGED) is now in flight
-_garena = {"company": "Orion Games", "role": "Intern, Game Programmer",
+# the Orion Games posting (PR 272, MERGED) is now in flight
+_orion = {"company": "Orion Games", "role": "Intern, Game Programmer",
            "link": "https://www.linkedin.com/jobs/view/3999000001"}
-_gsel = t.assign_slugs([_garena])
+_gsel = t.assign_slugs([_orion])
 _merged = {t.normalize_url("https://www.linkedin.com/jobs/view/3999000001"): 272}
 _r, _s = t.partition_inflight(_gsel, set(_merged), set())
 assert _r == [] and [p["company"] for p, _ in _s] == ["Orion Games"], (_r, _s)
-# ...and open-only would have missed it, which is the defect that shipped #388
+# ...and open-only would have missed it, which is the defect that shipped a duplicate
 _r2, _s2 = t.partition_inflight(_gsel, set(), set())
 assert [p["company"] for p, _ in _r2] == ["Orion Games"], _r2
 

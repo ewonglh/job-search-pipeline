@@ -7,7 +7,7 @@
   link: https://example.com/jobs/lumen-ai-founding
   source: InternSG
   status: Accepted
-  applied_date: 2026-09-02
+  applied_date: 2026-08-17
   variant: variants/lumen-ai-founding/resume.tex
   pr: https://github.com/demo-user/resume/pull/101
   notes: Offer received, awaiting written confirmation from the recruiter.
@@ -16,7 +16,7 @@
   link: https://example.com/jobs/harbourline-swe
   source: InternSG
   status: Interview
-  applied_date: 2026-09-15
+  applied_date: 2026-09-10
   variant: variants/harbourline-swe/resume.tex
   pr: https://github.com/demo-user/resume/pull/102
   notes: Second round scheduled for next week.
@@ -25,7 +25,7 @@
   link: https://example.com/jobs/northwind-ml
   source: CareersPage
   status: OA
-  applied_date: 2026-09-22
+  applied_date: 2026-09-26
   variant: variants/northwind-ml/resume.tex
   pr: https://github.com/demo-user/resume/pull/103
   notes: Online assessment link valid for 7 days.
@@ -34,7 +34,7 @@
   link: https://example.com/jobs/meridian-data
   source: InternSG
   status: Callback
-  applied_date: 2026-09-28
+  applied_date: 2026-10-04
   variant: variants/meridian-data/resume.tex
   pr: https://github.com/demo-user/resume/pull/104
   notes: Recruiter asked for availability and transcript.
@@ -43,7 +43,7 @@
   link: https://example.com/jobs/cobalt-fullstack
   source: LinkedIn
   status: Applied
-  applied_date: 2026-10-05
+  applied_date: 2026-10-20
   variant: variants/cobalt-fullstack/resume.tex
   pr: https://github.com/demo-user/resume/pull/105
 - company: Orion Games
@@ -51,7 +51,7 @@
   link: https://example.com/jobs/orion-games
   source: LinkedIn
   status: Applied
-  applied_date: 2026-10-09
+  applied_date: 2026-10-28
   variant: variants/orion-games/resume.tex
   pr: https://github.com/demo-user/resume/pull/106
 - company: Tessellate Studio
@@ -59,7 +59,7 @@
   link: https://example.com/jobs/tessellate-frontend
   source: CareersPage
   status: Applied
-  applied_date: 2026-10-12
+  applied_date: 2026-11-05
   variant: variants/tessellate-frontend/resume.tex
   pr: https://github.com/demo-user/resume/pull/107
 - company: Bluepeak Systems
@@ -75,8 +75,8 @@
   link: https://example.com/jobs/ironbark-sec
   source: InternSG
   status: Rejected
-  applied_date: 2026-09-05
-  rejected_date: 2026-09-19
+  applied_date: 2026-08-25
+  rejected_date: 2026-09-18
   variant: variants/ironbark-sec/resume.tex
   pr: https://github.com/demo-user/resume/pull/109
   notes: Rejection email, no reason given.
@@ -85,8 +85,8 @@
   link: https://example.com/jobs/solstice-platform
   source: LinkedIn
   status: Rejected
-  applied_date: 2026-09-11
-  rejected_date: 2026-10-02
+  applied_date: 2026-09-02
+  rejected_date: 2026-10-12
   variant: variants/solstice-platform/resume.tex
   pr: https://github.com/demo-user/resume/pull/110
   notes: Role closed after the posting went up.

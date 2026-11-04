@@ -15,9 +15,9 @@
   variant: variants/kestrel-analyst/resume.tex
   pr: https://github.com/demo-user/resume/pull/121
   pr_number: 121
-  enqueued_at: 2026-10-24T06:00:00Z
+  enqueued_at: 2026-10-09T06:00:00Z
   status: queued
-  approved_at: 2026-10-24T05:58:11Z
+  approved_at: 2026-10-09T05:58:11Z
   approved_by: demo-user
   notes: merged app/kestrel-analyst
 - company: Vantage Robotics
@@ -27,9 +27,9 @@
   variant: variants/vantage-cv/resume.tex
   pr: https://github.com/demo-user/resume/pull/122
   pr_number: 122
-  enqueued_at: 2026-10-25T06:00:00Z
+  enqueued_at: 2026-10-22T06:00:00Z
   status: in_progress
-  approved_at: 2026-10-25T05:41:02Z
+  approved_at: 2026-10-22T05:41:02Z
   approved_by: demo-user
   notes: "BLOCKED (owner decision needed): form asks for a start date format the profile does not cover"
 - company: Quarry Digital
@@ -39,11 +39,11 @@
   variant: variants/quarry-qa/resume.tex
   pr: https://github.com/demo-user/resume/pull/120
   pr_number: 120
-  enqueued_at: 2026-10-21T06:00:00Z
+  enqueued_at: 2026-09-22T06:00:00Z
   status: submitted
-  approved_at: 2026-10-21T05:52:40Z
+  approved_at: 2026-09-22T05:52:40Z
   approved_by: demo-user
-  submitted_at: 2026-10-22
+  submitted_at: 2026-10-21
   sent: "variant PDF + profile answers via the company ATS"
   route: company ATS
-  notes: submitted on 2026-10-22
+  notes: submitted on 2026-10-21

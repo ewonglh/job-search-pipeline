@@ -169,13 +169,14 @@ Same five lanes, same split, different scheduler.
 ### Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes/main/install.sh | bash
+curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
 hermes model          # pick a model, 64K context minimum
 ```
 
-The install is a one-liner and `hermes model` is the onboarding step. Verify both
-against the Hermes docs before relying on them, and see the unverified list
-below.
+The upstream repo is `NousResearch/hermes-agent` (not `NousResearch/hermes`,
+which does not exist). After install, `hermes setup` is the onboarding step and
+`hermes model` picks the model. 64K context minimum is a Hermes requirement, not
+this project's.
 
 ### Skills
 
@@ -207,17 +208,20 @@ hermes cron create "0 9 * * *" \
 `[SILENT]` in a skill's output suppresses the notification when there is nothing
 to report, which stops a quiet day from paging you.
 
-### What is unverified for Hermes
+### What is verified for Hermes
 
-Three claims in this track come from Hermes documentation rather than a run on
-this machine. Treat them as close but not certain:
+Checked against the live Hermes docs on 2026-11-05, not assumed:
 
-1. The exact install one-liner URL.
-2. Whether `--workdir` is the correct flag name for Hermes cron.
-3. Whether `[SILENT]` is honoured for every skill output or only some.
+1. The install one-liner: `https://hermes-agent.nousresearch.com/install.sh`
+   returns HTTP 200. There is no `NousResearch/hermes` repo; the project is
+   `NousResearch/hermes-agent`.
+2. `--skill`, `--timezone`, `--workdir`, `--no-agent`, and `--script` are all
+   documented `hermes cron create` flags.
+3. `[SILENT]` in an agent response suppresses delivery and still saves output to
+   `~/.hermes/cron/output/`.
 
-The lane logic is identical to Track 2, so if a flag is wrong the fix is a flag
-name, not a redesign.
+Not verified: a full lane run on a machine with Hermes installed. The lane logic
+is identical to Track 2, so a wrong flag is a rename, not a redesign.
 
 ---
 

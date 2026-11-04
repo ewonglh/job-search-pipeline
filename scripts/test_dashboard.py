@@ -204,8 +204,9 @@ def test_no_pii_live():
             if len(val) >= 4 and val in html:
                 leaked.append(val[:32])
     assert not leaked, f"PII leaked into dashboard HTML: {leaked}"
-    for needle in ("Prince George", "118424", "9123 4567", "alex.morgan@example.com",
-                   "Alex Morgan", "2005-09-29"):
+    # Synthetic sentinels only. These must never appear in rendered output.
+    for needle in ("Northfield University", "S9912345Z", "9123 4567",
+                   "alex.morgan@example.com", "Alex Morgan", "2008-03-14"):
         assert needle not in html, f"PII in render: {needle}"
 
 
@@ -217,7 +218,7 @@ def test_no_pii_renderer():
             "sankey": {"left": [], "right": [], "flows": []},
             "generated": "2026-10-08T00:00:00"}
     html = d.render_html(data)
-    assert "118424" not in html and "Prince George" not in html
+    assert "S9912345Z" not in html and "Northfield University" not in html
     assert "dataset.board" in html   # self-contained, minimal JS
 
 
