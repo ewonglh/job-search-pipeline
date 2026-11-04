@@ -1,0 +1,57 @@
+# Fit-ranking rubric for rank.py (mechanical half of the fit-ranking lane).
+#
+# Weights sum to 100. Each dimension scores 0.0-1.0; the posting score is the
+# weighted sum (0-100, rounded). Every scored line carries its top contributing
+# reasons; veto hits exclude the posting with a reason instead of a score.
+#
+# Calibration (owner, 2026-10-20): skipped.yaml shows eligibility (citizenship,
+# year-of-study, availability window) as the dominant historical skip driver,
+# followed by fit (weak skill overlap, off-profile roles). Skill overlap hence
+# carries the largest weight; grad-year + availability together match it.
+# Freshness and source are tie-breakers only. Never invent profile facts: the
+# skill sets below come from repo data/profile.yaml + master/resume.tex only.
+
+# Skill overlap between profile skills and JD skill keywords (0-40 pts).
+weight_skill_overlap: 40
+# JD-side keyword universe to look for (lowercase; matched case-insensitively).
+jd_skills: [python, java, javascript, typescript, sql, c++, spring, node, fastapi, react, pytorch, opencv, transformers, machine learning, deep learning, computer vision, data structures, algorithms, rest api, postgresql, mongodb, redis, docker, git, linux, ci/cd, go, rust, kotlin, swift, flutter, android, ios, backend, frontend, full stack, devops, cloud, aws, gcp, azure]
+# Owner's evidenced skills (master/resume.tex TECHNICAL SKILLS, 2026-10-20).
+profile_skills: [python, java, javascript, sql, c++, spring, node, fastapi, pytorch, opencv, transformers, machine learning, deep learning, computer vision, data structures, algorithms, rest api, postgresql, mongodb, redis, docker, git, linux, backend]
+
+# Grad-year / year-of-study alignment vs JD requirements (0-20 pts).
+weight_grad_year: 20
+# Mild year-of-study signals (non-veto): penultimate/final-year asks score 0.4.
+gradyear_flags: [penultimate, final year, final-year, graduating in 2026, class of 2026, year 3, third year]
+
+# Availability-window fit vs May-Aug 2027 / Jun-Dec 2027 (0-15 pts).
+weight_availability: 15
+# Window phrases scoring full marks (compatible with the owner windows).
+window_good: [may 2027, jun 2027, june 2027, jul 2027, july 2027, aug 2027, h2 2027, second half, summer 2027, dec 2027, from may, 9 may]
+# Window phrases scoring half marks (H1/6-month asks vs a 3-month preference).
+window_half: [jan 2027, h1 2027, 6-month, 6 month, six-month, six month, minimum 6, jan-jun, jan to jul]
+
+# Location fit: SG / remote (0-15 pts). The pipeline pre-filters SG, so the default is full marks.
+weight_location: 15
+# Phrases suggesting the role is NOT Singapore-based (score 0.3).
+location_bad: [relocation, relocate, overseas posting, based in malaysia, based in india, kuala lumpur, jakarta, bangalore, work from india]
+
+# Posting freshness from `added` (0-5 pts): <=7d full, <=14d 0.75, <=30d 0.5, older/missing 0.25.
+weight_freshness: 5
+
+# Source priority when `source` present, else neutral 0.5 (0-5 pts).
+weight_source: 5
+# Full-marks sources (direct SG board / company route).
+source_good: [internsg]
+# Half-plus sources (aggregator; still a real posting).
+source_half: [linkedin]
+
+# Hard vetoes (regex over role + JD text; hit = excluded with reason).
+# Default set: requires-graduation, citizenship/clearance, 5+ years, immediate full-time start.
+veto_requires_graduation: \b(completed\s+(a\s+)?bachelor|bachelor'?s\s+degree\s+(required|completed)|must\s+have\s+graduated|fresh\s+graduate(?!\s+pursuing)|degree\s+holder|graduated\s+with)
+veto_requires_graduation_reason: requires completed degree/graduation
+veto_clearance_citizenship: (security\s+clearance|singapore\s+citizen|singaporean\s+only|only\s+for\s+singapore|must\s+be\s+a?\s*singapore)
+veto_clearance_citizenship_reason: requires citizenship/security clearance
+veto_seniority: \b([5-9]|1[0-9])\s*\+?\s*(years?|yrs?)\s+(of\s+)?(experience|exp\b)
+veto_seniority_reason: demands 5+ years experience
+veto_immediate_fulltime: (immediate\s+(start|availability|joining)|join\s+immediately|full[- ]time\s+(position|role|employment|headcount)(?!\s+intern)|permanent\s+(role|position|headcount))
+veto_immediate_fulltime_reason: immediate full-time/permanent start

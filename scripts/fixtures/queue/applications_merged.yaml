@@ -1,0 +1,32 @@
+# Fixture tracker for test_queue.py (offline; no network).
+# Represents applications.yaml on main after the PRs in merged_prs.json merged.
+- company: Lumen AI
+  role: Founding AI / Full-stack Engineer Intern
+  link: https://www.internsg.com/job/lumen-ai-backend-intern-engineer-intern
+  source: InternSG
+  status: applied
+  applied_date: 2026-10-06
+  variant: variants/lumen-ai-backend-intern/resume.tex
+  pr: https://github.com/demo-user/resume/pull/9
+- company: Quantum Co
+  role: Software Engineer Intern
+  link: https://example.com/jobs/quantum
+  source: LinkedIn
+  status: Tailored
+  variant: variants/quantum-co-swe/resume.tex
+  pr: https://github.com/demo-user/resume/pull/12
+- company: Acme Corp
+  role: Backend Engineer Intern
+  link: https://example.com/jobs/acme
+  source: InternSG
+  status: applied
+  applied_date: 2026-10-06
+  variant: variants/acme-backend/resume.tex
+  pr: https://github.com/demo-user/resume/pull/13
+- company: Ghost Co
+  role: Backend Engineer Intern
+  link: https://www.internsg.com/job/ghost-co-backend
+  source: InternSG
+  status: Tailored
+  variant: variants/ghost-co-swe/resume.tex
+  pr: https://github.com/demo-user/resume/pull/14

@@ -1,0 +1,23 @@
+[
+  {
+    "company": "Iota Inc",
+    "role": "Cloud Intern",
+    "link": "https://example.com/jobs/iota",
+    "source": "InternSG",
+    "added": "2026-10-06"
+  },
+  {
+    "company": "Kappa Pte Ltd",
+    "role": "Security Intern",
+    "link": "https://example.com/jobs/kappa",
+    "source": "InternSG",
+    "added": "2026-10-05"
+  },
+  {
+    "company": "Acme Corp",
+    "role": "Backend Engineer Intern",
+    "link": "https://example.com/jobs/acme?utm_source=x",
+    "source": "InternSG",
+    "added": "2026-10-06"
+  }
+]

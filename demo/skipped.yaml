@@ -1,0 +1,22 @@
+# Postings the owner chose not to apply to, and why. Synthetic demo entry.
+#
+# This is the durable record of deliberate skips only. It exists so a skipped
+# posting is not rediscovered and re-proposed every discovery cycle, and so the
+# reason survives for a later reconsideration.
+#
+# Fields:
+#   company, role, link   the posting
+#   pr_number             tailoring PR, if one was opened
+#   skipped_at            ISO date of the decision
+#   skip_kind             owner_decision | fit | eligibility
+#   reason                why, in the owner's words where possible
+#   revisit_if            what would make this worth re-proposing
+
+- company: Driftwood Media
+  role: Marketing Intern
+  link: https://example.com/jobs/driftwood-marketing
+  pr_number: 0
+  skipped_at: '2026-10-15'
+  skip_kind: fit
+  reason: Marketing role, not a software engineering internship.
+  revisit_if: A software engineering or data role opens at the same company.

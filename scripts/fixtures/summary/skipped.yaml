@@ -1,0 +1,16 @@
+# Fixture owner-skip list for test_summary.py (offline; no network).
+# Fixed "today" in the tests is 2026-10-06.
+- company: Mu Corp
+  role: QA Intern
+  link: https://example.com/jobs/mu
+  pr_number: 7
+  skipped_at: 2026-10-05
+  skip_kind: fit
+  reason: Owner judgement - not a good fit.
+- company: Nu Pte Ltd
+  role: Support Intern
+  link: https://example.com/jobs/nu
+  pr_number: 8
+  skipped_at: 2026-10-04
+  skip_kind: eligibility
+  reason: Requires penultimate year.

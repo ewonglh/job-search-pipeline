@@ -1,0 +1,8 @@
+- company: Skipped Co
+  role: Frontend Intern
+  link: https://example.com/jobs/skipped
+  pr_number: 0
+  skipped_at: '2026-10-15'
+  skip_kind: owner_decision
+  reason: 'Fixture skip.'
+  revisit_if: Never.

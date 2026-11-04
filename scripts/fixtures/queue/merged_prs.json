@@ -1,0 +1,125 @@
+[
+  {
+    "number": 56,
+    "title": "docs: add RULES.md (standing operating rules)",
+    "headRefName": "docs/rules-md",
+    "mergedAt": "2026-10-06T04:07:22Z",
+    "url": "https://github.com/demo-user/resume/pull/56",
+    "mergeCommit": {
+      "oid": "oid56"
+    },
+    "files": [
+      {
+        "path": "RULES.md"
+      }
+    ],
+    "mergedBy": {
+      "login": "demo-user"
+    }
+  },
+  {
+    "number": 9,
+    "title": "app(lumen-ai): tailored 1-page resume variant — Founding AI / Full-stack Engineer Intern",
+    "headRefName": "app/lumen-ai",
+    "mergedAt": "2026-10-06T04:57:32Z",
+    "url": "https://github.com/demo-user/resume/pull/9",
+    "mergeCommit": {
+      "oid": "oid9"
+    },
+    "files": [
+      {
+        "path": ".gitignore"
+      },
+      {
+        "path": "applications.yaml"
+      },
+      {
+        "path": "templates/jakes-resume.tex"
+      },
+      {
+        "path": "variants/lumen-ai-backend-intern/resume.pdf"
+      },
+      {
+        "path": "variants/lumen-ai-backend-intern/resume.tex"
+      },
+      {
+        "path": "variants/lumen-ai-backend-intern/notes.md"
+      }
+    ],
+    "mergedBy": {
+      "login": "demo-user"
+    }
+  },
+  {
+    "number": 12,
+    "title": "app(quantum-co): tailored 1-page resume variant — Software Engineer Intern",
+    "headRefName": "app/quantum-co-swe",
+    "mergedAt": "2026-10-06T06:00:00Z",
+    "url": "https://github.com/demo-user/resume/pull/12",
+    "mergeCommit": {
+      "oid": "oid12"
+    },
+    "files": [
+      {
+        "path": "applications.yaml"
+      },
+      {
+        "path": "variants/quantum-co-swe/resume.tex"
+      },
+      {
+        "path": "variants/quantum-co-swe/resume.pdf"
+      },
+      {
+        "path": "variants/quantum-co-swe/notes.md"
+      }
+    ],
+    "mergedBy": {
+      "login": "demo-user"
+    }
+  },
+  {
+    "number": 13,
+    "title": "tracker(acme): record submission",
+    "headRefName": "app/acme-tracker",
+    "mergedAt": "2026-10-06T06:30:00Z",
+    "url": "https://github.com/demo-user/resume/pull/13",
+    "mergeCommit": {
+      "oid": "oid13"
+    },
+    "files": [
+      {
+        "path": "applications.yaml"
+      },
+      {
+        "path": "data/profile.yaml"
+      }
+    ],
+    "mergedBy": {
+      "login": "demo-user"
+    }
+  },
+  {
+    "number": 14,
+    "title": "app(ghost-co): tailored 1-page resume variant — Backend Engineer Intern",
+    "headRefName": "app/ghost-co-swe",
+    "mergedAt": "2026-10-06T07:30:00Z",
+    "url": "https://github.com/demo-user/resume/pull/14",
+    "mergeCommit": {
+      "oid": "oid14"
+    },
+    "files": [
+      {
+        "path": "variants/ghost-co-swe/resume.tex"
+      },
+      {
+        "path": "variants/ghost-co-swe/resume.txt"
+      },
+      {
+        "path": "variants/ghost-co-swe/notes.md"
+      }
+    ],
+    "mergedBy": {
+      "login": "demo-user"
+    }
+  }
+]

@@ -1,0 +1,11 @@
+<html><head><style>.jd { color: red; }</style>
+<script>document.cookie = "stolen";</script></head>
+<body>
+<!-- recruiter note: not part of the posting -->
+<div class="jd">
+<p>Software Engineer Intern in Singapore. Python and SQL.</p>
+<div style="display:none">secret bidder text <a href="https://evil.example/pick-me">pick me</a></div>
+<span style="position:absolute; left:-9999px">offscreen keyword stuffing</span>
+<p aria-hidden="true">screen-reader-only decoy</p>
+</div>
+</body></html>

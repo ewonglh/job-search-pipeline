@@ -1,0 +1,182 @@
+[
+  {
+    "company": "Lumen AI",
+    "role": "Backend Engineer Intern",
+    "link": "https://example.com/jobs/lumen-ai-backend",
+    "source": "InternSG",
+    "location": "Singapore",
+    "posted": "2026-10-28",
+    "added": "2026-10-29"
+  },
+  {
+    "company": "Harbourline Consulting",
+    "role": "Software Engineer Intern",
+    "link": "https://example.com/jobs/harbourline-swe",
+    "source": "InternSG",
+    "location": "Singapore",
+    "posted": "2026-10-27",
+    "added": "2026-10-28"
+  },
+  {
+    "company": "Cobalt Labs",
+    "role": "Full-Stack Developer Intern",
+    "link": "https://example.com/jobs/cobalt-fullstack",
+    "source": "LinkedIn",
+    "location": "Singapore",
+    "posted": "2026-10-26",
+    "added": "2026-10-27"
+  },
+  {
+    "company": "Meridian Freight",
+    "role": "Data Engineer Intern",
+    "link": "https://example.com/jobs/meridian-data",
+    "source": "CareersPage",
+    "location": "Singapore",
+    "posted": "2026-10-25",
+    "added": "2026-10-26"
+  },
+  {
+    "company": "Northwind Bank",
+    "role": "Machine Learning Intern",
+    "link": "https://example.com/jobs/northwind-ml",
+    "source": "InternSG",
+    "location": "Singapore",
+    "posted": "2026-10-24",
+    "added": "2026-10-25"
+  },
+  {
+    "company": "Orion Games",
+    "role": "Game Programmer Intern",
+    "link": "https://example.com/jobs/orion-games",
+    "source": "LinkedIn",
+    "location": "Singapore",
+    "posted": "2026-10-23",
+    "added": "2026-10-24"
+  },
+  {
+    "company": "Tessellate Studio",
+    "role": "Frontend Developer Intern",
+    "link": "https://example.com/jobs/tessellate-frontend",
+    "source": "CareersPage",
+    "location": "Singapore",
+    "posted": "2026-10-22",
+    "added": "2026-10-23"
+  },
+  {
+    "company": "Bluepeak Systems",
+    "role": "DevOps Intern",
+    "link": "https://example.com/jobs/bluepeak-devops",
+    "source": "InternSG",
+    "location": "Singapore",
+    "posted": "2026-10-21",
+    "added": "2026-10-22"
+  },
+  {
+    "company": "Kestrel Analytics",
+    "role": "Data Analyst Intern",
+    "link": "https://example.com/jobs/kestrel-analyst",
+    "source": "LinkedIn",
+    "location": "Singapore",
+    "posted": "2026-10-20",
+    "added": "2026-10-21"
+  },
+  {
+    "company": "Vantage Robotics",
+    "role": "Computer Vision Intern",
+    "link": "https://example.com/jobs/vantage-cv",
+    "source": "CareersPage",
+    "location": "Singapore",
+    "posted": "2026-10-19",
+    "added": "2026-10-20"
+  },
+  {
+    "company": "Ironbark Security",
+    "role": "Security Engineering Intern",
+    "link": "https://example.com/jobs/ironbark-sec",
+    "source": "InternSG",
+    "location": "Singapore",
+    "posted": "2026-10-18",
+    "added": "2026-10-19"
+  },
+  {
+    "company": "Solstice Payments",
+    "role": "Platform Engineer Intern",
+    "link": "https://example.com/jobs/solstice-platform",
+    "source": "LinkedIn",
+    "location": "Singapore",
+    "posted": "2026-10-17",
+    "added": "2026-10-18"
+  },
+  {
+    "company": "Juniper Health",
+    "role": "Mobile App Developer Intern",
+    "link": "https://example.com/jobs/juniper-mobile",
+    "source": "CareersPage",
+    "location": "Singapore",
+    "posted": "2026-10-16",
+    "added": "2026-10-17"
+  },
+  {
+    "company": "Quarry Digital",
+    "role": "QA Automation Intern",
+    "link": "https://example.com/jobs/quarry-qa",
+    "source": "InternSG",
+    "location": "Singapore",
+    "posted": "2026-10-15",
+    "added": "2026-10-16"
+  },
+  {
+    "company": "Driftwood Media",
+    "role": "Marketing Intern",
+    "link": "https://example.com/jobs/driftwood-marketing",
+    "source": "LinkedIn",
+    "location": "Singapore",
+    "posted": "2026-10-14",
+    "added": "2026-10-15"
+  },
+  {
+    "company": "Granite Insurance",
+    "role": "Business Analyst Intern",
+    "link": "https://example.com/jobs/granite-ba",
+    "source": "CareersPage",
+    "location": "Singapore",
+    "posted": "2026-10-13",
+    "added": "2026-10-14"
+  },
+  {
+    "company": "Alkali Semiconductor",
+    "role": "Software Engineer Intern",
+    "link": "https://example.com/jobs/alkali-swe",
+    "source": "InternSG",
+    "location": "Singapore",
+    "posted": "2026-10-12",
+    "added": "2026-10-13"
+  },
+  {
+    "company": "Mosswood Retail",
+    "role": "Backend Intern",
+    "link": "https://example.com/jobs/mosswood-backend",
+    "source": "LinkedIn",
+    "location": "Singapore",
+    "posted": "2026-10-11",
+    "added": "2026-10-12"
+  },
+  {
+    "company": "Pelagic Cloud",
+    "role": "Cloud Engineer Intern",
+    "link": "https://example.com/jobs/pelagic-cloud",
+    "source": "CareersPage",
+    "location": "Singapore",
+    "posted": "2026-10-10",
+    "added": "2026-10-11"
+  },
+  {
+    "company": "Aurora Semantics",
+    "role": "AI Engineer Intern",
+    "link": "https://example.com/jobs/aurora-ai",
+    "source": "InternSG",
+    "location": "Singapore",
+    "posted": "2026-10-09",
+    "added": "2026-10-10"
+  }
+]

@@ -1,0 +1,92 @@
+# Applications tracker. Synthetic demo rows, one per stage of the funnel.
+# This is the canonical record: an application that is not here was not
+# submitted. Status names are the canonical funnel stages, plus Tailored for a
+# variant that is written but not sent.
+- company: Lumen AI
+  role: Founding AI Engineer Intern
+  link: https://example.com/jobs/lumen-ai-founding
+  source: InternSG
+  status: Accepted
+  applied_date: 2026-09-02
+  variant: variants/lumen-ai-founding/resume.tex
+  pr: https://github.com/demo-user/resume/pull/101
+  notes: Offer received, awaiting written confirmation from the recruiter.
+- company: Harbourline Consulting
+  role: Software Engineer Intern
+  link: https://example.com/jobs/harbourline-swe
+  source: InternSG
+  status: Interview
+  applied_date: 2026-09-15
+  variant: variants/harbourline-swe/resume.tex
+  pr: https://github.com/demo-user/resume/pull/102
+  notes: Second round scheduled for next week.
+- company: Northwind Bank
+  role: Machine Learning Intern
+  link: https://example.com/jobs/northwind-ml
+  source: CareersPage
+  status: OA
+  applied_date: 2026-09-22
+  variant: variants/northwind-ml/resume.tex
+  pr: https://github.com/demo-user/resume/pull/103
+  notes: Online assessment link valid for 7 days.
+- company: Meridian Freight
+  role: Data Engineer Intern
+  link: https://example.com/jobs/meridian-data
+  source: InternSG
+  status: Callback
+  applied_date: 2026-09-28
+  variant: variants/meridian-data/resume.tex
+  pr: https://github.com/demo-user/resume/pull/104
+  notes: Recruiter asked for availability and transcript.
+- company: Cobalt Labs
+  role: Full-Stack Developer Intern
+  link: https://example.com/jobs/cobalt-fullstack
+  source: LinkedIn
+  status: Applied
+  applied_date: 2026-10-05
+  variant: variants/cobalt-fullstack/resume.tex
+  pr: https://github.com/demo-user/resume/pull/105
+- company: Orion Games
+  role: Game Programmer Intern
+  link: https://example.com/jobs/orion-games
+  source: LinkedIn
+  status: Applied
+  applied_date: 2026-10-09
+  variant: variants/orion-games/resume.tex
+  pr: https://github.com/demo-user/resume/pull/106
+- company: Tessellate Studio
+  role: Frontend Developer Intern
+  link: https://example.com/jobs/tessellate-frontend
+  source: CareersPage
+  status: Applied
+  applied_date: 2026-10-12
+  variant: variants/tessellate-frontend/resume.tex
+  pr: https://github.com/demo-user/resume/pull/107
+- company: Bluepeak Systems
+  role: DevOps Intern
+  link: https://example.com/jobs/bluepeak-devops
+  source: InternSG
+  status: Tailored
+  variant: variants/bluepeak-devops/resume.tex
+  pr: https://github.com/demo-user/resume/pull/108
+  notes: PR open, waiting on review before the merge that enqueues it.
+- company: Ironbark Security
+  role: Security Engineering Intern
+  link: https://example.com/jobs/ironbark-sec
+  source: InternSG
+  status: Rejected
+  applied_date: 2026-09-05
+  rejected_date: 2026-09-19
+  variant: variants/ironbark-sec/resume.tex
+  pr: https://github.com/demo-user/resume/pull/109
+  notes: Rejection email, no reason given.
+- company: Solstice Payments
+  role: Platform Engineer Intern
+  link: https://example.com/jobs/solstice-platform
+  source: LinkedIn
+  status: Rejected
+  applied_date: 2026-09-11
+  rejected_date: 2026-10-02
+  variant: variants/solstice-platform/resume.tex
+  pr: https://github.com/demo-user/resume/pull/110
+  notes: Role closed after the posting went up.

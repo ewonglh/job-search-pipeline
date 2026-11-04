@@ -1,0 +1,15 @@
+Software Engineer Intern (Example Corp, Singapore)
+
+Example Corp is hiring a software engineering intern for Summer 2027 in
+Singapore. You will build backend services in Python with SQL, write tests,
+and ship with Docker and Git. Open to current undergraduates.
+
+What you will do:
+- Build and maintain backend endpoints with Python and SQL.
+- Write unit tests and review pull requests with the team.
+- Learn distributed systems fundamentals on real production services.
+
+What we ask for:
+- Pursuing a Bachelor's degree in Computer Science or a related field.
+- Familiar with Python, data structures and algorithms.
+- Available May to August 2027.

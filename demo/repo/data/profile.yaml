@@ -1,0 +1,42 @@
+# Synthetic demo data. Every person, employer, board and date here is
+# fictional. Do not put real data in this file.
+#
+# This is the resume repo's data/profile.yaml: the non-sensitive standing
+# answers a form asks for. Identity documents (DOB, national ID, address) do
+# NOT belong here or anywhere in a repo. See SANITIZATION.md.
+
+name: Alex Morgan
+formal_name: Alex Morgan
+first_name: Alex
+last_name: Morgan
+email: alex.morgan@example.com
+phone: "+65 6123 4567"
+linkedin: https://linkedin.com/in/example-handle
+github: https://github.com/example-handle
+university: Northfield University
+degree: Bachelor of Computing (Hons.) in Computer Science
+expected_graduation: "2029-05"
+gpa: "4.60/5.0"
+highest_education_completed: "GCE A Levels"
+city: "Singapore"
+country_of_residence: "Singapore"
+language_of_application: "English"
+university_start: "2025-08"
+current_year_sem: "Year 2, Semester 1"
+internship_dates: "9 May 2027 to 1 Aug 2027"
+availability: "9 May 2027 to 1 Aug 2027, full-time, five days a week (~12 weeks)."
+work_authorisation: "Student Pass holder, valid through Aug 2029; no employer sponsorship needed for a vacation internship."
+notice_period: "None"
+notice_period_picklist: "Not Applicable"
+credit_bearing_internship: "Yes"
+internship_commitment: "Full Time"
+how_heard: "LinkedIn"
+expected_salary: "SGD 1200 per month"
+cover_letter_policy: "Only when the posting asks for one"
+tailoring_policy: "Tailor every matching SWE-intern posting; the PR merge is the approval gate"
+submission_route: "Company careers site / ATS first; LinkedIn Easy Apply only as an asked-about fallback"
+
+declarations:
+  dismissed_or_terminated: "No"
+  bankrupt_or_undischarged: "No"
+  criminal_convictions: "No"

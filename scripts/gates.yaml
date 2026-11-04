@@ -1,0 +1,22 @@
+# Temporary posting gates: companies whose postings are held back from
+# tailoring/discovery selection until a date, with the reason.
+#
+# Fields:
+#   company_aliases: [str] - company names to match (case/space-insensitive).
+#   host:            str   - (optional) posting-link host suffix to match,
+#                            e.g. "lifeattiktok.com" (matches subdomains).
+#   gate_until:      str   - ISO date (YYYY-MM-DD); gate expires after it.
+#   reason:          str   - why the gate exists.
+#
+# Remove the entry (or let gate_until pass) to lift the gate.
+
+- company_aliases: [TikTok, ByteDance]
+  host: lifeattiktok.com
+  gate_until: "2027-01-01"
+  reason: >-
+    ByteDance/TikTok 'Undergraduate/Master Intern - 2027 Start' project caps
+    applications at 2 per window (2026-07-01 to 2026-12-31, per the portal
+    banner). Last slot spent 2026-10-25 on TikTok Frontend SWE Intern
+    (Global Live Transaction); hold further TikTok/ByteDance postings until
+    the window rolls over, then confirm the banner shows a fresh 2-slot
+    window before removing.

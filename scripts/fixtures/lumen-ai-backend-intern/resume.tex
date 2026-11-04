@@ -1,0 +1,91 @@
+\input{../../templates/resume.tex}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% VARIANT      : demo-variant
+% SYNTHETIC FIXTURE. Every name, handle, school and employer here is
+% fictional. It exists so test_tex2txt.py can pin the continuation
+% attribution bug without shipping anyone's real resume.
+% Exactly one page; built PDF committed alongside this source.
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\begin{document}
+
+%----------HEADING----------
+\begin{center}
+  \textbf{\Huge ALEX MORGAN} \\ \vspace{1pt}
+  \small Singapore $|$ +65 6123 4567 $|$ \href{mailto:alex.morgan@example.com}{alex.morgan@example.com} $|$
+  \href{https://linkedin.com/in/example-handle}{linkedin.com/in/example-handle} $|$
+  \href{https://github.com/example-handle}{github.com/example-handle}
+\end{center}
+
+\section{Education}
+  \resumeSubHeadingListStart
+    \resumeSubheading
+      {Northfield University}{Aug 2025 \textendash{} May 2029}
+      {Bachelor of Computing (Hons.) in Computer Science and Second Major in Statistics}{}
+      \resumeItemListStart
+        \resumeItem{Awarded Northfield Undergraduate Merit Scholarship for excellent academic performance}
+        \resumeItem{GPA: 4.60/5.0, Dean's List, AY2025-2026 Semester 1}
+      \resumeItemListEnd
+  \resumeSubHeadingListEnd
+
+\section{Work Experience}
+  \resumeSubHeadingListStart
+    \resumeSubheading
+      {Northfield University | Teaching Assistant}{Aug 2026 \textendash{} Present}
+      {}{}
+      \resumeItemListStart
+        \resumeItem{Lead Python tutorials and remedial sessions for 30\textendash{}50 students on recursion, higher-order functions and data structures.}
+      \resumeItemListEnd
+    \resumeSubheading
+      {Harbourline Consulting | Software Engineer Intern}{May 2026 \textendash{} Jul 2026}
+      {Document automation consultancy | Python, OpenCV, FastAPI, Docker, Qwen2.5-VL, LoRA}{}
+      \resumeItemListStart
+        \resumeItem{Built a document-processing pipeline (OpenCV + Qwen2.5-VL-3B) that detects passport regions and extracts MRZ fields, and fine-tuned the model with LoRA to 96\% document-level accuracy on the client test suite.}
+        \resumeItem{Improved extraction reliability on low-quality scans via MRZ line detection, thresholding, perspective correction and ICAO Document 9303 check-digit verification.}
+        \resumeItem{Exposed the pipeline through a FastAPI REST endpoint and a CLI for batch runs; containerized with Docker for reproducible deployment.}
+      \resumeItemListEnd
+  \resumeSubHeadingListEnd
+
+\section{Projects}
+  \resumeSubHeadingListStart
+    \resumeSubheading
+      {CampusNav, Northfield Bus App}{Sep 2026}
+      {TypeScript, React, Node.js, Vite, MapLibre GL JS, Valhalla pedestrian routing API, NFU internal bus API, GeoJSON}{}
+      \resumeItemListStart
+        \resumeItem{Built a React 19/TypeScript/Vite campus-navigation product supporting 729 Northfield venues and 8 shuttle routes over 33 stops, with ranked search and a validated canonical transit model.}
+        \resumeItem{Architected a pure journey planner combining walking and shuttle legs, a provider-neutral Valhalla routing adapter, and latest-request-wins state; covered by 236 passing Vitest tests across 36 files.}
+      \resumeItemListEnd
+    \resumeSubheading
+      {EcoCrew, Recycling Habit Game | LifeHack 2026}{Aug 2026}
+      {Vite, JavaScript, TypeScript/Deno, Supabase, PostgreSQL, OpenAI Responses API, Vitest}{}
+      \resumeItemListStart
+        \resumeItem{Architected and shipped a mobile-first Vite SPA with 20 page modules, integrating Supabase Auth/Postgres/Edge Functions and a deterministic localStorage demo mode.}
+        \resumeItem{Built an AI-assisted image-validation pipeline using ephemeral in-memory processing and strict OpenAI JSON Schema responses covering 5 disposal outcomes and 6 typed failure categories.}
+        \resumeItem{Designed 14 PostgreSQL migrations and RPCs with RLS constraints, and established quality gates with 121 passing unit tests across 29 files plus 5 SQL test suites.}
+      \resumeItemListEnd
+    \resumeSubheading
+      {RAG Q\&A Pipeline | National Hack}{May 2026}
+      {Python, PyTorch, Qwen-2.5-3B, BGE-M3, BM25}{}
+      \resumeItemListStart
+        \resumeItem{Built a retrieval-augmented generation pipeline with Qwen-2.5-3B for question answering across 50 documents, covering chunking, embedding and prompt construction.}
+        \resumeItem{Implemented hybrid retrieval combining dense vector search with sparse BM25, fused via Reciprocal Rank Fusion, and evaluated against a custom hackathon benchmark to guide iteration.}
+      \resumeItemListEnd
+    \resumeSubheading
+      {MakanHero, Leftover Food Marketplace}{May 2026 \textendash{} Aug 2026}
+      {React Native, Spring Boot, PostgreSQL, Redis, Cloudinary, Stripe}{}
+      \resumeItemListStart
+        \resumeItem{Implemented Stripe checkout and webhook handling for successful, failed and expired sessions with signature verification, event deduplication and inventory restoration.}
+        \resumeItem{Built a personalised ranking endpoint scoring a 200-product candidate pool on five signals, and developed most of a 35-test PostgreSQL Testcontainers suite with its GitHub Actions workflow.}
+      \resumeItemListEnd
+  \resumeSubHeadingListEnd
+
+\section{Technical Skills}
+ \begin{itemize}[leftmargin=0.15in, label={}]
+    \small{\item{
+     \textbf{Languages}{: Python, TypeScript, JavaScript, SQL, Java, C++} \\
+     \textbf{AI / LLM}{: PyTorch, Transformers, LoRA, OpenCV, RAG, Qwen2.5-VL, OpenAI Responses API} \\
+     \textbf{Backend \& APIs}{: FastAPI, Node.js, Spring Boot, REST APIs, JWT, OAuth2, Stripe} \\
+     \textbf{Databases \& Tools}{: PostgreSQL, Redis, MongoDB, Docker, Git, Vitest, Testcontainers, GitHub Actions}
+    }}
+ \end{itemize}
+
+\end{document}

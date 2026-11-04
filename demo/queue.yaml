@@ -1,0 +1,49 @@
+# Application queue -- merged app/* tailoring PRs awaiting submission.
+# Managed by queue.py (stdlib only); do not hand-edit.
+# One item per merged tailoring PR. status: queued -> in_progress -> submitted | failed
+# Merging the variant PR IS the per-CV approval: approved_at/approved_by
+# are stamped automatically from the merge (mergedAt / mergedBy). No
+# separate go-ahead is needed before the drain submits the next item.
+# The canonical submission record lives in applications.yaml in your
+# resume repo.
+
+# Synthetic demo queue: one item at each interesting status.
+- company: Kestrel Analytics
+  role: Data Analyst Intern
+  source: LinkedIn
+  link: https://example.com/jobs/kestrel-analyst
+  variant: variants/kestrel-analyst/resume.tex
+  pr: https://github.com/demo-user/resume/pull/121
+  pr_number: 121
+  enqueued_at: 2026-10-24T06:00:00Z
+  status: queued
+  approved_at: 2026-10-24T05:58:11Z
+  approved_by: demo-user
+  notes: merged app/kestrel-analyst
+- company: Vantage Robotics
+  role: Computer Vision Intern
+  source: CareersPage
+  link: https://example.com/jobs/vantage-cv
+  variant: variants/vantage-cv/resume.tex
+  pr: https://github.com/demo-user/resume/pull/122
+  pr_number: 122
+  enqueued_at: 2026-10-25T06:00:00Z
+  status: in_progress
+  approved_at: 2026-10-25T05:41:02Z
+  approved_by: demo-user
+  notes: "BLOCKED (owner decision needed): form asks for a start date format the profile does not cover"
+- company: Quarry Digital
+  role: QA Automation Intern
+  source: InternSG
+  link: https://example.com/jobs/quarry-qa
+  variant: variants/quarry-qa/resume.tex
+  pr: https://github.com/demo-user/resume/pull/120
+  pr_number: 120
+  enqueued_at: 2026-10-21T06:00:00Z
+  status: submitted
+  approved_at: 2026-10-21T05:52:40Z
+  approved_by: demo-user
+  submitted_at: 2026-10-22
+  sent: "variant PDF + profile answers via the company ATS"
+  route: company ATS
+  notes: submitted on 2026-10-22

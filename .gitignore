@@ -1,0 +1,42 @@
+__pycache__/
+*.pyc
+*.pyo
+
+# Your real answers. Never commit.
+profile.local.yaml
+# Root-level live data. The synthetic copies in demo/ are tracked.
+/profile.yaml
+/queue.yaml
+/skipped.yaml
+/deadlines.yaml
+
+# Runtime state and caches
+/*_state.json
+/*_cache.json
+/rankings.json
+/pr_index_cache.json
+gmail_browser_state.json
+summary_state.json
+review_state.json
+
+# Built dashboard output
+/dashboard/
+/index.html
+
+# Agent working directories
+/work/
+/tailor-work/
+/inbox/
+/outbox/
+/cover-letters/
+/repo/
+/tw*/
+
+# Local logs
+*.log
+
+# Editor and OS noise
+.venv/
+.DS_Store
+*.bak
+*.broken

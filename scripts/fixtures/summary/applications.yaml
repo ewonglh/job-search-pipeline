@@ -1,0 +1,47 @@
+# Fixture tracker for test_summary.py (offline; no network).
+# Fixed "today" in the tests is 2026-10-06.
+- company: Acme Corp
+  role: Backend Engineer Intern
+  link: https://example.com/jobs/acme
+  source: InternSG
+  status: Applied
+  applied_date: 2026-10-06
+  variant: variants/acme-backend/resume.tex
+- company: Beta Pte Ltd
+  role: Software Engineer Intern
+  link: https://example.com/jobs/beta
+  source: LinkedIn
+  status: Applied
+  applied_date: 2026-09-20
+- company: Gamma Ltd
+  role: Data Engineer Intern
+  link: https://example.com/jobs/gamma
+  source: InternSG
+  status: Tailored
+  applied_date: 2026-10-06
+- company: Delta Corp
+  role: ML Intern
+  link: https://example.com/jobs/delta
+  source: LinkedIn
+  status: Interview
+  applied_date: 2026-09-25
+- company: Epsilon Pte Ltd
+  role: QA Intern
+  link: https://example.com/jobs/epsilon
+  status: Offer
+  applied_date: 2026-09-10
+- company: Zeta Systems
+  role: DevOps Intern
+  link: https://example.com/jobs/zeta
+  status: Rejected
+  applied_date: 2026-09-01
+- company: Eta Labs
+  role: Frontend Intern
+  link: https://example.com/jobs/eta
+  status: withdrawn
+  applied_date: 2026-09-02
+- company: Theta Co
+  role: Platform Intern
+  link: https://example.com/jobs/theta
+  status: to_apply
+  applied_date: 2026-10-03
