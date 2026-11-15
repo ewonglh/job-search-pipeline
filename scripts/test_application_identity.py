@@ -59,4 +59,23 @@ alias_role_conflict = identity.resolve_applications(
 assert any(item["reason"] == "explicit_alias_identity_conflict"
            for item in alias_role_conflict["conflicts"])
 
+# Contradictory PR fields quarantine every connected strong-ID route.
+contradictory = identity.resolve_applications(
+    [dict(tracker[0], pr_number=8)],
+    queue + [dict(queue[0], link="https://jobs.example/other", pr_number=8)])
+assert not contradictory["applications"], contradictory
+assert not contradictory["alias_to_canonical"], contradictory
+assert contradictory["conflicts"][0]["reason"] == "contradictory_row_prs"
+
+# An explicit alias sharing an exact link is emitted once, with its evidence.
+explicit = identity.resolve_applications(tracker, queue, explicit_aliases=[{
+    "aliases": ["pr:7", "link:https://jobs.example/role?job_id=42"],
+    "canonical_id": "application:reviewed", "reason": "owner confirmed",
+    "evidence": "synthetic submission receipt"}])
+assert list(explicit["applications"]) == ["application:reviewed"], explicit
+assert not explicit["conflicts"], explicit
+assert explicit["applications"]["application:reviewed"]["resolution"] == {
+    "method": "explicit_alias", "reason": "owner confirmed",
+    "evidence": "synthetic submission receipt"}
+
 print("test_application_identity: all assertions passed")

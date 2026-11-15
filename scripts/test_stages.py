@@ -234,6 +234,17 @@ try:
     ], "coverage": {"complete": False}}
     _write(evidence_path, json.dumps(ledger))
     snapshot = _read(path)
+    # A valid transition mixed with malformed rows must leave tracker bytes intact.
+    for malformed in (None, {"event_type": "interview_invitation"}):
+        _write(evidence_path, json.dumps(dict(ledger, events=[malformed] + ledger["events"])))
+        with open(path, "rb") as stream:
+            tracker_bytes = stream.read()
+        rc, out = _run(["apply-evidence", "--tracker", path, "--ledger", evidence_path,
+                        "--today", "2026-10-31", "--commit", "--json-out"])
+        assert rc == 2 and "malformed" in out, (rc, out)
+        with open(path, "rb") as stream:
+            assert stream.read() == tracker_bytes
+    _write(evidence_path, json.dumps(ledger))
     rc, out = _run(["apply-evidence", "--tracker", path, "--ledger", evidence_path,
                     "--today", "2026-10-31", "--commit", "--json-out"])
     assert rc == 0, out

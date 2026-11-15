@@ -52,16 +52,23 @@ def normalize_posting_url(value: object) -> str:
         return ""
 
 
-def pr_number(row: dict) -> int:
-    value = row.get("pr_number")
-    if value not in (None, ""):
-        match = re.fullmatch(r"[1-9]\d*", str(value))
+def _pr_numbers(row: dict) -> set[int]:
+    numbers = set()
+    for key in ("pr_number", "pr"):
+        value = str(row.get(key) or "")
+        match = re.fullmatch(r"[1-9]\d*", value)
+        if match is None and key == "pr":
+            match = re.search(r"/pull/([1-9]\d*)(?:[/?#]|$)", value)
         if match:
-            return int(match.group(0))
-    legacy=str(row.get('pr') or '')
-    if re.fullmatch(r'[1-9]\d*',legacy):return int(legacy)
-    match = re.search(r"/pull/(\d+)(?:[/?#]|$)", legacy)
-    return int(match.group(1)) if match else 0
+            numbers.add(int(match.group(1) if match.lastindex else match.group(0)))
+    return numbers
+
+
+def pr_number(row: dict) -> int:
+    numbers = _pr_numbers(row)
+    if len(numbers) > 1:
+        raise ValueError("contradictory PR references in application row")
+    return next(iter(numbers), 0)
 
 
 def application_id(row: dict) -> str:
@@ -110,9 +117,7 @@ def _row_aliases(row: dict) -> set[str]:
     link = normalize_posting_url(row.get("link"))
     if link:
         aliases.add("link:" + link)
-    number = pr_number(row)
-    if number:
-        aliases.add("pr:" + str(number))
+    aliases.update("pr:" + str(number) for number in _pr_numbers(row))
     identity = _identity_alias(row)
     if identity:
         aliases.add(identity)
@@ -157,6 +162,28 @@ def resolve_applications(tracker_rows: list[dict], queue_rows: list[dict],
                           "aliases": sorted(aliases), "detail": detail})
         diagnostics[reason] += 1
         consumed.update(indexes)
+
+    # A contradictory row must not retain a route through another row's link
+    # or PR. Quarantine its whole connected strong-ID component first.
+    strong_owners = defaultdict(set)
+    for index, record in enumerate(records):
+        for alias in record["aliases"]:
+            if alias.startswith(("link:", "pr:")):
+                strong_owners[alias].add(index)
+    for index, record in enumerate(records):
+        if index in consumed or len(_pr_numbers(record["row"])) < 2:
+            continue
+        indexes, pending = set(), [index]
+        while pending:
+            current = pending.pop()
+            if current in indexes:
+                continue
+            indexes.add(current)
+            for alias in records[current]["aliases"]:
+                pending.extend(strong_owners.get(alias, set()) - indexes)
+        aliases = set().union(*(records[i]["aliases"] for i in indexes))
+        emit_conflict("contradictory_row_prs", sorted(indexes), aliases,
+                      "A row contains contradictory PR references; related strong IDs are quarantined.")
 
     # Explicit, evidence-backed aliases are applied before automatic matching
     # so they can deliberately resolve otherwise quarantined link/PR groups.
@@ -219,6 +246,8 @@ def resolve_applications(tracker_rows: list[dict], queue_rows: list[dict],
     # one distinct row. Multiple rows with the same link can be contradictory.
     by_link = defaultdict(list)
     for index, record in enumerate(records):
+        if index in consumed:
+            continue
         link_ids = [alias for alias in record["aliases"] if alias.startswith("link:")]
         if len(link_ids) == 1:
             by_link[link_ids[0]].append(index)

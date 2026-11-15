@@ -521,6 +521,8 @@ def cmd_apply_evidence(args, log):
         if not isinstance(doc, dict) or doc.get("schema") != 1:
             raise ValueError("unsupported evidence ledger schema")
         events, quarantined, diagnostics = evidence.effective_events(doc)
+        if diagnostics.get("events_missing_event_id"):
+            raise ValueError("evidence ledger contains malformed rows or missing event IDs")
         lines, apps = read_apps(args.tracker)
     except (OSError, ValueError, TypeError) as exc:
         log(f"stages: cannot read evidence ledger: {exc}")
