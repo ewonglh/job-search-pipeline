@@ -61,6 +61,12 @@ assert abs(sum(RUBRIC["weights"].values()) - 100) < 1e-9, RUBRIC["weights"]
 assert len(RUBRIC["vetoes"]) == 2, RUBRIC["vetoes"]
 assert "python" in RUBRIC["profile_skills"] and "java" in RUBRIC["profile_skills"]
 
+# Exact cohort alignment must not lower a posting below an unrestricted one.
+matching_cohort = r.dim_gradyear("applicants must be in year 2 and graduate in 2028.", RUBRIC)
+unrestricted_cohort = r.dim_gradyear("open to students; no cohort restriction.", RUBRIC)
+assert matching_cohort[0] == unrestricted_cohort[0] == 1.0
+assert "profile cohort matches" in matching_cohort[1][0]
+
 # ---------------------------------------------------------------- veto hits
 for text, name in [(JD_SENIOR, "seniority"),
                    (JD_NOW, "immediate_fulltime")]:

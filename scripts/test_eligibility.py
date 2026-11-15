@@ -99,6 +99,33 @@ TABLE = [
      "This internship must be credit-bearing.", "ineligible", "credit_conflict"),
     ("school approval fits", PROFILE_B, PROFILE_B_TEXT,
      "This must be a school-approved internship.", "eligible", "school_approval_match"),
+    ("optional clause cannot cancel authorization", PROFILE_B, PROFILE_B_TEXT,
+     "Applicants must be authorized to work in Singapore, although a Bachelor's degree is not required.",
+     "ineligible", "work_authorisation_conflict"),
+    ("preferred clause cannot cancel authorization", PROFILE_B, PROFILE_B_TEXT,
+     "A Bachelor's degree is preferred, but applicants must be authorized to work in Singapore.",
+     "ineligible", "work_authorisation_conflict"),
+    ("supported fit cannot hide unsupported dates", PROFILE_A, PROFILE_A_TEXT,
+     "Internship period: 9 May 2027 to 1 August 2027. "
+     "Internship dates are fixed: 05/09/2027 to 08/01/2028.",
+     "unknown", "unsupported_date_format"),
+    ("explicit date conflict survives unsupported dates", PROFILE_B, PROFILE_B_TEXT,
+     "Internship period: 9 May 2027 to 1 August 2027. "
+     "Internship dates are fixed: 05/09/2027 to 08/01/2028.",
+     "ineligible", "availability_conflict"),
+    ("year alternative needs review", dict(PROFILE_A, current_year_sem="Year 3"),
+     PROFILE_A_TEXT.replace("Year 2, Semester 1", "Year 3"),
+     "Applicants must be in Year 2 or 3.", "unknown", "year_alternatives_unclear"),
+    ("citizenship alternative needs review", PROFILE_B, PROFILE_B_TEXT,
+     "Only Malaysian or Singaporean citizens may apply.",
+     "unknown", "citizenship_alternatives_unclear"),
+    ("degree alternative needs review", PROFILE_A, PROFILE_A_TEXT,
+     "Applicants must have a Bachelor's or Master's degree.",
+     "unknown", "degree_alternatives_unclear"),
+    ("higher degree does not prove current enrollment", dict(PROFILE_A, degree="Master of Science"),
+     PROFILE_A_TEXT.replace("Bachelor of Computing", "Master of Science"),
+     "Applicants must be currently pursuing a Bachelor's degree.",
+     "unknown", "degree_enrollment_unknown"),
 ]
 
 for case in TABLE:
@@ -143,5 +170,14 @@ assert not any("Singapore citizens" in item["snippet"] or
                "school approval" in item["snippet"] for item in guarded["evidence"]), guarded
 assert "citizenship_conflict" not in guarded["reason_codes"]
 assert "school_approval_unknown" not in guarded["reason_codes"]
+
+# Every guarded text input that can change a decision has provenance.
+metadata_jd = "The internship is in Singapore."
+plain = eligibility.evaluate({"role": "Intern"}, PROFILE_B, metadata_jd)
+restricted = eligibility.evaluate({"role": "Singapore Citizen Only Intern"}, PROFILE_B, metadata_jd)
+assert plain["status"] == "unknown" and restricted["status"] == "ineligible"
+assert plain["provenance"]["jd_sha256"] == restricted["provenance"]["jd_sha256"]
+for key in ("posting_metadata_sha256", "evaluated_text_sha256"):
+    assert plain["provenance"][key] != restricted["provenance"][key]
 
 print("test_eligibility: all checks passed")

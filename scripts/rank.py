@@ -255,7 +255,7 @@ def dim_gradyear(jd_low, rubric):
         return 0.5, ["profile year not configured"]
     hits = [f for f in rubric["gradyear_flags"] if f in jd_low]
     if hits:
-        return 0.4, [f"year-of-study bar ({hits[0]})"]
+        return 1.0, [f"profile cohort matches ({hits[0]})"]
     return 1.0, ["no matching year restriction"]
 
 

@@ -125,7 +125,11 @@ def _snippet(text, start, end):
 
 
 def _sentences(text):
-    return [part.strip() for part in re.split(r"(?<=[.!?;])\s+|\n+", text) if part.strip()]
+    # Contrast clauses have independent requirement polarity: an optional
+    # degree must not cancel a mandatory authorization requirement.
+    return [part.strip() for part in re.split(
+        r"(?<=[.!?;])\s+|\n+|,?\s+\b(?:although|but|whereas|however)\b\s+",
+        text, flags=re.I) if part.strip()]
 
 
 def _preferred(sentence):
@@ -230,6 +234,15 @@ def _country_requirement(sentence):
 
 
 def _availability_check(text, profile, windows):
+    # Inspect every date clause before accepting any supported interval.
+    # A second mandatory range in an unsupported format still needs review.
+    unsupported = []
+    for sentence in _sentences(text):
+        if (re.search(r"\b(intern(ship)?|placement)\b", sentence, re.I)
+                and re.search(r"\b(period|dates?|runs?|from|between|duration)\b", sentence, re.I)
+                and not _preferred(sentence)
+                and re.search(r"\b\d{1,2}[/.]\d{1,2}[/.]20\d{2}\b", sentence)):
+            unsupported.append(sentence[:240])
     matches = _date_ranges(text)
     relevant = []
     for item in matches:
@@ -245,6 +258,8 @@ def _availability_check(text, profile, windows):
 
     if relevant:
         if not windows:
+            if unsupported:
+                return "unknown", "unsupported_date_format", unsupported
             return "unknown", "availability_unknown", [
                 _snippet(text, item["start_at"], item["end_at"]) for item, _ in relevant]
         if len(relevant) > 1:
@@ -256,6 +271,8 @@ def _availability_check(text, profile, windows):
         fits = [any(start >= low and end <= high for low, high in windows)
                 for item, _ in relevant for start, end in [(item["start"], item["end"])]]
         if any(fits):
+            if unsupported:
+                return "unknown", "unsupported_date_format", unsupported
             return "compatible", "availability_fit", [
                 _snippet(text, item["start_at"], item["end_at"])
                 for item, _ in relevant if any(item["start"] >= low and item["end"] <= high
@@ -263,12 +280,12 @@ def _availability_check(text, profile, windows):
         return "conflict", "availability_conflict", [
             _snippet(text, item["start_at"], item["end_at"]) for item, _ in relevant]
 
+    if unsupported:
+        return "unknown", "unsupported_date_format", unsupported
     for sentence in _sentences(text):
         if (re.search(r"\b(intern(ship)?|placement)\b", sentence, re.I) and
                 re.search(r"\b(period|dates?|runs?|from|between|duration|summer|winter|h[12])\b",
                           sentence, re.I) and not _preferred(sentence)):
-            if re.search(r"\b\d{1,2}[/.]\d{1,2}[/.]20\d{2}\b", sentence):
-                return "unknown", "unsupported_date_format", [sentence[:240]]
             return "unknown", "availability_unclear", [sentence[:240]]
     return None, None, []
 
@@ -309,7 +326,8 @@ def evaluate(posting, profile, jd_text, profile_source=None):
 
     ``profile_source`` may be the original UTF-8 bytes or text of profile.yaml.
     When omitted, a canonical JSON representation of the mapping is hashed.
-    The JD hash covers the guarded text actually evaluated.
+    The JD hash covers the guarded body. Separate metadata and combined-text
+    hashes cover every guarded role/title/body input used for the decision.
     """
     posting = posting if isinstance(posting, dict) else {}
     profile = profile if isinstance(profile, dict) else {}
@@ -317,7 +335,8 @@ def evaluate(posting, profile, jd_text, profile_source=None):
     # lines, while flattening first would quarantine safe JD text with them.
     clean_jd = guard_text(str(jd_text or ""))["clean_text"]
     metadata = "\n".join(_text(posting.get(key)) for key in ("role", "title"))
-    scan_text = guard_text(metadata + "\n" + clean_jd)["clean_text"]
+    clean_metadata = guard_text(metadata)["clean_text"]
+    scan_text = guard_text(clean_metadata + "\n" + clean_jd)["clean_text"]
     sentences = _sentences(scan_text)
     windows = _profile_windows(profile)
     checks = {}
@@ -345,6 +364,13 @@ def evaluate(posting, profile, jd_text, profile_source=None):
             entry = {"code": code, "snippet": snippet}
             if snippet and entry not in evidence:
                 evidence.append(entry)
+
+    for sentence in sentences:
+        # Unseparated mixed-polarity wording cannot establish eligibility.
+        if ((_preferred(sentence) or re.search(r"\bnot required\b", sentence, re.I))
+                and re.search(r"\b(must|required|mandatory|only)\b", sentence, re.I)
+                and re.search(r"\band\b|,", sentence, re.I)):
+            add("general", "unknown", "requirement_scope_unclear", [sentence])
 
     # Dates and required duration use only complete, explicitly attached ranges.
     availability_status, availability_code, snippets = _availability_check(
@@ -374,7 +400,15 @@ def evaluate(posting, profile, jd_text, profile_source=None):
         if not re.search(r"\b(degree|bachelor|master|ph\.?d\.?|doctorate)\b",
                          sentence, re.I):
             continue
+        if re.search(r"\bor\b", sentence, re.I):
+            add("degree", "unknown", "degree_alternatives_unclear", [sentence])
+            continue
         required_level = _degree_level(sentence)
+        pursuing = bool(re.search(r"\b(pursuing|enrolled in|currently studying|working toward)\b",
+                                  sentence, re.I))
+        if pursuing and required_level and profile_level != required_level:
+            add("degree", "unknown", "degree_enrollment_unknown", [sentence])
+            continue
         if required_level:
             if profile_level is None:
                 add("degree", "unknown", "degree_unknown", [sentence])
@@ -382,8 +416,6 @@ def evaluate(posting, profile, jd_text, profile_source=None):
                 add("degree", "conflict", "degree_conflict", [sentence])
             else:
                 add("degree", "compatible", "degree_match", [sentence])
-        pursuing = bool(re.search(r"\b(pursuing|enrolled in|currently studying|working toward)\b",
-                                  sentence, re.I))
         completion_wording = bool(re.search(
             r"\b(completed|earned|hold|holder|already graduated|degree must be completed|"
             r"have a|has a)\b", sentence, re.I))
@@ -408,6 +440,9 @@ def evaluate(posting, profile, jd_text, profile_source=None):
         if not re.search(r"\b(year\s*(?:of\s+study\s*)?[1-6]|first year|second year|third year|"
                          r"fourth year|fifth year|sixth year|penultimate[- ]year|final[- ]year)\b",
                          sentence, re.I):
+            continue
+        if re.search(r"\bor\b", sentence, re.I):
+            add("year", "unknown", "year_alternatives_unclear", [sentence])
             continue
         numeric_terms = re.findall(r"\byear\s*(?:of\s+study\s*)?[1-6]\b", sentence, re.I)
         word_terms = re.findall(r"\b(first|second|third|fourth|fifth|sixth)\s+year\b",
@@ -496,6 +531,9 @@ def evaluate(posting, profile, jd_text, profile_source=None):
                                                  sentence, re.I):
             continue
         if not _mandatory(sentence) and not re.search(r"citizens? only|nationals? only", sentence, re.I):
+            continue
+        if re.search(r"\bor\b", sentence, re.I):
+            add("citizenship", "unknown", "citizenship_alternatives_unclear", [sentence])
             continue
         required_country = _country_requirement(sentence)
         if profile_country is None or required_country is None:
@@ -613,5 +651,7 @@ def evaluate(posting, profile, jd_text, profile_source=None):
         "provenance": {
             "profile_sha256": _digest(profile_source if profile_source is not None else profile),
             "jd_sha256": _digest(clean_jd),
+            "posting_metadata_sha256": _digest(clean_metadata),
+            "evaluated_text_sha256": _digest(scan_text),
         },
     }

@@ -50,6 +50,9 @@ authorization, credit, school approval and skills from the selected resume
 repo's `data/profile.yaml`. Missing or unclear required facts stay `unknown` in
 the shortlist and ranking output; explicit conflicts are excluded. JD caching
 and the posting guard run before requirement checks, with no extra fetches.
+Alternative degree, year and citizenship requirements remain `unknown` for
+review. Provenance includes the profile, guarded JD body, role/title metadata
+and combined evaluated text hashes.
 
 ## Approval gates
 
