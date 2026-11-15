@@ -84,6 +84,43 @@ merge or enqueue. See `skills/job-tailor/SKILL.md` for the exact commands.
 | Captcha | Any automated submit | No, solve it or stop |
 | Identity documents | Never stored, never filled | No |
 
+## Queue claim and recovery
+
+`queue.py claim --pr N` is the required gate before an external form action. It
+matches one queue item to exactly one current posting in
+`$JOBSEARCH_REPO/data/postings.json`, fetches and guards a fresh JD from that
+posting URL, and evaluates it against the selected profile. The default profile
+is `$JOBSEARCH_REPO/data/profile.yaml`; `--profile PATH` selects an exact
+alternate file. Current tracker rows and owner skip/cap state are checked too.
+The tracker, owner skip list, and cap file must be readable; use an explicit
+`[]` to record a verified empty list. Missing state is unresolved and blocks a
+claim.
+Missing, conflicting, or unknown eligibility cannot be overridden with
+`--force` or a generic review note.
+
+A successful claim durably records `attempt_id`, `attempt_state: authorized`,
+`submit_gate: durable`, claim time, and eligibility/profile/JD hashes before the
+command returns. Use the returned ID when recording confirmation:
+
+```bash
+python3 scripts/queue.py status --pr N --status submitted \
+  --attempt-id ID --date YYYY-MM-DD --sent "exact submission summary" \
+  --confirmation-evidence "employer confirmation observed"
+```
+
+This persists the submitted facts and `tracker_sync: pending` before tracker
+I/O. `sync-tracker --pr N` repairs only the tracker bookkeeping; it cannot
+reopen a submission. Sync state is `pending`, `syncing`, `synced`, or `error`,
+with the attempt and sync IDs kept on the queue item.
+
+Stale or interrupted attempts become `outcome_unknown`. `release-stale` does
+not make them retryable. `reconcile --result retry` requires a specific evidence
+source and observation that establishes non-submission; confirmed submission
+reconciliation is terminal. Direct status changes, generic notes, and
+`--force` cannot reopen submitted or unresolved attempts. Queue updates use a
+cross-process lock and atomic durable writes; tracker network I/O runs outside
+that lock.
+
 `SANITIZATION.md` explains why the identity rule is absolute rather than a
 default.
 

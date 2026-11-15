@@ -56,11 +56,11 @@ assert q.variant_pdf("variants/acme-swe/resume.tex") == "variants/acme-swe/resum
 assert q.variant_pdf("variants/acme-swe.tex") == "variants/acme-swe.pdf"
 assert q.variant_pdf("variants/acme-swe/resume.pdf") == "variants/acme-swe/resume.pdf"
 
-# the merge IS the approval: there is no separate approval hop, and a
-# submission follows directly from in_progress
+# A claim cannot be created through generic status changes. Only a durable
+# claim command grants an attempt ID that can record a submission.
 assert "approved" not in q.STATUSES
-assert q.TRANSITIONS["in_progress"] == {"submitted", "failed"}
-assert q.TRANSITIONS["queued"] == {"in_progress", "failed"}
+assert q.TRANSITIONS["in_progress"] == {"submitted"}
+assert q.TRANSITIONS["queued"] == {"failed"}
 assert "submitted" not in q.TRANSITIONS["queued"]
 assert q.UNFINISHED == ("queued", "in_progress")
 
@@ -221,9 +221,18 @@ try:
     nxt = json.loads(buf.getvalue())
     assert nxt["pr_number"] == 12 and nxt["company"] == "Quantum Co", nxt
 
-    # drain contract: claim -> (the merge already approved the CV) -> record
+    # Status cannot claim. Seed the exact durable marker that `claim` writes;
+    # the dedicated eligibility suite exercises that command.
     assert q.main(["status", "--queue", qfile, "--pr", "12",
-                   "--status", "in_progress"]) == 0
+                   "--status", "in_progress"]) == 2
+    claimed_items = q.load_queue(qfile)
+    claimed_idx = next(i for i, row in enumerate(claimed_items)
+                       if row["pr_number"] == 12)
+    claimed_items[claimed_idx].update({
+        "status": "in_progress", "attempt_id": "synthetic-attempt-12",
+        "attempt_state": "authorized", "submit_gate": "durable",
+        "claimed_at": q.now_utc()})
+    q.write_queue(qfile, claimed_items)
     # next never skips past the in-flight item, and names the CV to submit
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
@@ -246,13 +255,13 @@ try:
                    "--status", "submitted", "--date", "2026-10-06"]) == 2
     assert q.main(["status", "--queue", qfile, "--pr", "12",
                    "--status", "submitted", "--sent", "PDF via company ATS"]) == 2
-    # no separate go-ahead is required: in_progress -> submitted directly
-    # (--no-tracker keeps the test hermetic; the write-back path has its own
-    # offline git exercise below)
+    # The attempt ID, confirmation, date, and sent record are mandatory.
     assert q.main(["status", "--queue", qfile, "--pr", "12",
                    "--status", "submitted", "--date", "2026-10-06",
                    "--sent", "PDF via company ATS; availability Jun-Dec 2027",
                    "--route", "careers.example.com",
+                   "--attempt-id", "synthetic-attempt-12",
+                   "--confirmation-evidence", "Employer portal confirmed receipt.",
                    "--no-tracker"]) == 0
     it12 = [it for it in q.load_queue(qfile) if it["pr_number"] == 12][0]
     assert it12["status"] == "submitted"
@@ -260,11 +269,14 @@ try:
     assert it12["sent"].startswith("PDF via company ATS")
     assert it12["approved_at"] == "2026-10-06T06:00:00Z"
     assert it12["approved_by"] == "demo-user"
-    assert "route: careers.example.com" in it12["notes"], it12["notes"]
+    assert it12["route"] == "careers.example.com"
+    assert it12["tracker_sync"] == "pending"
 
     # submitted is terminal
     assert q.main(["status", "--queue", qfile, "--pr", "12",
                    "--status", "in_progress"]) == 2
+    assert q.main(["status", "--queue", qfile, "--pr", "12",
+                   "--status", "queued", "--force"]) == 2
 
     # next -> PR 14 now (12 is submitted)
     buf = io.StringIO()
@@ -272,13 +284,13 @@ try:
         q.main(["next", "--queue", qfile, "--json"])
     assert json.loads(buf.getvalue())["pr_number"] == 14
 
-    # failed requires a reason, and can be retried
+    # A pre-claim failure is terminal; generic notes and --force cannot reopen it.
     assert q.main(["status", "--queue", qfile, "--pr", "14",
                    "--status", "failed"]) == 2
     assert q.main(["status", "--queue", qfile, "--pr", "14",
                    "--status", "failed", "--notes", "posting closed"]) == 0
     assert q.main(["status", "--queue", qfile, "--pr", "14",
-                   "--status", "queued"]) == 0
+                   "--status", "queued", "--force"]) == 2
 
     # list --status filtering
     buf = io.StringIO()
@@ -335,7 +347,8 @@ try:
         assert r3.returncode == 0
         return r3.stdout
 
-    item = {"company": "Fixture Co", "role": "SWE Intern", "link": "",
+    item = {"company": "Fixture Co", "role": "SWE Intern",
+            "link": "https://fixture.invalid/jobs/12",
             "variant": "variants/fixture-co-swe/resume.tex",
             "pr": "https://github.com/demo-user/resume/pull/12", "pr_number": 12,
             "source": ""}
@@ -352,6 +365,12 @@ try:
     assert sha2 == "present", sha2
     text2 = _origin_show()
     assert text2.count("Fixture Co") == 1, text2
+
+    # A PR alias cannot make a contradictory posting link look already synced.
+    contradictory = dict(item, link="https://fixture.invalid/jobs/other")
+    assert q.write_tracker_row(_clone, contradictory, "2026-10-15", "PDF via ATS",
+                               "careers.example.com", log=lambda *a: None) \
+        == q.TRACKER_CONFLICT
 
     # Broken remote (origin replaced by an empty dir): fails cleanly, no raise.
     _sp.run(["git", "-C", _clone, "remote", "set-url", "origin",
@@ -382,6 +401,9 @@ try:
         parsed_own = [e for e in q.parse_yaml_list(_t) if isinstance(e, dict)]
         assert parsed_lib == parsed_own, (_t, parsed_lib, parsed_own)
 finally:
-    shutil.rmtree(_wtmp)
+    def _remove_readonly(func, path, exc_info):
+        os.chmod(path, 0o700)
+        func(path)
+    shutil.rmtree(_wtmp, onerror=_remove_readonly)
 
 print("test_queue: all assertions passed")
