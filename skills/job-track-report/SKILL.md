@@ -32,14 +32,22 @@ Two read-mostly jobs over the same state:
 - **Nothing at all** when nothing needs the owner. Silence is the correct output
   for an empty day.
 
-## Procedure: stage from email
+## Procedure: stage from evidence
 
-1. Classify the message: rejection, interview, assessment, follow-up, unrelated.
-2. Match it to exactly one tracker row by company and role.
-3. Run `stages.py set --company ... --stage ... --date ... --source email
-   --evidence ...`.
-4. Never move a row backwards without `--force`, and never mark `Rejected`
-   without evidence you can quote.
+1. Import normalized message JSON with `recruitment_evidence.py --messages FILE`.
+   The command reads no mailbox and stores its revision-aware ledger at
+   `JOBSEARCH_RECRUITMENT_LEDGER` outside the checkout.
+2. Review unresolved events with `outcomes.py review`. Use
+   `outcomes.py adjudicate` only with dated source evidence; corrections append
+   an auditable revision.
+3. Run `stages.py apply-evidence` first as a dry run, then with `--commit` when
+   the proposed uniquely matched events are correct.
+4. Full current message bodies, stable message IDs and exact dates are required.
+   Quoted history, header-only hits and employer-only matches stay unresolved.
+   Candidate-authored messages are excluded, and unknown origin stays unknown.
+5. Invitations do not imply assessment/interview completion or success. An
+   offer does not imply acceptance. Never move a row backwards without
+   `--force`, and never mark `Rejected` without dated evidence.
 
 ## Procedure: report
 
@@ -72,7 +80,7 @@ unless `--force` is passed.
 
 ## Stop conditions
 
-- Two tracker rows match one sender: report the ambiguity, do not pick the first.
+- Two tracker rows share an application identity: report the ambiguity, do not pick the first.
 - The email could not be read: say so. Never infer a rejection from the absence of
   a follow-up.
 - A date cannot be parsed: leave the row alone and report it.

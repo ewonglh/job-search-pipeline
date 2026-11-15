@@ -210,64 +210,71 @@ try:
                     "--stage", "Nonsense", "--date", "2026-11-04"])
     assert rc == 2 and "unknown stage" in out
 
-    # ------------------------------------------------------------ apply-email
-    # a row that skips Callback and OA straight to Interview is legal
-    mail = os.path.join(tmp, "mail.json")
-    _write(mail, json.dumps({"new": [
-        {"category": "interview", "from": "no-reply@greenhouse.io",
-         "subject": "Interview - Cobalt Labs Software Engineer Intern"},
-        {"category": "oa", "from": "careers@lumen.example",
-         "subject": "Lumen AI online assessment"},
-        {"category": "rejection", "from": "talent@vantage.example",
-         "subject": "Update on your application to Vantage Analytics"},
-        {"category": "follow_up", "from": "hr@unknownco.example",
-         "subject": "Following up on your application"},
-        {"category": "follow_up", "from": "recruiter@lumen.example",
-         "subject": "Please provide your transcript and availability"},
-        {"category": "unclassified_job", "from": "alerts@linkedin.com",
-         "subject": "New jobs for you"},
-    ], "unmatched": []}))
-
+    # --------------------------------------------------------- apply-evidence
+    import application_identity as identity
+    evidence_path = os.path.join(tmp, "recruitment_events.json")
+    cobalt = apps[2]["row"]
+    cobalt_id = identity.application_id(cobalt)
+    ledger = {"schema": 1, "events": [
+        {"event_id": "mail:unverified", "event_type": "interview_invitation",
+         "application_id": cobalt_id, "occurred_at": "2026-10-30T10:00:00Z",
+         "verification": "review_required", "origin": "unknown"},
+        {"event_id": "mail:outbound", "event_type": "rejection",
+         "application_id": cobalt_id, "occurred_at": "2026-10-30T10:00:00Z",
+         "verification": "verified", "origin": "human", "direction": "outbound"},
+        {"event_id": "mail:unknown-callback", "event_type": "recruiter_reply",
+         "application_id": cobalt_id, "occurred_at": "2026-10-30T10:00:00Z",
+         "verification": "verified", "origin": "unknown"},
+        {"event_id": "mail:verified", "event_type": "interview_invitation",
+         "application_id": cobalt_id, "occurred_at": "2026-10-29T10:00:00Z",
+         "verification": "verified", "origin": "unknown"},
+        {"event_id": "mail:ack", "event_type": "acknowledgement",
+         "application_id": cobalt_id, "occurred_at": "2026-10-30T10:00:00Z",
+         "verification": "verified", "origin": "automated"},
+    ], "coverage": {"complete": False}}
+    _write(evidence_path, json.dumps(ledger))
     snapshot = _read(path)
-    rc, out = _run(["apply-email", "--tracker", path, "--json", mail,
-                    "--today", "2026-10-31"])
-    assert rc == 0, out
-    assert "dry run: nothing written" in out, out
-    assert _read(path) == snapshot
-    assert "Cobalt Labs" in out and "-> Interview" in out, out
-    assert "not guessed" in out
-    # the generic follow-up and the job alert are never guessed
-    assert "Following up on your application" in out
-    assert "New jobs for you" in out
-
-    rc, out = _run(["apply-email", "--tracker", path, "--json", mail,
+    rc, out = _run(["apply-evidence", "--tracker", path, "--ledger", evidence_path,
                     "--today", "2026-10-31", "--commit", "--json-out"])
     assert rc == 0, out
     report = json.loads(out)
-    assert report["committed"] is True
-    assert report["written"] >= 1
-    proposed = {(p["company"], p["to"]) for p in report["proposed"]}
-    assert ("Cobalt Labs", "Interview") in proposed, proposed
-    assert not any(p["company"] == "Vantage Analytics" for p in report["proposed"])
-    assert any(u["from"] == "talent@vantage.example" for u in report["unmatched"])
-    assert any(a["from"] == "hr@unknownco.example" for a in report["ambiguous"])
-
-    _, apps6 = st.read_apps(path)
-    codex = [a["row"] for a in apps6 if a["row"]["company"] == "Cobalt Labs"][0]
-    assert codex["stage"] == "Interview", codex
-    assert codex["stage_source"] == "email"
-    assert codex["stage_evidence"].startswith("2026-10-31 email: Interview -")
-    # skipped stages are not reported as missing steps anywhere
-    _, out2 = _run(["list", "--tracker", path, "--today", "2026-10-31"])
-    assert "missing" not in out2.lower(), out2
-
-    # second pass is a no-op (idempotent)
-    count_before = _read(path)
-    rc, out = _run(["apply-email", "--tracker", path, "--json", mail,
+    assert report["written"] == 1, report
+    _, evidence_apps = st.read_apps(path)
+    cobalt_after = evidence_apps[2]["row"]
+    assert cobalt_after["stage"] == "Interview"
+    assert cobalt_after["stage_since"] == "2026-10-29"
+    assert "mail:verified" in cobalt_after["stage_evidence"]
+    assert "mail:outbound" not in cobalt_after["stage_evidence"]
+    assert "mail:unknown-callback" not in cobalt_after["stage_evidence"]
+    # A later import is idempotent and skipped optional stages stay unclaimed.
+    snapshot_after = _read(path)
+    rc, out = _run(["apply-evidence", "--tracker", path, "--ledger", evidence_path,
                     "--today", "2026-10-31", "--commit"])
-    assert rc == 0
-    assert _read(path) == count_before
+    assert rc == 0 and _read(path) == snapshot_after, out
+    assert "missing" not in out.lower()
 
+    # A canonical ID shared by duplicate tracker rows is not a unique join.
+    duplicate_path = os.path.join(tmp, "duplicate-applications.yaml")
+    _write(duplicate_path, TRACKER + """- company: Cobalt Labs
+  role: Software Engineer Intern
+  status: applied
+  applied_date: 2026-10-12
+""")
+    rc, out = _run(["apply-evidence", "--tracker", duplicate_path,
+                    "--ledger", evidence_path, "--today", "2026-10-31",
+                    "--commit", "--json-out"])
+    assert rc == 0
+    duplicate_report = json.loads(out)
+    assert any("not unique" in item["reason"] for item in duplicate_report["unmatched"])
+    _, duplicate_apps = st.read_apps(duplicate_path)
+    assert all("stage" not in item["row"] for item in duplicate_apps
+               if item["row"].get("company") == "Cobalt Labs")
+
+    assert st.message_stage({"event_type": "offer", "verification": "verified"})[0] is None
+    assert st.message_stage({"event_type": "recruiter_reply", "verification": "verified",
+                             "origin": "unknown"})[0] is None
+    assert st.message_stage({"event_type": "oa_failed", "verification": "verified",
+                             "origin": "automated"})[0] == "OA"
     # ------------------------------------------------------------ matcher units
     assert st.sender_domain("Recruiter <a.b@Meridian.sg>") == "meridian.sg"
     assert st.sender_domain("nobody") == ""

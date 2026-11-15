@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Email-driven stage machine for the application tracker (stdlib only).
+"""Evidence-driven stage machine for the application tracker (stdlib only).
 
 The tracker (``repo/applications.yaml``) is a hand-maintained top-level YAML
 list: 90 flat-keyed mappings, comment lines, and folded multi-line values
@@ -17,7 +17,7 @@ there; this file imports them so the two cannot drift apart):
 ``Callback`` and ``OA`` are optional, so a jump from ``Applied`` straight to
 ``Interview`` is legal and nothing here treats the skipped stages as missing.
 
-Row provenance written by ``set`` / ``apply-email`` (all optional keys):
+Row provenance written by ``set`` / ``apply-evidence`` (all optional keys):
 
   ``stage``           canonical stage; authoritative when present
   ``stage_since``     ISO date the current stage started
@@ -37,23 +37,18 @@ Usage:
   stages.py set --company X [--role Y] --stage S [--date YYYY-MM-DD]
                 [--source {email,queue,manual}] [--evidence TEXT]
                 [--tracker FILE] [--dry-run] [--force] [--json]
-  stages.py apply-email --json FILE [--commit] [--tracker FILE]
-                        [--today YYYY-MM-DD] [--json-out]
+  stages.py apply-evidence [--ledger FILE] [--commit] [--tracker FILE]
+                           [--today YYYY-MM-DD] [--force] [--json-out]
 
-``apply-email`` reads the ``--json`` output of the browser mail lane
-(``gmail_browser.py``): ``{"new": [...], "unmatched": [...]}``, or a bare list
-of the same message dicts. It maps a category to a stage:
+``apply-evidence`` reads the private revision-aware ledger written by
+``recruitment_evidence.py``. Only verified, dated, unambiguous events can
+propose a stage:
 
-  ``rejection``    -> ``Rejected``
-  ``oa``           -> ``OA``
-  ``interview``    -> ``Interview``
-  ``follow_up``    -> ``Callback`` only when the mail is a recruiter asking for
-                      information; a generic "any update" follow-up is listed
-                      as ambiguous instead of guessed
+  rejection -> Rejected; availability/recruiter reply -> Callback
+  OA invite/completion/pass/fail -> OA; interview invite/completion -> Interview
 
-Matching is by sender domain and company name, in that order. Mail that
-matches no application, or matches by a generic provider domain only, is
-listed and never guessed. Dry run is the default; ``--commit`` writes.
+Acknowledgements and offers do not imply a later stage. Exact posting identity
+or one exact employer/role match is required. Dry run is the default.
 """
 import argparse
 import json
@@ -63,11 +58,13 @@ import sys
 from datetime import date
 
 import summary as s
-from config import path_setting
+from config import default_runtime_path, path_setting
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TRACKER = path_setting("JOBSEARCH_TRACKER",
                        os.path.join(s.REPO_DIR, "applications.yaml"))
+LEDGER = path_setting("JOBSEARCH_RECRUITMENT_LEDGER",
+                      default_runtime_path("recruitment_events.json"))
 
 STAGE_KEYS = ("stage", "stage_since", "stage_source", "stage_evidence")
 SOURCES = ("email", "queue", "manual")
@@ -77,21 +74,19 @@ KEY_RE = re.compile(r"^(\s*)(?:- )?([A-Za-z0-9_.\-]+):(\s?.*)$")
 MAX_CONT_KEY_INDENT = 2
 EVIDENCE_LIMIT = 160
 
-# Category -> stage for the mail lane.
-CATEGORY_STAGE = {
+# Verified outcome types that can establish a stage. An offer is not an
+# acceptance, and acknowledgements do not establish a recruitment stage.
+EVENT_STAGE = {
     "rejection": "Rejected",
-    "oa": "OA",
-    "interview": "Interview",
+    "availability_request": "Callback",
+    "recruiter_reply": "Callback",
+    "oa_invitation": "OA",
+    "oa_completed": "OA",
+    "oa_passed": "OA",
+    "oa_failed": "OA",
+    "interview_invitation": "Interview",
+    "interview_completed": "Interview",
 }
-
-# Words that make a ``follow_up`` mail a recruiter asking for information
-# rather than the applicant (or an auto-responder) chasing an update.
-INFO_REQUEST_TERMS = (
-    "information", "document", "documents", "transcript", "clarify",
-    "clarification", "provide", "provide us", "complete", "kindly", "please",
-    "availability", "available", "expected salary", "resume", "cv",
-    "identification", "pass", "details", "questionnaire", "form",
-)
 
 # Free-mail / ATS provider domains: a match here is not a company identity.
 GENERIC_DOMAINS = {
@@ -465,91 +460,119 @@ def cmd_set(args, log):
     return 0
 
 
-# ---------------------------------------------------------------- apply-email
-def load_mail(path):
-    """Message list out of a ``gmail_browser.py --json`` file."""
-    with open(path, encoding="utf-8") as fh:
-        doc = json.load(fh)
-    if isinstance(doc, dict):
-        msgs = []
-        for key in ("new", "messages", "items", "unmatched"):
-            block = doc.get(key)
-            if isinstance(block, list):
-                msgs.extend(m for m in block if isinstance(m, dict))
-        return msgs
-    if isinstance(doc, list):
-        return [m for m in doc if isinstance(m, dict)]
-    return []
+# ------------------------------------------------------------- apply-evidence
+def message_stage(event):
+    """Stage supported by one verified, dated recruitment event."""
+    if event.get("verification") != "verified":
+        return None, "message evidence requires review"
+    if event.get("direction") == "outbound":
+        return None, "candidate-authored message cannot establish a recruiter outcome"
+    event_type = norm(event.get("event_type")).lower()
+    stage = EVENT_STAGE.get(event_type)
+    if not stage:
+        return None, f"event {event_type or 'none'} does not establish a stage"
+    if event_type in {"availability_request", "recruiter_reply"} and event.get("origin") != "human":
+        return None, "callback authorship is unknown or automated"
+    return stage, None
 
 
-def message_stage(msg):
-    """Stage proposed by one mail, plus a flag when the mail is ambiguous."""
-    category = norm(msg.get("category")).lower()
-    subject = norm(msg.get("subject")).lower()
-    if category in CATEGORY_STAGE:
-        return CATEGORY_STAGE[category], None
-    if category == "follow_up":
-        if any(term in subject for term in INFO_REQUEST_TERMS) or "?" in subject:
-            return "Callback", None
-        return None, "follow_up without an information request"
-    return None, f"category {category or 'none'} has no stage"
+def message_day(event):
+    """Parse a dated event using the same strict rules as the ledger."""
+    import recruitment_evidence as evidence
+    value = evidence.exact_date(event.get("occurred_at"))
+    return parse_day(value) if value else None
 
 
-def match_row(apps, sender, subject=""):
-    """Match a mail to one application: sender domain first, then company name.
-
-    Returns ``(entry, basis)`` or ``(None, reason)``. A generic provider or ATS
-    domain is never enough on its own, so those fall through to the subject /
-    company-name test and, failing that, stay unmatched.
-    """
-    domain = sender_domain(sender)
-    label = domain.split(".")[0] if domain and "." in domain else ""
-    label = slug(label)
-    subject_slug = slug(subject)
-
-    if domain and domain not in GENERIC_DOMAINS:
-        hits = [e for e in apps
-                if label and label in company_tokens(e["row"].get("company"))]
+def match_row(apps, sender, subject="", posting_url=None):
+    """Match only an exact posting URL or one exact employer and role pair."""
+    import application_identity as identity
+    if posting_url:
+        wanted = identity.normalize_posting_url(posting_url)
+        if not wanted:
+            return None, "posting URL is invalid"
+        hits = [entry for entry in apps
+                if identity.normalize_posting_url(entry["row"].get("link")) == wanted]
         if len(hits) == 1:
-            return hits[0], f"sender domain {domain}"
+            return hits[0], "exact posting URL"
         if len(hits) > 1:
-            return None, f"sender domain {domain} matches {len(hits)} rows"
+            return None, "posting URL matches multiple rows"
 
-    by_name = [e for e in apps if slug(e["row"].get("company"))
-               and slug(e["row"].get("company")) in subject_slug]
-    if len(by_name) == 1:
-        return by_name[0], "company name in subject"
-    if len(by_name) > 1:
-        return by_name[0], "company name in subject (first of %d rows)" % len(by_name)
-    if domain in GENERIC_DOMAINS:
-        return None, f"generic domain {domain} and no company name in subject"
-    return None, f"no row for {domain or 'unknown sender'}"
+    text = slug(subject)
+    hits = [entry for entry in apps
+            if slug(entry["row"].get("company"))
+            and slug(entry["row"].get("role"))
+            and slug(entry["row"].get("company")) in text
+            and slug(entry["row"].get("role")) in text]
+    if len(hits) == 1:
+        return hits[0], "exact employer and role text"
+    if len(hits) > 1:
+        return None, "employer and role text matches multiple applications"
+    domain = sender_domain(sender)
+    return None, ("employer-only evidence is unresolved" if domain or text
+                  else "sender and application identity are missing")
 
 
-def cmd_apply_email(args, log):
+def cmd_apply_evidence(args, log):
+    import application_identity as identity
+    import recruitment_evidence as evidence
     try:
-        msgs = load_mail(args.json)
-    except (OSError, ValueError) as exc:
-        log(f"stages: cannot read --json {args.json}: {exc}")
+        with open(args.ledger, encoding="utf-8") as stream:
+            doc = json.load(stream)
+        if not isinstance(doc, dict) or doc.get("schema") != 1:
+            raise ValueError("unsupported evidence ledger schema")
+        events, quarantined, diagnostics = evidence.effective_events(doc)
+        lines, apps = read_apps(args.tracker)
+    except (OSError, ValueError, TypeError) as exc:
+        log(f"stages: cannot read evidence ledger: {exc}")
         return 2
-    today = parse_day(args.today) or date.today()
-    day = today.isoformat()
-    lines, apps = read_apps(args.tracker)
 
-    proposals, unmatched, ambiguities, noops = [], [], [], []
-    for msg in msgs:
-        stage, why = message_stage(msg)
-        subject = norm(msg.get("subject"))
-        sender = norm(msg.get("from") or msg.get("from_name"))
+    today = parse_day(args.today) or date.today()
+    candidates, unmatched, ambiguities, noops = {}, [], [], []
+    for event in events:
+        event_id = str(event.get("event_id") or "")
+        if event_id in quarantined:
+            ambiguities.append({"event_id": event_id, "reason": "conflicting event revisions"})
+            continue
+        stage, why = message_stage(event)
         if not stage:
-            ambiguities.append({"subject": subject, "from": sender,
-                                "reason": why})
+            if event.get("event_type") in EVENT_STAGE or event.get("direction") == "outbound":
+                ambiguities.append({"event_id": event_id, "reason": why})
             continue
-        entry, basis = match_row(apps, sender, subject)
-        if entry is None:
-            unmatched.append({"subject": subject, "from": sender,
-                              "reason": basis, "stage": stage})
+        occurred = message_day(event)
+        if occurred is None:
+            ambiguities.append({"event_id": event_id, "reason": "exact event date unavailable"})
             continue
+        if occurred > today:
+            ambiguities.append({"event_id": event_id, "reason": "event date is in the future"})
+            continue
+        app_id = str(event.get("application_id") or "")
+        hits = [entry for entry in apps
+                if identity.application_id(entry["row"]) == app_id]
+        if not app_id or len(hits) != 1:
+            unmatched.append({"event_id": event_id,
+                              "reason": "application identity is missing or not unique"})
+            continue
+        entry = hits[0]
+        applied = parse_day(entry["row"].get("applied_date"))
+        if applied and occurred < applied:
+            ambiguities.append({"event_id": event_id,
+                                "reason": "event predates application"})
+            continue
+        candidates.setdefault(id(entry), {"entry": entry, "events": []})["events"].append(
+            (occurred, stage, event))
+
+    proposals = []
+    for group in candidates.values():
+        latest_day = max(item[0] for item in group["events"])
+        latest = [item for item in group["events"] if item[0] == latest_day]
+        targets = {item[1] for item in latest}
+        entry = group["entry"]
+        if len(targets) != 1:
+            ambiguities.extend({"event_id": item[2].get("event_id"),
+                                "reason": "conflicting stage evidence on the same date"}
+                               for item in latest)
+            continue
+        stage = next(iter(targets))
         current = stage_of(entry["row"])
         if current == stage:
             noops.append({"company": norm(entry["row"].get("company")),
@@ -563,63 +586,48 @@ def cmd_apply_email(args, log):
                           "role": norm(entry["row"].get("role")),
                           "from": current, "to": stage, "reason": errs[0]})
             continue
+        evidence_text = "; ".join(
+            f"{item[2].get('event_type')} [{item[2].get('event_id')}]"
+            for item in sorted(latest, key=lambda value: str(value[2].get("event_id"))))
         proposals.append({"entry": entry, "company": norm(entry["row"].get("company")),
-                          "role": norm(entry["row"].get("role")),
-                          "from": current, "to": stage, "basis": basis,
-                          "subject": subject, "from_addr": sender})
+                          "role": norm(entry["row"].get("role")), "from": current,
+                          "to": stage, "date": latest_day.isoformat(),
+                          "evidence": evidence_text})
 
     written = 0
     if args.commit and proposals:
-        per_record = {}
-        for prop in proposals:
-            per_record.setdefault(id(prop["entry"]), prop)
-        # Bottom-up by line so earlier inserts never shift later indexes.
-        ordered = sorted(per_record.values(),
-                         key=lambda p: p["entry"]["record"]["start"],
-                         reverse=True)
+        ordered = sorted(proposals,
+                         key=lambda prop: prop["entry"]["record"]["start"], reverse=True)
         for prop in ordered:
-            rec = prop["entry"]["record"]
-            plan, errs = plan_update(lines, rec, prop["to"], day, "email",
-                                     prop["subject"], True)
+            plan, errs = plan_update(lines, prop["entry"]["record"], prop["to"],
+                                     prop["date"], "email", prop["evidence"], args.force)
             if errs:
                 continue
             edits, inserts = plan
             lines = apply_edits(lines, edits, inserts)
             written += 1
-        write_lines(args.tracker, lines)
+        if written:
+            write_lines(args.tracker, lines)
 
-    payload = {
-        "date": day,
-        "committed": bool(args.commit),
-        "proposed": [{k: v for k, v in p.items() if k != "entry"}
-                     for p in proposals],
-        "unmatched": unmatched,
-        "ambiguous": ambiguities,
-        "skipped": noops,
-        "written": written,
-    }
+    payload = {"date": today.isoformat(), "committed": bool(args.commit),
+               "proposed": [{k: v for k, v in prop.items() if k != "entry"}
+                            for prop in proposals],
+               "unmatched": unmatched, "ambiguous": ambiguities,
+               "skipped": noops, "written": written,
+               "ledger_diagnostics": diagnostics}
     if args.json_out:
         print(json.dumps(payload, indent=2, ensure_ascii=False))
-        return 0
-    print(f"{len(proposals)} proposed transition(s)"
-          + (f", {written} written" if args.commit else " (dry run)"))
-    for prop in proposals:
-        print(f"  {prop['company']} · {prop['role']}: "
-              f"{prop['from'] or '?'} -> {prop['to']} "
-              f"[{prop['basis']}] {prop['subject']}")
-    for item in noops:
-        print(f"  skip {item['company']} · {item['role']}: "
-              f"{item['from']} -> {item['to']} ({item['reason']})")
-    if ambiguities:
-        print(f"ambiguous {len(ambiguities)} message(s), not guessed:")
-        for item in ambiguities:
-            print(f"  \"{item['subject']}\" - {item['from']} ({item['reason']})")
-    if unmatched:
-        print(f"unmatched {len(unmatched)} message(s), not guessed:")
-        for item in unmatched:
-            print(f"  \"{item['subject']}\" - {item['from']} ({item['reason']})")
-    if not args.commit:
-        print("dry run: nothing written (pass --commit to write)")
+    else:
+        print(f"{len(proposals)} proposed transition(s)"
+              + (f", {written} written" if args.commit else " (dry run)"))
+        for prop in proposals:
+            print(f"  {prop['company']} · {prop['role']}: "
+                  f"{prop['from'] or '?'} -> {prop['to']} [{prop['date']}]")
+        for item in noops:
+            print(f"  skip {item['company']} · {item['role']}: "
+                  f"{item['from']} -> {item['to']} ({item['reason']})")
+        if not args.commit:
+            print("dry run: nothing written (pass --commit to write)")
     return 0
 
 
@@ -632,7 +640,7 @@ def add_common(ap):
 
 def build_parser():
     ap = argparse.ArgumentParser(
-        description="Email-driven stage machine for applications.yaml.",
+        description="Evidence-driven stage machine for applications.yaml.",
         formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd")
 
@@ -656,9 +664,10 @@ def build_parser():
                     help="allow backwards moves and Rejected rows")
     st.add_argument("--json", action="store_true")
 
-    ae = sub.add_parser("apply-email", help="propose stages from mail JSON")
+    ae = sub.add_parser("apply-evidence", help="propose stages from the verified evidence ledger")
     add_common(ae)
-    ae.add_argument("--json", required=True, help="gmail_browser.py --json file")
+    ae.add_argument("--ledger", default=LEDGER,
+                    help="private evidence ledger (env JOBSEARCH_RECRUITMENT_LEDGER)")
     ae.add_argument("--commit", action="store_true",
                     help="write the proposals (default is a dry run)")
     ae.add_argument("--today", help="date to stamp (YYYY-MM-DD)")
@@ -674,8 +683,8 @@ def main(argv=None):
         return cmd_list(args, log)
     if args.cmd == "set":
         return cmd_set(args, log)
-    if args.cmd == "apply-email":
-        return cmd_apply_email(args, log)
+    if args.cmd == "apply-evidence":
+        return cmd_apply_evidence(args, log)
     build_parser().print_help()
     return 2
 
