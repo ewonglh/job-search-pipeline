@@ -63,10 +63,11 @@ import sys
 from datetime import date
 
 import summary as s
+from config import path_setting
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-TRACKER = os.environ.get("JOBSEARCH_TRACKER",
-                         os.path.join(HERE, "repo", "applications.yaml"))
+TRACKER = path_setting("JOBSEARCH_TRACKER",
+                       os.path.join(s.REPO_DIR, "applications.yaml"))
 
 STAGE_KEYS = ("stage", "stage_since", "stage_source", "stage_evidence")
 SOURCES = ("email", "queue", "manual")
@@ -625,8 +626,8 @@ def cmd_apply_email(args, log):
 # ---------------------------------------------------------------- parser
 def add_common(ap):
     ap.add_argument("--tracker", default=TRACKER,
-                    help="applications.yaml (default: ./repo/applications.yaml, "
-                         "env JOBSEARCH_TRACKER)")
+                    help="applications.yaml (default from JOBSEARCH_REPO, "
+                         "or env JOBSEARCH_TRACKER)")
 
 
 def build_parser():

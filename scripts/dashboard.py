@@ -31,11 +31,12 @@ import subprocess
 import sys
 
 import summary as s
+from config import default_repo_dir, default_runtime_path, path_setting
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-REPO_DIR = os.environ.get("JOBSEARCH_REPO", os.path.join(HERE, "repo"))
-OUT_PATH = os.environ.get("JOBSEARCH_DASHBOARD_OUT",
-                          os.path.join(HERE, "dashboard", "index.html"))
+REPO_DIR = path_setting("JOBSEARCH_REPO", default_repo_dir())
+OUT_PATH = path_setting("JOBSEARCH_DASHBOARD_OUT",
+                        default_runtime_path(os.path.join("dashboard", "index.html")))
 QUEUE_CMD = ["python3", os.path.join(HERE, "queue.py"), "list", "--json"]
 
 # Kanban columns, in fixed display order (summary.ORDER).
@@ -111,7 +112,7 @@ def card_pr_url(card):
         return v
     num = card_pr_number(card)
     if num is not None:
-        return f"https://github.com/{os.environ.get('JOBSEARCH_GH_REPO', s.GH_REPO_DEFAULT)}/pull/{num}"
+        return f"https://github.com/{s.GH_REPO_DEFAULT}/pull/{num}"
     return None
 
 
@@ -185,7 +186,7 @@ def build_board(apps, postings, prs, queue, today, links=None):
                     or link and link in s.pr_body_links(pr)
                     or s.pr_branch_slug(pr) == slug):
                 num = pr.get("number")
-                repo = os.environ.get("JOBSEARCH_GH_REPO", s.GH_REPO_DEFAULT)
+                repo = s.GH_REPO_DEFAULT
                 return f"https://github.com/{repo}/pull/{num}"
         return None
 
@@ -314,7 +315,7 @@ def build_board(apps, postings, prs, queue, today, links=None):
                if isinstance(p, dict) and not s.is_tracked(p, tracked_links, names)):
             continue
         num = pr.get("number")
-        url = f"https://github.com/{os.environ.get('JOBSEARCH_GH_REPO', s.GH_REPO_DEFAULT)}/pull/{num}"
+        url = f"https://github.com/{s.GH_REPO_DEFAULT}/pull/{num}"
         work = str(pr.get("title") or "")
         work = work.split(": tailored", 1)[0]
         work = work[work.find("(") + 1:work.rfind(")")] if "(" in work else ""
@@ -576,9 +577,9 @@ def build_parser():
         description="Render the local job-search dashboard (read-only).",
         formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--repo", default=REPO_DIR,
-                    help="resume clone path (default: ./repo, env JOBSEARCH_REPO)")
+                    help="resume clone path (env JOBSEARCH_REPO)")
     ap.add_argument("--out", default=OUT_PATH,
-                    help="output HTML path (default: ./dashboard/index.html)")
+                    help="output HTML path (env JOBSEARCH_DASHBOARD_OUT)")
     ap.add_argument("--json", action="store_true",
                     help="print the computed board+sankey data object instead")
     ap.add_argument("--queue-cmd", default=None,

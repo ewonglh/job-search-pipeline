@@ -3,8 +3,10 @@
 
 Reads the application tracker (``applications.yaml``) from a **read-only** clone
 of your resume repo and, for context, the discovered postings
-(``data/postings.json``). It never writes to the repo: the only file it writes is
-a small date-based state file (``summary_state.json``) next to this script.
+(``data/postings.json``). It never writes to the repo: it writes only a small
+date-based state file, defaulting to
+``~/.local/state/job-search-pipeline/summary_state.json``. Set
+``JOBSEARCH_SUMMARY_STATE`` to choose another path.
 
 The digest reports, Telegram-ready and in this order:
 
@@ -49,16 +51,18 @@ import subprocess
 import sys
 import unicodedata
 from datetime import date, datetime, timedelta, timezone
+from config import (default_repo_dir, default_runtime_path, github_repo_setting,
+                    path_setting)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-REPO_DIR = os.environ.get("JOBSEARCH_REPO", os.path.join(HERE, "repo"))
-STATE_FILE = os.environ.get("JOBSEARCH_SUMMARY_STATE",
-                           os.path.join(HERE, "summary_state.json"))
+REPO_DIR = path_setting("JOBSEARCH_REPO", default_repo_dir())
+STATE_FILE = path_setting("JOBSEARCH_SUMMARY_STATE",
+                          default_runtime_path("summary_state.json"))
 
 TRACKER_PATH = "applications.yaml"
 POSTINGS_PATH = "data/postings.json"
 BRANCH_PREFIX = "app/"
-GH_REPO_DEFAULT = "example-user/resume"
+GH_REPO_DEFAULT = github_repo_setting("JOBSEARCH_GH_REPO", "your-user/your-resume-repo")
 TAILOR_PR_LIMIT = 200
 
 # Canonical funnel stages, in digest order (email-driven stage machine,
@@ -257,7 +261,7 @@ def fetch_open_tailor_prs(log=lambda *a: None):
     try:
         proc = subprocess.run(
             ["gh", "pr", "list", "--repo",
-             os.environ.get("JOBSEARCH_GH_REPO", GH_REPO_DEFAULT),
+             GH_REPO_DEFAULT,
              "--state", "open", "--json", "number,headRefName,title,body",
              "--limit", str(TAILOR_PR_LIMIT)],
             capture_output=True, text=True, timeout=60)
@@ -361,6 +365,7 @@ def read_state(path):
 
 
 def write_state(path, digest_date, stamp):
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     tmp = f"{path}.tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
         json.dump({"last_digest": digest_date.isoformat(), "updated": stamp},
@@ -1466,10 +1471,10 @@ def render_newpost(eligible, skipped_list, ranked, today):
 
 
 # ---------------------------------------------------------------- cli
-SKIPPED_DEFAULT = os.environ.get("JOBSEARCH_SKIPPED",
-                                  os.path.join(HERE, "skipped.yaml"))
-RANKINGS_DEFAULT = os.environ.get("JOBSEARCH_RANKINGS",
-                                    os.path.join(HERE, "rankings.json"))
+SKIPPED_DEFAULT = path_setting("JOBSEARCH_SKIPPED",
+                               default_runtime_path("skipped.yaml"))
+RANKINGS_DEFAULT = path_setting("JOBSEARCH_RANKINGS",
+                                default_runtime_path("rankings.json"))
 MODES = ("digest", "nudges", "newpost")
 
 
@@ -1484,7 +1489,7 @@ def build_parser():
                     choices=list(MODES),
                     help="same as the positional subcommand; flag wins")
     ap.add_argument("--repo", default=REPO_DIR,
-                    help="resume clone path (default: ./repo, env JOBSEARCH_REPO)")
+                    help="resume clone path (env JOBSEARCH_REPO)")
     ap.add_argument("--days", type=int, default=7,
                     help="age in days after which an Applied entry awaits a "
                          "reply (default: 7)")
@@ -1493,9 +1498,9 @@ def build_parser():
     ap.add_argument("--json", action="store_true",
                     help="emit the digest data as JSON instead of text")
     ap.add_argument("--skipped", default=SKIPPED_DEFAULT,
-                    help="owner-skip list (default: ./skipped.yaml)")
+                    help="owner-skip list (env JOBSEARCH_SKIPPED)")
     ap.add_argument("--rankings", default=RANKINGS_DEFAULT,
-                    help="rankings join file (default: ./rankings.json)")
+                    help="rankings join file (env JOBSEARCH_RANKINGS)")
     return ap
 
 

@@ -8,13 +8,10 @@ Harness-agnostic. The scripts are plain Python 3 stdlib. Any scheduler can run
 them: cron, systemd, OpenClaw, Hermes Agent, Claude Code, or a human typing
 commands. See [SETUP.md](SETUP.md) for three worked tracks.
 
-**Built for the Singapore internship market, and wired for it.** Discovery
-targets InternSG and company career pages, the ranker scores a Singapore base
-highest and treats overseas postings as a 0.3 penalty, and the demo profile is a
-Singapore student. Running it elsewhere works, but you will be editing
-`scripts/rubric.yaml`, the `InternSG` source list in `scripts/discover.py`, and
-the `NRIC_SG` handling. That is a port, not a config change, so look at it before
-you clone.
+Discovery and ranking currently prioritize Singapore internships, including
+InternSG. Their market filters and scoring are starter policy in
+`scripts/discover.py` and `scripts/rubric.yaml`; adjust them when targeting a
+different market. Account and filesystem defaults use neutral placeholders.
 
 ## The core rule
 
@@ -76,7 +73,8 @@ actor and time. Narrative approval remains an owner decision during the drain.
   agent drains, and the drain still stops at captchas and unseen questions.
 - Does not bypass bot detection, captchas, or rate limits.
 - Does not scrape at scale. Discovery is a handful of boards you name.
-- Is not market-neutral. See the note at the top: it is built for Singapore.
+- Its discovery and ranking policy currently prioritizes Singapore. See the
+  note at the top before adapting it to another market.
 - Does not store passports, national IDs, or birthdates. By design, see
   `SANITIZATION.md`.
 - Does not promise a job. It reduces the cost of applying carefully.
@@ -88,38 +86,62 @@ git clone https://github.com/ewonglh/job-search-pipeline.git
 cd job-search-pipeline
 export JOBSEARCH_GH_REPO="your-user/your-resume-repo"
 export JOBSEARCH_REPO_URL="https://github.com/your-user/your-resume-repo.git"
+DEMO_ROOT="$(mktemp -d)"
+export JOBSEARCH_REPO="$DEMO_ROOT/resume"
+export JOBSEARCH_QUEUE="$DEMO_ROOT/runtime/queue.yaml"
+export JOBSEARCH_SKIPPED="$DEMO_ROOT/runtime/skipped.yaml"
+export JOBSEARCH_DEADLINES="$DEMO_ROOT/runtime/deadlines.yaml"
+export JOBSEARCH_OUTBOX="$DEMO_ROOT/runtime/outbox"
 
-mkdir -p scripts/repo/data
-cp demo/repo/data/postings.json scripts/repo/data/postings.json
-cp demo/repo/data/profile.yaml  scripts/repo/data/profile.yaml
-cp demo/repo/applications.yaml  scripts/repo/applications.yaml
-cp demo/queue.yaml demo/skipped.yaml demo/deadlines.yaml scripts/
+mkdir -p "$JOBSEARCH_REPO/data" "$DEMO_ROOT/runtime/outbox"
+cp demo/repo/data/postings.json "$JOBSEARCH_REPO/data/postings.json"
+cp demo/repo/data/profile.yaml "$JOBSEARCH_REPO/data/profile.yaml"
+cp demo/repo/applications.yaml "$JOBSEARCH_REPO/applications.yaml"
 
-cd scripts && python3 test_queue.py && python3 test_tailor.py
+cd scripts
+python3 test_queue.py
+python3 test_tailor.py
+python3 test_stages.py
+python3 test_dashboard.py
+python3 test_config.py
 ```
 
-`demo/` mirrors the layout of a real resume repo, so one copy is enough.
-The data is fictional. It exists so the tests run and so you can see the shape of
-every file before you fill it with anything real.
+`DEMO_ROOT` is outside the checkout. `demo/` contains fictional sample data;
+copy it only into a private resume repository. The four required suites are
+offline and need Python 3.9 or newer. No live repository or credentials are
+needed for these tests.
 
 ## Configuration
 
-Every owner-specific value is an environment variable. Nothing is hardcoded to
-the original author's accounts.
+Set repository and runtime paths explicitly for scheduled or private use. The
+defaults are placeholders and user-local directories, not a personal account
+or a repository inside this checkout. Empty path overrides fail immediately.
 
 | Variable | Meaning | Default |
 |---|---|---|
-| `JOBSEARCH_GH_REPO` | Your resume repo, `user/repo` | `example-user/resume` |
+| `JOBSEARCH_GH_REPO` | Your resume repo, `user/repo` | `your-user/your-resume-repo` |
 | `JOBSEARCH_REPO_URL` | Clone URL for it | `https://github.com/$JOBSEARCH_GH_REPO.git` |
-| `JOBSEARCH_REPO` | Local clone path | `./repo` |
-| `JOBSEARCH_CONTACT_URL` | URL placed in the HTTP User-Agent | `https://github.com/example-user` |
-| `JOBSEARCH_QUEUE` | Queue store | `./queue.yaml` |
-| `JOBSEARCH_SKIPPED` | Owner-skip store | `./skipped.yaml` |
-| `JOBSEARCH_DEADLINES` | Deadline store | `./deadlines.yaml` |
-| `JOBSEARCH_OUTBOX` | Draft outbox | `./outbox` |
+| `JOBSEARCH_REPO` | Private local resume clone | `~/.local/share/job-search-pipeline/resume` |
+| `JOBSEARCH_DOCTRINE_REPO` | Optional tailoring doctrine repository | `your-user/your-resume-tailor-doctrine` |
+| `JOBSEARCH_COMPANIES` | Optional discovery company list | `scripts/companies.yaml` |
+| `JOBSEARCH_CONTACT_URL` | URL placed in the HTTP User-Agent | `https://example.invalid/` |
+| `JOBSEARCH_QUEUE` | Private queue state | `~/.local/state/job-search-pipeline/queue.yaml` |
+| `JOBSEARCH_SKIPPED` | Private owner-skip state | `~/.local/state/job-search-pipeline/skipped.yaml` |
+| `JOBSEARCH_DEADLINES` | Private deadline state | `~/.local/state/job-search-pipeline/deadlines.yaml` |
+| `JOBSEARCH_OUTBOX` | Private draft outbox | `~/.local/state/job-search-pipeline/outbox` |
+| `JOBSEARCH_WORK` | Private tailoring work items | `~/.local/state/job-search-pipeline/work` |
+| `JOBSEARCH_GATES` | Employer gate configuration | `scripts/gates.yaml` |
+| `JOBSEARCH_TRACKER` | Tracker path override for `stages.py` | `$JOBSEARCH_REPO/applications.yaml` |
+| `JOBSEARCH_SUMMARY_STATE` | Digest state | `~/.local/state/job-search-pipeline/summary_state.json` |
+| `JOBSEARCH_REVIEW_STATE` | Private review evidence | `~/.local/state/job-search-pipeline/review_state.json` |
+| `JOBSEARCH_ACTIONS_STATE` | Local action acknowledgements | `~/.local/state/job-search-pipeline/actions-state.json` |
+| `JOBSEARCH_RANKINGS` | Ranking output used by reports | `~/.local/state/job-search-pipeline/rankings.json` |
+| `JOBSEARCH_DASHBOARD_OUT` | Dashboard output | `~/.local/state/job-search-pipeline/dashboard/index.html` |
 
 `gh` must be authenticated once (`gh auth login`). Discovery, rank, and queue
-read your repo through it.
+read your repository through it. Keep queue, review, work, skip, deadline, and
+draft state outside Git. `JOBSEARCH_REPO` is shared by discovery, rank,
+tailoring, queue, stages, summary, dashboard, and the readiness helper.
 
 ## Setup tracks
 

@@ -25,13 +25,17 @@ import sys
 import urllib.parse
 
 from review_contract import approval_result, canonical_sha256
+from config import (default_repo_dir, default_runtime_path, github_repo_setting,
+                    path_setting)
 
 SERVICE = os.path.dirname(os.path.abspath(__file__))
-REPO_DIR = os.path.join(SERVICE, "repo")
-GH_REPO = os.environ.get("JOBSEARCH_GH_REPO", "example-user/resume")
-REVIEW_STATE = os.path.join(SERVICE, "review_state.json")
-SKIPPED_YAML = os.path.join(SERVICE, "skipped.yaml")
-WORK_DIR = os.environ.get("JOBSEARCH_WORK", os.path.join(SERVICE, "work"))
+REPO_DIR = path_setting("JOBSEARCH_REPO", default_repo_dir())
+GH_REPO = github_repo_setting("JOBSEARCH_GH_REPO", "your-user/your-resume-repo")
+REVIEW_STATE = path_setting("JOBSEARCH_REVIEW_STATE",
+                            default_runtime_path("review_state.json"))
+SKIPPED_YAML = path_setting("JOBSEARCH_SKIPPED",
+                            default_runtime_path("skipped.yaml"))
+WORK_DIR = path_setting("JOBSEARCH_WORK", default_runtime_path("work"))
 
 
 def log(*a):

@@ -31,12 +31,12 @@ import json
 import os
 import re
 import sys
+from config import default_runtime_path, path_setting
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-QUEUE = os.environ.get("JOBSEARCH_QUEUE", os.path.join(HERE, "queue.yaml"))
-REPO = os.path.join(HERE, "repo")
-DEADLINES = os.environ.get("JOBSEARCH_DEADLINES", os.path.join(HERE, "deadlines.yaml"))
-OUTBOX = os.environ.get("JOBSEARCH_OUTBOX", os.path.join(HERE, "outbox"))
+QUEUE = path_setting("JOBSEARCH_QUEUE", default_runtime_path("queue.yaml"))
+DEADLINES = path_setting("JOBSEARCH_DEADLINES", default_runtime_path("deadlines.yaml"))
+OUTBOX = path_setting("JOBSEARCH_OUTBOX", default_runtime_path("outbox"))
 
 DANGER_DAYS = 3
 LOOKAHEAD_DAYS = 14
@@ -382,7 +382,8 @@ def render(data, md=False):
     return f"Job actions · {tdy.strftime('%d/%m/%Y')}\n\n" + "\n".join(lines)
 
 
-ACK_FILE = os.path.join(HERE, "actions-state.json")
+ACK_FILE = path_setting("JOBSEARCH_ACTIONS_STATE",
+                        default_runtime_path("actions-state.json"))
 
 
 def load_ack():
@@ -394,6 +395,7 @@ def load_ack():
 
 
 def save_ack(state):
+    os.makedirs(os.path.dirname(os.path.abspath(ACK_FILE)), exist_ok=True)
     tmp = ACK_FILE + ".tmp"
     with open(tmp, "w") as fh:
         json.dump(state, fh, indent=1)
