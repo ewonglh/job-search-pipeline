@@ -55,9 +55,27 @@ def make_case(root, status="queued"):
     if status == "in_progress":
         item.update({"attempt_id": "attempt-12", "attempt_state": "authorized",
                      "submit_gate": "durable", "claimed_at": q.now_utc()})
+        item["claim_application_id"] = q._canonical_queue_identity(item)
     q.write_queue(queue, [item])
-    return {"root": root, "repo": repo, "profile": profile,
+    case = {"root": root, "repo": repo, "profile": profile,
             "skipped": skipped, "gates": gates, "queue": queue}
+    if status == "in_progress":
+        q.SNAPSHOT_ROOT = os.path.join(root, "private-snapshots")
+        pdf = os.path.join(root, "selected.pdf")
+        answers = os.path.join(root, "selected.json")
+        with open(pdf, "wb") as fh:
+            fh.write(b"%PDF-1.7\nSynthetic fixture resume\n")
+        with open(answers, "w", encoding="utf-8") as fh:
+            fh.write('{"availability":"May to August"}\n')
+        assert cli(["prepare-snapshot", "--queue", queue, "--repo", repo,
+                    "--pr", "12", "--attempt-id", "attempt-12", "--pdf", pdf,
+                    "--answers", answers, "--operator-verification",
+                    "I checked the selected PDF and answers for this posting."]) == 0
+        assert cli(["verify-snapshot", "--queue", queue, "--repo", repo,
+                    "--pr", "12", "--attempt-id", "attempt-12", "--pdf", pdf,
+                    "--answers", answers]) == 0
+        case.update({"pdf": pdf, "answers": answers})
+    return case
 
 
 def cli(args):
@@ -130,7 +148,10 @@ with tempfile.TemporaryDirectory() as directory:
             q._write_queue_unlocked(case["queue"], latest)
         return ""
 
-    with mock.patch.object(q, "write_tracker_row", side_effect=failing_tracker):
+    import submission_snapshot as snapshots
+    with mock.patch.object(q, "write_tracker_row", side_effect=failing_tracker), \
+            mock.patch.object(snapshots, "finalize_snapshot",
+                              side_effect=OSError("injected snapshot finalization fault")):
         rc = cli(status_args(case) + ["--attempt-id", "attempt-12",
                                      "--date", "2026-11-16", "--sent", "PDF and answers",
                                      "--confirmation-evidence", "Employer portal confirmed receipt."])
@@ -140,9 +161,19 @@ with tempfile.TemporaryDirectory() as directory:
     assert submitted["attempt_state"] == "submitted"
     assert submitted["tracker_sync"] == "error"
     assert submitted["tracker_sync_error"] == "tracker_write_failed"
+    assert submitted["snapshot_provenance"] == "incomplete"
+    prepared_id = submitted["prepared_snapshot_id"]
+    assert prepared_id and submitted["snapshot_error"]
     assert submitted["concurrent_metadata"] == "written during tracker call"
     assert submitted["owner_field"] == "preserve owner data"
     assert submitted["notes"] == "preserve notes"
+    assert cli(["finalize-snapshot", "--queue", case["queue"], "--pr", "12",
+                "--attempt-id", "attempt-12"]) == 0
+    finalized = q.load_queue(case["queue"])[0]
+    assert finalized["status"] == "submitted"
+    assert finalized["prepared_snapshot_id"] == prepared_id
+    assert finalized["snapshot_provenance"] == "complete"
+    assert finalized["snapshot_id"] != prepared_id
     with mock.patch.object(q, "write_tracker_row", return_value="present"):
         assert cli(["sync-tracker", "--queue", case["queue"], "--repo", case["repo"],
                     "--pr", "12"]) == 0
@@ -174,6 +205,7 @@ with tempfile.TemporaryDirectory() as directory:
     assert durable["status"] == "in_progress"
     assert durable["attempt_id"] == "attempt-12"
     assert durable["submit_gate"] == "durable"
+    assert durable["prepared_snapshot_id"]
 
     spec = importlib.util.spec_from_file_location("restarted_queue", q.__file__)
     restarted = importlib.util.module_from_spec(spec)
@@ -213,6 +245,13 @@ with tempfile.TemporaryDirectory() as directory:
     q.write_queue(case["queue"], [row])
     assert cli(["status", "--queue", case["queue"], "--pr", "12",
                 "--status", "queued", "--force"]) == 2
+    with mock.patch.object(q, "write_tracker_row", return_value="present"):
+        assert cli(["sync-tracker", "--queue", case["queue"], "--repo", case["repo"],
+                    "--pr", "12"]) == 0
+    historical = q.load_queue(case["queue"])[0]
+    assert historical["status"] == "submitted"
+    assert not historical.get("prepared_snapshot_id")
+    assert not historical.get("snapshot_id")
     assert q.load_queue(case["queue"])[0]["status"] == "submitted"
 
 

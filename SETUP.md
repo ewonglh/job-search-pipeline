@@ -18,6 +18,7 @@ export JOBSEARCH_GH_REPO="owner/private-resume"
 export JOBSEARCH_REPO_URL="https://github.com/owner/private-resume.git"
 export JOBSEARCH_REPO="$HOME/.local/share/job-search-pipeline/resume"
 export JOBSEARCH_QUEUE="$HOME/.local/state/job-search-pipeline/queue.yaml"
+export JOBSEARCH_SNAPSHOT_ROOT="$HOME/.local/state/job-search-pipeline/submission-snapshots"
 export JOBSEARCH_SKIPPED="$HOME/.local/state/job-search-pipeline/skipped.yaml"
 export JOBSEARCH_DEADLINES="$HOME/.local/state/job-search-pipeline/deadlines.yaml"
 export JOBSEARCH_OUTBOX="$HOME/.local/state/job-search-pipeline/outbox"
@@ -26,7 +27,8 @@ export JOBSEARCH_SUMMARY_STATE="$HOME/.local/state/job-search-pipeline/summary_s
 export JOBSEARCH_REVIEW_STATE="$HOME/.local/state/job-search-pipeline/review_state.json"
 export JOBSEARCH_ACTIONS_STATE="$HOME/.local/state/job-search-pipeline/actions-state.json"
 export JOBSEARCH_DASHBOARD_OUT="$HOME/.local/state/job-search-pipeline/dashboard/index.html"
-mkdir -p "$(dirname "$JOBSEARCH_REPO")" "$(dirname "$JOBSEARCH_QUEUE")"
+mkdir -p "$(dirname "$JOBSEARCH_REPO")" "$(dirname "$JOBSEARCH_QUEUE")" \
+  "$JOBSEARCH_SNAPSHOT_ROOT"
 mkdir -p "$(dirname "$JOBSEARCH_SUMMARY_STATE")" "$JOBSEARCH_OUTBOX" "$JOBSEARCH_WORK"
 ```
 
