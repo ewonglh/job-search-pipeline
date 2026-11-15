@@ -127,9 +127,18 @@ def _unquote(value):
     return value
 
 
+def _unique_json_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("JSON contains a duplicate object key")
+        result[key] = value
+    return result
+
+
 def load_reviewed():
     with open(REVIEW_STATE, encoding="utf-8") as fh:
-        state = json.load(fh)
+        state = json.load(fh, object_pairs_hook=_unique_json_object)
     if not isinstance(state, dict) or not isinstance(state.get("reviewed"), dict):
         raise ValueError("review_state.json must contain a reviewed map")
     reviewed = state["reviewed"]
@@ -158,7 +167,10 @@ def load_skips():
         number = int(raw_number) if raw_number else 0
         if number < 0:
             raise ValueError("skipped.yaml has an invalid PR number")
-        link = normalize_url(_unquote(entry.get("link", "")))
+        supplied_link = _unquote(entry.get("link", ""))
+        link = normalize_url(supplied_link)
+        if supplied_link and not link:
+            raise ValueError("skipped.yaml has an invalid posting link")
         if number and number in prs:
             raise ValueError("skipped.yaml has duplicate PR identities")
         if link and link in links:
@@ -241,7 +253,7 @@ def load_work_item(pr):
         raise ValueError("PR branch has an invalid application identity")
     path = os.path.join(WORK_DIR, match.group(1) + ".json")
     with open(path, encoding="utf-8") as fh:
-        item = json.load(fh)
+        item = json.load(fh, object_pairs_hook=_unique_json_object)
     if not isinstance(item, dict):
         raise ValueError("work item is malformed")
     return item

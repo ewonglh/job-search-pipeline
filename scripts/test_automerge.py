@@ -153,12 +153,37 @@ def test_strict_skip_input():
                 raise AssertionError("malformed skip input was accepted")
             except ValueError:
                 pass
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("- pr_number: 99\n  link: https://\n")
+            try:
+                am.load_skips()
+                raise AssertionError("malformed URL with a valid PR was accepted")
+            except ValueError:
+                pass
             os.remove(path)
             try:
                 am.load_skips()
                 raise AssertionError("missing skip input was accepted")
             except FileNotFoundError:
                 pass
+
+
+def test_duplicate_review_json_is_rejected():
+    cases = [
+        '{"reviewed":{"11":{"verdict":"reject"},"11":{"verdict":"approve"}}}',
+        '{"reviewed":{"11":{"verdict":"reject","verdict":"approve"}}}',
+    ]
+    with tempfile.TemporaryDirectory() as root:
+        path = os.path.join(root, "reviews.json")
+        with mock.patch.object(am, "REVIEW_STATE", path):
+            for raw in cases:
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write(raw)
+                try:
+                    am.load_reviewed()
+                    raise AssertionError("duplicate JSON keys were accepted")
+                except ValueError as exc:
+                    assert "duplicate" in str(exc), exc
 
 
 def test_provenance_preflight_and_cap():
@@ -225,9 +250,63 @@ def test_provenance_preflight_and_cap():
                 gates_file=gates_file, repo_dir=repo)
             assert not allowed and "cap" in reason, reason
 
+        tracker_row = ("- company: Synthetic Co\n  role: Software Intern\n"
+                       "  link: " + LINK + "\n  status: Applied\n")
+        active_queue = ("- company: Synthetic Co\n  role: Software Intern\n"
+                        "  link: " + LINK + "\n  status: queued\n  pr_number: 12\n")
+        # One shared Git fixture exercises the verification seams. Each case
+        # changes one input while the review remains internally consistent.
+        cases = [
+            ("artifact", {}, {}, True, "[]\n", "[]\n", "[]\n", "artifact hash mismatch"),
+            ("master", {}, {("rev-parse", "origin/main:master/resume.tex"): "0" * 40},
+             False, "[]\n", "[]\n", "[]\n", "master"),
+            ("profile", {}, {("show", "origin/main:data/profile.yaml"): "name: Changed Candidate"},
+             False, "[]\n", "[]\n", "[]\n", "profile"),
+            ("JD", {"jd_text": "A revised job description."}, {}, False,
+             "[]\n", "[]\n", "[]\n", "job description"),
+            ("malformed queue", {}, {}, False, "not a list\n", "[]\n", "[]\n", "queue"),
+            ("active queue", {}, {}, False, active_queue, "[]\n", "[]\n", "active queue"),
+            ("malformed tracker", {}, {}, False, "[]\n", "[]\n", "not a list\n", "tracker"),
+            ("submitted tracker", {}, {}, False, "[]\n", "[]\n", tracker_row, "already submitted"),
+            ("missing cap", {}, {}, False, "[]\n", None, "[]\n", "unavailable"),
+            ("malformed cap", {}, {}, False, "[]\n", "- unknown: value\n", "[]\n", "unknown field"),
+        ]
+        git_output = am._git_output
+        blob_digest = am._git_blob_sha256
+        for name, updates, git_overrides, bad_artifact, qtext, gtext, tracker, expected in cases:
+            with open(queue_file, "w", encoding="utf-8") as fh:
+                fh.write(qtext)
+            if gtext is None:
+                os.remove(gates_file)
+            else:
+                with open(gates_file, "w", encoding="utf-8") as fh:
+                    fh.write(gtext)
+            current_item = dict(item, **updates)
+
+            def observed_git(path, *args):
+                if args == ("show", "origin/main:applications.yaml"):
+                    return tracker
+                if args in git_overrides:
+                    return git_overrides[args]
+                return git_output(path, *args)
+
+            def observed_digest(path, revision, artifact):
+                if bad_artifact and artifact.endswith(".pdf"):
+                    return "0" * 64
+                return blob_digest(path, revision, artifact)
+
+            with mock.patch.object(am, "_git_output", side_effect=observed_git), \
+                    mock.patch.object(am, "_git_blob_sha256", side_effect=observed_digest):
+                allowed, reason = am.preflight_candidate(
+                    pr(head=head), entry, current_item, queue_module=queue_module,
+                    tailor_module=tailor_module, queue_file=queue_file,
+                    gates_file=gates_file, repo_dir=repo)
+            assert not allowed and expected in reason, (name, allowed, reason)
+
 
 test_main_reports_ready_without_merge()
 test_denials()
 test_strict_skip_input()
+test_duplicate_review_json_is_rejected()
 test_provenance_preflight_and_cap()
 print("test_automerge: readiness, fail-closed inputs, and owner authority passed")
