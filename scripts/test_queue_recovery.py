@@ -271,4 +271,85 @@ with tempfile.TemporaryDirectory() as directory:
     assert cli(["release-stale", "--queue", case["queue"]]) == 1
     assert os.path.getsize(case["queue"]) == 0
 
+# A delayed confirmed success must not be lost to the two-minute pre-submit
+# TTL. Preserve the old timestamp rather than fabricating a late verification.
+with tempfile.TemporaryDirectory() as directory:
+    case = make_case(directory, status="in_progress")
+    rows = q.load_queue(case["queue"])
+    rows[0]["snapshot_verified_at"] = "2000-01-01T00:00:00Z"
+    q.write_queue(case["queue"], rows)
+    assert cli(status_args(case) + ["--attempt-id", "attempt-12",
+               "--date", "2026-11-16", "--sent", "PDF and answers",
+               "--confirmation-evidence", "Employer portal confirmed receipt.",
+               "--no-tracker"]) == 0
+    row = q.load_queue(case["queue"])[0]
+    assert row["status"] == "submitted" and row["snapshot_provenance"] == "complete"
+    assert row["snapshot_verification_at_confirmation"] == "expired"
+    assert row["snapshot_verified_at"] == "2000-01-01T00:00:00Z"
+
+
+def reconcile_args(case):
+    return ["reconcile", "--queue", case["queue"], "--repo", case["repo"],
+            "--pr", "12", "--attempt-id", "attempt-12", "--result", "submitted",
+            "--evidence-source", "employer portal application history",
+            "--evidence-observation", "The portal shows this application was submitted.",
+            "--date", "2026-11-16", "--sent", "PDF and answers",
+            "--confirmation-evidence", "Employer portal confirmed receipt.", "--no-tracker"]
+
+
+# Both confirmation routes preserve success with absent evidence. Recovery also
+# finalizes retained evidence when tracker writes were explicitly disabled.
+for mode in ("status_missing", "status_unverified", "reconcile", "reconcile_fault"):
+    with tempfile.TemporaryDirectory() as directory:
+        case = make_case(directory, status="in_progress")
+        rows = q.load_queue(case["queue"])
+        if mode == "status_missing":
+            rows[0] = {k: v for k, v in rows[0].items()
+                       if not k.startswith(("snapshot_", "prepared_snapshot_"))}
+        elif mode == "status_unverified":
+            rows[0].pop("snapshot_verified_at")
+        else:
+            rows[0]["status"] = "outcome_unknown"
+            rows[0]["attempt_state"] = "outcome_unknown"
+        q.write_queue(case["queue"], rows)
+        args = (reconcile_args(case) if mode.startswith("reconcile") else
+                status_args(case) + ["--attempt-id", "attempt-12", "--date", "2026-11-16",
+                "--sent", "PDF and answers", "--confirmation-evidence",
+                "Employer portal confirmed receipt.", "--no-tracker"])
+        with mock.patch.object(q, "sync_tracker_attempt",
+                               side_effect=AssertionError("no tracker requested")):
+            if mode == "reconcile_fault":
+                with mock.patch.object(q, "_snapshot_store", side_effect=OSError("storage fault")):
+                    rc = cli(args)
+            else:
+                rc = cli(args)
+        row = q.load_queue(case["queue"])[0]
+        expected = {"status_missing": "unknown", "status_unverified": "incomplete",
+                    "reconcile": "complete", "reconcile_fault": "incomplete"}[mode]
+        assert row["status"] == "submitted" and row["attempt_state"] == "submitted"
+        assert row["snapshot_provenance"] == expected, (mode, row)
+        assert rc == (0 if mode == "reconcile" else 1), mode
+        assert bool(row.get("snapshot_id")) == (mode in ("reconcile", "status_unverified"))
+        assert bool(row.get("snapshot_error")) == (mode != "reconcile")
+
+
+# All recovery evidence fields reject credentials before any state mutation;
+# neither errors nor queue contents reveal the synthetic secret.
+with tempfile.TemporaryDirectory() as directory:
+    case = make_case(directory, status="in_progress")
+    rows = q.load_queue(case["queue"])
+    rows[0]["status"] = "outcome_unknown"
+    q.write_queue(case["queue"], rows)
+    with open(case["queue"], "rb") as stream:
+        before = stream.read()
+    for field in ("--confirmation-evidence", "--evidence-source", "--evidence-observation"):
+        args = reconcile_args(case)
+        args[args.index(field) + 1] += "; OTP: R7_SYNTHETIC_SENTINEL"
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+            assert q.main(args) == 2
+        with open(case["queue"], "rb") as stream:
+            assert stream.read() == before
+        assert "R7_SYNTHETIC_SENTINEL" not in output.getvalue()
+
 print("test_queue_recovery: all checks passed")

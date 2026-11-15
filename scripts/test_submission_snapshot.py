@@ -45,6 +45,17 @@ def _write(path, data):
 
 
 with tempfile.TemporaryDirectory() as temp:
+    public = os.path.join(temp, "public-checkout")
+    private = os.path.join(temp, "private-checkout")
+    for checkout in (public, private):
+        expect_error(lambda: snapshots.ensure_external_storage(
+            os.path.join(checkout, ".private", "snapshots"), public, private),
+            "outside Git checkouts")
+    outside = os.path.join(temp, "state", "snapshots")
+    assert snapshots.ensure_external_storage(outside, public, private) == os.path.realpath(outside)
+
+
+with tempfile.TemporaryDirectory() as temp:
     repo = os.path.join(temp, "synthetic-resume-repo")
     os.makedirs(repo)
     subprocess.run(["git", "init", repo], check=True, stdout=subprocess.DEVNULL,

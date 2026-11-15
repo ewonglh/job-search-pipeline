@@ -1701,20 +1701,9 @@ def cmd_status(args, log):
                 if claim_is_stale(it):
                     log("queue: stale claims require reconciliation before confirmation")
                     return 2
-                application_id = _canonical_queue_identity(it)
-                if (it.get("prepared_snapshot_application_id") != application_id
-                        or it.get("prepared_snapshot_attempt_id") != args.attempt_id
-                        or not re.fullmatch(r"[0-9a-f]{64}",
-                                            str(it.get("prepared_snapshot_id") or ""))):
-                    log("queue: prepare a snapshot for this application and attempt before Submit")
-                    return 2
-                if (it.get("snapshot_verified_application_id") != application_id
-                        or it.get("snapshot_verified_attempt_id") != args.attempt_id
-                        or it.get("snapshot_verified_id") != it.get("prepared_snapshot_id")
-                        or it.get("snapshot_provenance") != "verified"
-                        or not snapshot_verification_is_fresh(it)):
-                    log("queue: verify the prepared snapshot and current files immediately before Submit")
-                    return 2
+                # Confirmation is terminal bookkeeping. Never require a new
+                # pre-submit check after the external action has succeeded.
+                it["snapshot_verification_at_confirmation"] = _verification_state(it)
                 it.update({
                     "status": "submitted",
                     "attempt_state": "submitted",
@@ -1735,16 +1724,8 @@ def cmd_status(args, log):
         log("queue: status write failed: " + str(exc))
         return 2
 
-    snapshot_failure = False
-    if new == "submitted":
-        try:
-            _finalize_snapshot_attempt(args.queue, args.pr, args.attempt_id, args.repo)
-        except (OSError, QueueStateError, ValueError):
-            snapshot_failure = True
-            _record_snapshot_failure(args.queue, args.pr, args.attempt_id)
-            log("queue: submission is recorded; snapshot provenance is incomplete. "
-                "Repair with queue.py finalize-snapshot --pr %s --attempt-id %s"
-                % (args.pr, args.attempt_id))
+    snapshot_failure = (new == "submitted" and
+                        _post_submission_snapshot(args, log))
     if new == "submitted" and not args.no_tracker:
         sync_rc = sync_tracker_attempt(args.queue, args.pr, args.repo, log)
     else:
@@ -1892,6 +1873,31 @@ def cmd_verify_snapshot(args, log):
     return 0
 
 
+def _verification_state(item):
+    """Describe the recorded check without inventing a post-submit check."""
+    if (not item.get("prepared_snapshot_id")
+            or item.get("snapshot_verified_application_id") != _canonical_queue_identity(item)
+            or item.get("snapshot_verified_attempt_id") != item.get("attempt_id")
+            or item.get("snapshot_verified_id") != item.get("prepared_snapshot_id")
+            or not norm_ts(item.get("snapshot_verified_at"))):
+        return "missing_or_mismatched"
+    return "fresh" if snapshot_verification_is_fresh(item) else "expired"
+
+
+def _post_submission_snapshot(args, log):
+    """Shared post-confirmation repair; the durable outcome never reopens."""
+    try:
+        _finalize_snapshot_attempt(args.queue, args.pr, args.attempt_id, args.repo)
+        return False
+    except (OSError, QueueStateError, ValueError):
+        _record_snapshot_failure(args.queue, args.pr, args.attempt_id)
+        log("queue: submission is recorded; snapshot provenance needs attention. "
+            "Inspect snapshot_error; repair retained evidence with queue.py "
+            "finalize-snapshot --pr %s --attempt-id %s. Never resubmit."
+            % (args.pr, args.attempt_id))
+        return True
+
+
 def _finalize_snapshot_attempt(queue_path, pr_number, attempt_id, private_repo=None):
     """Finalize only an already submitted row; never creates a submission."""
     import submission_snapshot as snapshots
@@ -1923,12 +1929,18 @@ def _finalize_snapshot_attempt(queue_path, pr_number, attempt_id, private_repo=N
                 or current.get("prepared_snapshot_id") != snapshot_id
                 or _canonical_queue_identity(current) != application_id):
             raise QueueStateError("submitted attempt changed during snapshot finalization")
+        verified = _verification_state(current) != "missing_or_mismatched"
         current.update({"snapshot_id": finalized_id,
-                        "snapshot_provenance": "complete",
+                        "snapshot_provenance": "complete" if verified else "incomplete",
                         "snapshot_finalized_at": now_utc(),
-                        "snapshot_error": ""})
+                        "snapshot_error": "" if verified else (
+                            "Pre-submit verification was not recorded for these materials; "
+                            "retained bytes are finalized, but historical verification "
+                            "cannot be recreated. Never resubmit.")})
         rows[idx] = current
         _write_queue_unlocked(queue_path, rows)
+    if not verified:
+        raise QueueStateError("pre-submit verification is missing")
 
 
 def _record_snapshot_failure(queue_path, pr_number, attempt_id):
@@ -1940,14 +1952,25 @@ def _record_snapshot_failure(queue_path, pr_number, attempt_id):
             current = dict(rows[idx])
             if (current.get("status") != "submitted"
                     or current.get("attempt_id") != attempt_id
-                    or current.get("submitted_attempt_id") != attempt_id
-                    or not current.get("prepared_snapshot_id")):
+                    or current.get("submitted_attempt_id") != attempt_id):
                 return
-            current["snapshot_provenance"] = "incomplete"
-            current["snapshot_error"] = (
-                "Private snapshot finalization failed; retain this submitted attempt, "
-                "restore snapshot storage, then run queue.py finalize-snapshot "
-                "--pr %s --attempt-id %s." % (pr_number, attempt_id))
+            if not current.get("prepared_snapshot_id"):
+                current["snapshot_provenance"] = "unknown"
+                current["snapshot_error"] = (
+                    "No retained snapshot exists for this submitted attempt; "
+                    "historical materials cannot be recreated. Never resubmit.")
+            elif (current.get("snapshot_id")
+                  and _verification_state(current) == "missing_or_mismatched"):
+                current["snapshot_provenance"] = "incomplete"
+                current["snapshot_error"] = (
+                    "Pre-submit verification is missing; historical verification "
+                    "cannot be recreated. Never resubmit.")
+            else:
+                current["snapshot_provenance"] = "incomplete"
+                current["snapshot_error"] = (
+                    "Private snapshot finalization failed; retain this submitted attempt, "
+                    "restore snapshot storage, then run queue.py finalize-snapshot "
+                    "--pr %s --attempt-id %s." % (pr_number, attempt_id))
             rows[idx] = current
             _write_queue_unlocked(queue_path, rows)
     except (OSError, QueueStateError):
@@ -1971,6 +1994,9 @@ def _concrete_reconciliation_evidence(args, expected):
     observation = norm_text(args.evidence_observation)
     if len(source) < 8 or len(observation) < 20:
         raise QueueStateError("reconciliation needs a specific evidence source and observation")
+    import submission_snapshot
+    # Apply the same credential filter to every free-form evidence field.
+    submission_snapshot.validate_confirmation_evidence(source + ". " + observation)
     if source.casefold() in {"review", "manual review", "notes", "operator", "user"}:
         raise QueueStateError("generic review notes are not reconciliation evidence")
     if not re.search(r"\b(portal|history|email|confirmation|receipt|ATS|candidate|employer)\b|https?://",
@@ -2021,6 +2047,8 @@ def cmd_reconcile(args, log):
             datetime.strptime(args.date, "%Y-%m-%d")
             if not _valid_confirmation_evidence(args.confirmation_evidence):
                 raise QueueStateError("confirmation evidence must describe the observed success")
+            import submission_snapshot
+            submission_snapshot.validate_confirmation_evidence(args.confirmation_evidence)
         with queue_lock(args.queue):
             items = load_queue(args.queue)
             idx = _unique_item_index(items, args.pr)
@@ -2046,6 +2074,7 @@ def cmd_reconcile(args, log):
                     item.pop(key, None)
                 item["status"] = "queued"
             else:
+                item["snapshot_verification_at_confirmation"] = _verification_state(item)
                 item.update({
                     "status": "submitted",
                     "attempt_state": "submitted",
@@ -2056,6 +2085,8 @@ def cmd_reconcile(args, log):
                     "tracker_sync": "pending",
                     "tracker_sync_error": "",
                     "route": norm_text(args.route),
+                    "snapshot_provenance": "pending",
+                    "snapshot_error": "",
                 })
                 item.pop("next_action", None)
             items[idx] = item
@@ -2063,9 +2094,12 @@ def cmd_reconcile(args, log):
     except (OSError, QueueStateError, ValueError) as exc:
         log("queue: reconciliation blocked: " + str(exc))
         return 2
-    if args.result != "submitted" or args.no_tracker:
+    if args.result != "submitted":
         return 0
-    return sync_tracker_attempt(args.queue, args.pr, args.repo, log)
+    snapshot_failure = _post_submission_snapshot(args, log)
+    sync_rc = (0 if args.no_tracker else
+               sync_tracker_attempt(args.queue, args.pr, args.repo, log))
+    return 1 if snapshot_failure or sync_rc else 0
 
 
 def sync_tracker_attempt(queue_path, pr_number, repo, log, dry_run=False):

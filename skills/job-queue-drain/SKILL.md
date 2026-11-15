@@ -85,9 +85,9 @@ python3 scripts/queue.py verify-snapshot --pr PR_NUMBER \
 
 The verification expires after two minutes. Do not change the selected files
 after verification. A mismatch clears the prior verification and requires a
-new `prepare-snapshot`, followed by `verify-snapshot` again. The queue's
-`status --status submitted` command refuses to record a new submission without
-the matching prepared and recently verified snapshot.
+new `prepare-snapshot`, followed by `verify-snapshot` again. This is the gate
+before Submit. After employer confirmation, always record success even if the
+check has expired; never rerun a pre-submit check to conceal missing evidence.
 
 After the employer confirms submission, record that external confirmation
 against the exact attempt:
@@ -125,6 +125,11 @@ Tracker sync only updates `applications.yaml` bookkeeping. It does not change
 submission facts, create historical snapshots, or authorize another form
 attempt. Rows from before snapshot support have unknown snapshot provenance. A
 submission may be reconciled as submitted with the same terminal behavior.
+Both confirmation routes finalize retained evidence even with `--no-tracker`.
+The queue preserves the original verification timestamp and reports whether it
+was fresh, expired, or missing at confirmation. Missing retained materials stay
+`unknown`; a missing pre-submit check leaves provenance `incomplete` even if
+retained bytes can be finalized. Neither condition authorizes another attempt.
 
 ## Interrupted attempts and reconciliation
 

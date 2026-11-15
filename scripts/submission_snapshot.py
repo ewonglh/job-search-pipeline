@@ -195,10 +195,11 @@ def ensure_external_storage(snapshot_root, public_repo, private_repo=None):
             continue
         checkout = os.path.realpath(os.path.abspath(os.fspath(repo)))
         try:
-            if os.path.commonpath((root, checkout)) == checkout:
-                raise SnapshotError("snapshot storage must be outside Git checkouts")
+            common = os.path.commonpath((root, checkout))
         except ValueError:
             continue
+        if common == checkout:
+            raise SnapshotError("snapshot storage must be outside Git checkouts")
     return root
 
 
