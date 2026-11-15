@@ -1,0 +1,148 @@
+#!/usr/bin/env python3
+"""Validate a structured review against one immutable application snapshot.
+
+This module checks the shape and linkage of review evidence. It does not make
+the reviewer decision, contact a model, or authorize a GitHub merge.
+"""
+import hashlib
+import json
+import re
+from urllib.parse import urlsplit
+from datetime import datetime
+
+SCHEMA = 1
+SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+ARTIFACT_RE = re.compile(
+    r"^variants/[A-Za-z0-9][A-Za-z0-9._-]*/"
+    r"(?:resume\.(?:tex|pdf|txt)|cover[_-]letter\.md)$"
+)
+
+
+def sha256_bytes(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def canonical_sha256(value):
+    """Hash JSON data using stable UTF-8 encoding and key ordering."""
+    data = json.dumps(value, ensure_ascii=False, sort_keys=True,
+                      separators=(",", ":")).encode("utf-8")
+    return sha256_bytes(data)
+
+
+def valid_provenance(provenance, head_sha):
+    """Return (valid, reason) for the immutable inputs reviewed by a model."""
+    if not isinstance(provenance, dict):
+        return False, "provenance is missing or malformed"
+    if type(provenance.get("schema")) is not int or provenance["schema"] != SCHEMA:
+        return False, "unsupported provenance schema"
+    if not isinstance(head_sha, str) or not SHA_RE.fullmatch(head_sha):
+        return False, "current PR head is unavailable"
+    if provenance.get("review_head_sha") != head_sha:
+        return False, "review provenance is for a stale PR head"
+    for key in ("master_commit", "master_resume_blob"):
+        if not isinstance(provenance.get(key), str) or not SHA_RE.fullmatch(provenance[key]):
+            return False, "provenance has an invalid " + key
+    if provenance.get("master_resume_path") != "master/resume.tex":
+        return False, "provenance has an unexpected master resume path"
+    for key in ("current_jd_sha256", "profile_sha256"):
+        if not isinstance(provenance.get(key), str) or not SHA256_RE.fullmatch(provenance[key]):
+            return False, "provenance has an invalid " + key
+    artifacts = provenance.get("artifacts")
+    if not isinstance(artifacts, dict) or not artifacts:
+        return False, "provenance has no artifact hashes"
+    for path, digest in artifacts.items():
+        if not isinstance(path, str) or not ARTIFACT_RE.fullmatch(path):
+            return False, "provenance has an invalid artifact path"
+        if not isinstance(digest, str) or not SHA256_RE.fullmatch(digest):
+            return False, "provenance has an invalid artifact hash"
+    if not any(path.endswith("/resume.tex") for path in artifacts):
+        return False, "provenance does not hash resume.tex"
+    if not any(path.endswith("/resume.pdf") for path in artifacts):
+        return False, "provenance does not hash resume.pdf"
+    return True, "valid"
+
+
+def audit_eligible(audit, provenance):
+    """Check structured reviewer findings and their provenance binding."""
+    if not isinstance(audit, dict):
+        return False
+    if audit.get("truthfulness") != "pass":
+        return False
+    if audit.get("eligibility") not in ("eligible", "unknown"):
+        return False
+    if (audit.get("eligibility") == "unknown"
+            and (not isinstance(audit.get("eligibility_evidence_resolves_ambiguity"), str)
+                 or not audit["eligibility_evidence_resolves_ambiguity"].strip())):
+        return False
+    if not all(audit.get(key) is True for key in
+               ("layout_checked", "onepage_checked", "no_tracker_edit")):
+        return False
+    findings = audit.get("findings")
+    if not isinstance(findings, list):
+        return False
+    allowed = {"info", "informational", "minor", "moderate", "major",
+               "blocker", "blocking"}
+    for finding in findings:
+        if not isinstance(finding, dict):
+            return False
+        severity, message = finding.get("severity"), finding.get("message")
+        if not isinstance(severity, str) or severity.lower() not in allowed:
+            return False
+        if not isinstance(message, str) or not message.strip():
+            return False
+        if severity.lower() in {"major", "blocker", "blocking"}:
+            return False
+    if not isinstance(audit.get("summary"), str) or not audit["summary"].strip():
+        return False
+    posting_url = audit.get("posting_url")
+    try:
+        parsed = urlsplit(posting_url) if isinstance(posting_url, str) else None
+    except ValueError:
+        parsed = None
+    if parsed is None or parsed.scheme not in ("http", "https") or not parsed.netloc:
+        return False
+    for key in ("current_jd_sha256", "profile_sha256"):
+        if audit.get(key) != provenance.get(key):
+            return False
+    if audit.get("master_commit") != provenance.get("master_commit"):
+        return False
+    if audit.get("master_resume_blob") != provenance.get("master_resume_blob"):
+        return False
+    if audit.get("artifact_sha256") != provenance.get("artifacts"):
+        return False
+    if audit.get("provenance_sha256") != canonical_sha256(provenance):
+        return False
+    checked_at = audit.get("checked_at")
+    if not isinstance(checked_at, str) or not re.fullmatch(
+            r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", checked_at):
+        return False
+    try:
+        datetime.strptime(checked_at, "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError:
+        return False
+    return True
+
+
+def approval_result(entry, head_sha):
+    """Return (valid, reason) for a review record at the current PR head."""
+    if not isinstance(entry, dict) or entry.get("verdict") != "approve":
+        return False, "review is not an approve verdict"
+    if not isinstance(head_sha, str) or not SHA_RE.fullmatch(head_sha):
+        return False, "current PR head is unavailable"
+    if entry.get("review_head_sha") != head_sha:
+        return False, "review is for a stale PR head"
+    provenance = entry.get("provenance")
+    valid, reason = valid_provenance(provenance, head_sha)
+    if not valid:
+        return False, reason
+    reviewer = entry.get("reviewer_version")
+    if not isinstance(reviewer, str) or not reviewer.strip():
+        return False, "reviewer version is missing"
+    if not audit_eligible(entry.get("audit"), provenance):
+        return False, "review audit is incomplete or malformed"
+    return True, "valid current-head review"
+
+
+def approval_valid(entry, head_sha):
+    return approval_result(entry, head_sha)[0]
