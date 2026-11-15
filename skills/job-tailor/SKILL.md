@@ -32,11 +32,44 @@ Never do the mechanical half by hand. Never do the judgement half with a regex.
 
 1. Read the work item. If `jd_text` is empty or the guard verdict is `needs_jd`,
    stop and report; do not tailor from a guessed description.
+   Stop for `eligibility.status: ineligible` or `unknown`, a `posting_closed`
+   hold, or any missing/unavailable input. `--force` skips duplicate selection
+   only; it never bypasses these holds.
 2. Select evidence from the master resume that genuinely matches the posting.
    Rewriting is compression and reordering, never invention.
-3. Build the variant, render it, check the PDF is one or two pages.
-4. Open the PR. State the posting link in the body. Do not merge it yourself.
-5. Report the PR number, the branch, and one line on what changed.
+3. Build the variant. Run the deterministic structural checks from `scripts/`:
+
+   ```bash
+   python3 cv_checks.py --master "$JOBSEARCH_REPO/master/resume.tex" \
+     --resume "$JOBSEARCH_REPO/variants/<slug>/resume.tex" --json
+   ```
+
+   A finding requests review; an empty finding list only means these structural
+   checks passed. They do not prove semantic truth. Build/render the PDF using
+   the configured resume toolchain and check its page count.
+4. After the artifact is committed on its branch, run the exact-input preflight
+   from `scripts/`:
+
+   ```bash
+   python3 tailor_preflight.py \
+     --work-item "$JOBSEARCH_WORK/<slug>.json" \
+     --master "$JOBSEARCH_REPO/master/resume.tex" \
+     --profile "$JOBSEARCH_REPO/data/profile.yaml" \
+     --artifact "$JOBSEARCH_REPO/variants/<slug>/resume.tex" \
+     --head "$(git -C "$JOBSEARCH_REPO" rev-parse HEAD)" \
+     --pdf "$JOBSEARCH_REPO/variants/<slug>/resume.pdf"
+   ```
+
+   The report compares exact master, profile, guarded JD, role/title, artifact
+   and head hashes. Without a layout checker or a matching prior owner-accepted
+   record it reports `review_required`; unavailable inputs and stale evidence
+   are never clean results. `--accepted-record PATH` may check an existing
+   `owner_accepted_preflight` record (schema version 1, `accepted`,
+   `accepted_by`, `accepted_at`, `input_hashes`, `artifact_sha256`, and `head`).
+   The checker does not create or promote that record, and its result cannot
+   authorize a merge or queue enqueue.
+5. Open the PR. State the posting link in the body. Do not merge it yourself.
+6. Report the PR number, the branch, and one line on what changed.
 
 ## Approval gates
 

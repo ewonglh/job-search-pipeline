@@ -54,6 +54,23 @@ Alternative degree, year and citizenship requirements remain `unknown` for
 review. Provenance includes the profile, guarded JD body, role/title metadata
 and combined evaluated text hashes.
 
+Tailor uses the same `eligibility.evaluate` decision before emitting a work
+item. Explicit conflicts and guarded closure evidence become holds; unknown
+requirements, missing source files, and unavailable JDs also stay out of
+generation. `--force` bypasses duplicate selection only. Ready work items carry
+exact profile and master byte hashes plus the evaluator's guarded JD,
+role/title, and combined-text hashes.
+
+Before PR review, run `scripts/cv_checks.py` on the master and generated TeX, then
+`scripts/tailor_preflight.py` with the current work item, master, profile,
+artifact, and commit head. The structural findings cover only supported
+templates, source-entry matching, bullet coverage, numeric claims, team credit,
+and chronology; semantic review remains required. The preflight reports
+`review_required` when inputs or the optional layout checker are unavailable,
+when evidence is stale, or when no matching prior owner-accepted check record
+exists. It consumes but never creates accepted records and cannot authorize a
+merge or enqueue. See `skills/job-tailor/SKILL.md` for the exact commands.
+
 ## Approval gates
 
 | Gate | Blocks | Relaxable |
@@ -110,6 +127,8 @@ cp demo/repo/applications.yaml "$JOBSEARCH_REPO/applications.yaml"
 cd scripts
 python3 test_queue.py
 python3 test_tailor.py
+python3 test_cv_checks.py
+python3 test_tailor_preflight.py
 python3 test_stages.py
 python3 test_dashboard.py
 python3 test_config.py
@@ -117,8 +136,9 @@ python3 test_config.py
 
 `DEMO_ROOT` is outside the checkout. `demo/` contains fictional sample data;
 copy it only into a private resume repository. The four required suites are
-offline and need Python 3.9 or newer. No live repository or credentials are
-needed for these tests.
+offline and need Python 3.9 or newer. `test_cv_checks.py` and
+`test_tailor_preflight.py` are the focused tailoring checks. No live repository
+or credentials are needed for these tests.
 
 ## Configuration
 

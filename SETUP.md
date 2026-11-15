@@ -264,6 +264,8 @@ Then run these. Each is independent and cheap:
 cd scripts
 python3 test_queue.py
 python3 test_tailor.py
+python3 test_cv_checks.py
+python3 test_tailor_preflight.py
 python3 test_stages.py
 python3 test_dashboard.py
 python3 test_config.py
@@ -272,7 +274,8 @@ python3 stages.py list
 python3 tailor.py --list --force
 ```
 
-The four required offline suites print `all assertions passed`; `test_config.py`
+The four required offline suites print `all assertions passed`; `test_cv_checks.py`
+and `test_tailor_preflight.py` cover the new tailoring checks. `test_config.py`
 checks external paths and invalid setup. The listing commands read only the
 synthetic external repo or runtime paths.
 
