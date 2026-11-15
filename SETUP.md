@@ -84,8 +84,13 @@ Matcher repairs require a new name, for example
 `--mode repair --repair-name matcher-v2`; they use an independent cursor.
 Changing a date window starts a separate cursor so historical UIDs are not
 skipped. Runs are bounded by `--max-messages`, `--max-seconds`, body and header
-limits, and a folder cap. Re-run an interrupted scan to resume it. The health
-output reports skipped folders, UIDVALIDITY resets, exclusions and incomplete
+limits, and a folder cap. Re-run an interrupted scan to resume it. Oversized
+headers remain in the ledger as unverified provider-bound review items.
+The time budget is checked around each IMAP operation, including empty folders;
+socket timeouts shrink to the remaining budget. Persistence and local processing
+can add overhead, so this is a cooperative scan limit. The managed adapter also
+has a separate process timeout. The health output reports skipped folders,
+UIDVALIDITY resets, exclusions and incomplete
 bodies without exposing message text. `transport_complete` means the selected
 UID range was read; `coverage.complete` remains false because transport
 completion cannot establish complete callback recall.

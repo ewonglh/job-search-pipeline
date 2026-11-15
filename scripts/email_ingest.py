@@ -39,6 +39,10 @@ SOURCE = "imap_readonly"
 STATE_SCHEMA = 1
 
 
+class ScanDeadline(TimeoutError):
+    """No further mailbox work is allowed within this scan budget."""
+
+
 def _bounded_int(value, low, high, label):
     try:
         value = int(value)
@@ -382,7 +386,8 @@ def run_scan(transport, *, account, account_address, folders, tracker_rows,
              ledger_path, state_path, state, mode="initial", since=None,
              until=None, repair_name=None, max_messages=100, max_seconds=30,
              max_body_bytes=MAX_BODY_BYTES, max_header_bytes=MAX_HEADER_BYTES,
-             max_folders=MAX_FOLDERS, persist=None, clock=None):
+             max_folders=MAX_FOLDERS, persist=None, clock=None,
+             monotonic=None, deadline=None):
     """Run a deterministic bounded scan against an injected transport.
 
     ``transport`` implements list/select/search/header/body methods. ``persist``
@@ -406,7 +411,20 @@ def run_scan(transport, *, account, account_address, folders, tracker_rows,
     excluded_folders = max(0, len(folder_names) - max_folders)
     excluded_folder_names = folder_names[max_folders:]
     folder_names = folder_names[:max_folders]
-    started = time.monotonic()
+    monotonic = monotonic or time.monotonic
+    deadline = deadline if deadline is not None else monotonic() + max_seconds
+
+    def mailbox_call(method, *args):
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            raise ScanDeadline()
+        if hasattr(transport, "set_timeout"):
+            transport.set_timeout(remaining)
+        result = method(*args)
+        if monotonic() >= deadline:
+            raise ScanDeadline()
+        return result
+
     scanned = 0
     records = []
     interrupted = False
@@ -421,7 +439,7 @@ def run_scan(transport, *, account, account_address, folders, tracker_rows,
         scope_key = cursor_key(account, folder, window)
         old = state["scopes"].get(scope_key, {})
         try:
-            selection = transport.select(folder)
+            selection = mailbox_call(transport.select, folder)
             if not isinstance(selection, dict) or not selection.get("ok"):
                 raise OSError("folder unavailable")
             uidvalidity = str(selection.get("uidvalidity") or "")
@@ -429,7 +447,7 @@ def run_scan(transport, *, account, account_address, folders, tracker_rows,
                 raise OSError("uidvalidity unavailable")
             reset = bool(old and old.get("uidvalidity") != uidvalidity)
             cursor_uid = 0 if reset or not old else old["uid"]
-            uids = transport.search(folder, cursor_uid)
+            uids = mailbox_call(transport.search, folder, cursor_uid)
             if not isinstance(uids, (list, tuple)):
                 raise OSError("search unavailable")
             def parse_uid(uid):
@@ -446,6 +464,7 @@ def run_scan(transport, *, account, account_address, folders, tracker_rows,
             progress_uid = cursor_uid
             batch = []
             folder_interrupted = False
+            interruption_reason = ""
 
             def commit(progress):
                 coverage_rows = records + [_coverage_row(
@@ -468,22 +487,37 @@ def run_scan(transport, *, account, account_address, folders, tracker_rows,
                 # Record the reset and the new UIDVALIDITY even for an empty mailbox.
                 progress_uid = 0
             for uid in todo:
-                if scanned >= max_messages or time.monotonic() - started >= max_seconds:
+                if scanned >= max_messages or monotonic() >= deadline:
                     interrupted = folder_interrupted = True
+                    interruption_reason = ("time_limit" if monotonic() >= deadline
+                                           else "message_limit")
                     break
                 try:
-                    raw_headers, size = transport.headers(uid)
+                    raw_headers, size = mailbox_call(transport.headers, uid)
                     if not isinstance(raw_headers, bytes):
                         raise OSError("header fetch failed")
                     if len(raw_headers) > max_header_bytes:
                         counts["header_limit_exclusions"] += 1
-                        counts["candidate_exclusions"] += 1
+                        # Do not interpret a truncated header. Preserve a
+                        # bounded provider-bound review record before progress.
+                        provider = {"account": account, "folder": folder,
+                                    "uidvalidity": uidvalidity, "uid": uid}
+                        identity = json.dumps(provider, sort_keys=True).encode()
+                        batch.append({
+                            "account": account,
+                            "message_id": "weak:" + hashlib.sha256(identity).hexdigest(),
+                            "subject": "[headers exceed configured limit]",
+                            "body_complete": False, "source": SOURCE,
+                            "provider_identity": provider,
+                            "fetch_limitation": "header_size_limit",
+                        })
+                        counts["candidate_messages"] += 1
                         processed += 1
                         progress_uid = uid
                     else:
                         raw_body = b""
                         if isinstance(size, int) and 0 <= size <= max_body_bytes:
-                            raw_body = transport.body(uid, max_body_bytes + 1)
+                            raw_body = mailbox_call(transport.body, uid, max_body_bytes + 1)
                             if not isinstance(raw_body, bytes):
                                 raise OSError("body fetch failed")
                         message = normalize_message(
@@ -505,10 +539,12 @@ def run_scan(transport, *, account, account_address, folders, tracker_rows,
                             counts["candidate_messages"] += 1
                         processed += 1
                         progress_uid = uid
-                except Exception:
+                except Exception as exc:
                     # Do not commit the failing UID. Earlier batch evidence may
                     # be committed and safely replayed if its cursor write fails.
                     interrupted = folder_interrupted = True
+                    interruption_reason = ("time_limit" if isinstance(exc, ScanDeadline)
+                                           or monotonic() >= deadline else "message_read_failed")
                     break
                 scanned += 1
                 if processed >= MAX_BATCH:
@@ -523,6 +559,10 @@ def run_scan(transport, *, account, account_address, folders, tracker_rows,
                 counts["candidate_exclusions"] += 1
                 folder_interrupted = True
                 interrupted = True
+                interruption_reason = "search_limit"
+            if monotonic() >= deadline:
+                interrupted = folder_interrupted = True
+                interruption_reason = "time_limit"
             folder_status = "interrupted" if folder_interrupted else "scanned"
             if folder_interrupted:
                 interrupted = True
@@ -532,15 +572,20 @@ def run_scan(transport, *, account, account_address, folders, tracker_rows,
                                 reset=reset, interrupted=folder_interrupted)
             row["last_uid"] = cursor_uid
             row["candidate_list_truncated"] = candidate_truncated
+            if interruption_reason:
+                row["reason"] = interruption_reason
             records.append(row)
             folder_report.append(row)
-        except Exception:
+        except Exception as exc:
             interrupted = True
-            total_counts["unreadable_folders"] += 1
+            timed_out = isinstance(exc, ScanDeadline) or monotonic() >= deadline
+            if not timed_out:
+                total_counts["unreadable_folders"] += 1
             row = _coverage_row(account, folder, window, "", counts,
-                                status="unreadable", transport_complete=False,
+                                status="interrupted" if timed_out else "unreadable",
+                                transport_complete=False,
                                 interrupted=True)
-            row["reason"] = "folder_unreadable"
+            row["reason"] = "time_limit" if timed_out else "folder_unreadable"
             folder_report.append(row)
 
     for folder in excluded_folder_names:
@@ -549,6 +594,7 @@ def run_scan(transport, *, account, account_address, folders, tracker_rows,
         row["reason"] = "folder_limit"
         folder_report.append(row)
 
+    interrupted = interrupted or monotonic() >= deadline
     finished = not interrupted and excluded_folders == 0
     # Always write coverage, including empty scans and folders that could not be read.
     coverage = {"complete": False, "transport_complete": finished,
@@ -582,6 +628,11 @@ class IMAPTransport:
     """Small read-only wrapper; all message data is fetched with BODY.PEEK."""
     def __init__(self, client):
         self.client = client
+
+    def set_timeout(self, remaining):
+        # Bound each socket operation to the remaining scan budget. The
+        # caller also checks the absolute deadline around every IMAP call.
+        self.client.sock.settimeout(min(15.0, remaining))
 
     def select(self, folder):
         status, _ = self.client.select(folder, readonly=True)
@@ -669,9 +720,15 @@ def _managed_scan(args):
     _bounded_int(args.max_body_bytes, 1024, MAX_BODY_BYTES, "body limit")
     with state_lock(state_path):
         state = load_state(state_path)
+        deadline = time.monotonic() + args.max_seconds
         server = imaplib.IMAP4_SSL(credential["host"], credential["port"],
-                                   ssl_context=ssl.create_default_context(), timeout=15)
+                                   ssl_context=ssl.create_default_context(),
+                                   timeout=min(15, args.max_seconds))
         try:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ScanDeadline()
+            server.sock.settimeout(min(15.0, remaining))
             server.login(credential["user"], credential["password"])
             transport = IMAPTransport(server)
             result = run_scan(transport, account=credential["account"],
@@ -681,10 +738,15 @@ def _managed_scan(args):
                               since=window["since"] or None, until=window["until"] or None,
                               repair_name=window["repair_name"] or None,
                               max_messages=args.max_messages, max_seconds=args.max_seconds,
-                              max_body_bytes=args.max_body_bytes)
+                              max_body_bytes=args.max_body_bytes, deadline=deadline)
         finally:
             try:
-                server.logout()
+                remaining = deadline - time.monotonic()
+                if remaining > 0:
+                    server.sock.settimeout(min(15.0, remaining))
+                    server.logout()
+                else:
+                    server.shutdown()
             except Exception:
                 pass
     print(json.dumps({key: result[key] for key in (
