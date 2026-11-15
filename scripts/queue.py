@@ -1068,12 +1068,15 @@ def _read_gate_entries(path, required=False):
     explicit_empty = any(line.strip() == "[]" for line in text.splitlines())
     entries, current = [], None
     in_reason = False
-    for line_no, raw in enumerate(text.splitlines(), 1):
+    lines = text.splitlines()
+    for line_no, raw in enumerate(lines, 1):
         stripped = raw.strip()
         if not stripped or stripped.startswith("#"):
             continue
         if stripped == "[]":
-            if entries or current is not None:
+            if entries or current is not None or any(
+                    line.strip() and not line.lstrip().startswith("#")
+                    for line in lines[line_no:]):
                 raise QueueStateError("malformed owner cap file at line %d" % line_no)
             return []
         if raw.startswith("    ") and in_reason:
@@ -1144,6 +1147,45 @@ def _check_owner_controls(posting, skipped, gates):
             raise QueueStateError("an owner application cap is active for this posting")
 
 
+def _check_claim_identities(item, queue_items, tracker_rows, posting):
+    """Apply the same identity gates before and after the network check."""
+    import application_identity as identity
+    app_id = _canonical_queue_identity(item)
+    if sum(1 for row in queue_items
+           if identity.normalize_posting_url(row.get("link")) == app_id[5:]) != 1:
+        raise QueueStateError("queue posting link has a duplicate or conflicting alias")
+    target_index = queue_items.index(item)
+    effective = dict(item)
+    for key in ("company", "role"):
+        if not norm_text(effective.get(key)):
+            effective[key] = posting.get(key, "")
+    effective_queue = list(queue_items)
+    effective_queue[target_index] = effective
+    resolution = identity.resolve_applications(tracker_rows, effective_queue)
+    target_queue_ref = "queue:%d" % (len(tracker_rows) + target_index + 1)
+    if any(target_queue_ref in conflict.get("row_refs", [])
+           for conflict in resolution.get("conflicts", [])):
+        raise QueueStateError("application identity conflicts with another queue or tracker row")
+    for tracker in tracker_rows:
+        try:
+            tracker_pr = identity.pr_number(tracker)
+        except (TypeError, ValueError) as exc:
+            raise QueueStateError("tracker contains contradictory PR aliases") from exc
+        tracker_link = identity.normalize_posting_url(tracker.get("link"))
+        same_id = tracker_link == app_id[5:] if tracker_link else False
+        same_pr = tracker_pr and tracker_pr == pr_number_of(item)
+        if same_pr and tracker_link and tracker_link != app_id[5:]:
+            raise QueueStateError("current tracker PR alias points at a different posting")
+        same_name = (norm_text(tracker.get("company")).casefold(),
+                     norm_text(tracker.get("role")).casefold()) == (
+                         norm_text(posting.get("company")).casefold(),
+                         norm_text(posting.get("role")).casefold())
+        if (same_id or same_pr or same_name) and not same_pr:
+            raise QueueStateError("current tracker contains a conflicting application identity")
+        if (same_id or same_pr) and canonical_submitted(tracker.get("status")):
+            raise QueueStateError("application is already recorded as submitted")
+
+
 def _read_claim_inputs(args, item, queue_items):
     import application_identity as identity
     import eligibility
@@ -1151,9 +1193,6 @@ def _read_claim_inputs(args, item, queue_items):
     from posting_guard import guard_text
 
     app_id = _canonical_queue_identity(item)
-    if sum(1 for row in queue_items
-           if identity.normalize_posting_url(row.get("link")) == app_id[5:]) != 1:
-        raise QueueStateError("queue posting link has a duplicate or conflicting alias")
 
     postings_path = os.path.join(args.repo, "data", "postings.json")
     try:
@@ -1193,35 +1232,12 @@ def _read_claim_inputs(args, item, queue_items):
     if not isinstance(profile, dict) or not profile:
         raise QueueStateError("selected profile is empty")
 
-    import application_identity as app_identity
     tracker_path = os.path.join(args.repo, TRACKER_PATH)
     if not os.path.isfile(tracker_path):
         raise QueueStateError("current application tracker is unavailable")
     tracker_rows = _read_flat_entries(tracker_path, "current application tracker",
                                       required=True)
-    resolution = app_identity.resolve_applications(tracker_rows, queue_items)
-    target_queue_ref = "queue:%d" % (queue_items.index(item) + 1)
-    if any(target_queue_ref in conflict.get("row_refs", [])
-           for conflict in resolution.get("conflicts", [])):
-        raise QueueStateError("application identity conflicts with another queue or tracker row")
-    for tracker in tracker_rows:
-        try:
-            tracker_pr = app_identity.pr_number(tracker)
-        except (TypeError, ValueError) as exc:
-            raise QueueStateError("tracker contains contradictory PR aliases") from exc
-        tracker_link = app_identity.normalize_posting_url(tracker.get("link"))
-        same_id = tracker_link == app_id[5:] if tracker_link else False
-        same_pr = tracker_pr and tracker_pr == pr_number_of(item)
-        if same_pr and tracker_link and tracker_link != app_id[5:]:
-            raise QueueStateError("current tracker PR alias points at a different posting")
-        same_name = (norm_text(tracker.get("company")).casefold(),
-                     norm_text(tracker.get("role")).casefold()) == (
-                         norm_text(posting.get("company")).casefold(),
-                         norm_text(posting.get("role")).casefold())
-        if (same_id or same_pr or same_name) and not same_pr:
-            raise QueueStateError("current tracker contains a conflicting application identity")
-        if (same_id or same_pr) and canonical_submitted(tracker.get("status")):
-            raise QueueStateError("application is already recorded as submitted")
+    _check_claim_identities(item, queue_items, tracker_rows, posting)
 
     skipped = _read_flat_entries(args.skipped, "owner skip list", required=True)
     gates = _read_gate_entries(args.gates, required=True)
@@ -1257,7 +1273,6 @@ def _read_claim_inputs(args, item, queue_items):
         "tracker_sha256": _optional_file_hash(tracker_path, "current application tracker", True),
         "skip_sha256": skip_sha256,
         "gate_sha256": gate_sha256,
-        "posting": posting,
         "jd_sha256": hashlib.sha256(guarded_jd["clean_text"].encode("utf-8")).hexdigest(),
         "application_id": app_id,
     }
@@ -1376,6 +1391,8 @@ def _read_claim_validation_inputs(args, item, queue_items, posting):
         raise QueueStateError("profile, tracker, or posting store became unavailable") from exc
     if _canonical_queue_identity(item) != identity.application_id(item):
         raise QueueStateError("application identity changed")
+    tracker_rows = _read_flat_entries(tracker_path, "current application tracker", required=True)
+    _check_claim_identities(item, queue_items, tracker_rows, posting)
     skipped = _read_flat_entries(args.skipped, "owner skip list", required=True)
     gates = _read_gate_entries(args.gates, required=True)
     _check_owner_controls(posting, skipped, gates)
