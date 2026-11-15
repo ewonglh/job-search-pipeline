@@ -286,20 +286,56 @@ def parse_companies(text):
     """Minimal YAML subset: top-level list of mappings, scalar values and
     inline lists. Enough for the documented companies.yaml format."""
     items = []
-    cur = None
-    for raw in text.splitlines():
+    cur, empty = None, False
+    for number, raw in enumerate(text.splitlines(), 1):
         line = _strip_comment(raw)
         s = line.strip()
-        if not s or s in ("[]", "---"):
+        if not s or s in ("---", "..."):
             continue
-        if s.startswith("- "):
+        if "\t" in raw:
+            raise ValueError("line %s: tabs are unsupported" % number)
+        if s == "[]":
+            if items or empty:
+                raise ValueError("line %s: mixed empty and populated lists" % number)
+            empty = True
+            continue
+        if empty:
+            raise ValueError("line %s: content after empty list" % number)
+        if line.startswith("- "):
             cur = {}
             items.append(cur)
             s = s[2:].strip()
-            if s:
-                _kv(s, cur)
-        elif cur is not None and ":" in s:
-            _kv(s, cur)
+        elif not (line.startswith("  ") and not line.startswith("   ") and cur is not None):
+            raise ValueError("line %s: expected a flat list mapping" % number)
+        if ":" not in s:
+            raise ValueError("line %s: expected key: value" % number)
+        key, value = s.split(":", 1)
+        key, value = key.strip(), value.strip()
+        if not re.fullmatch(r"[a-z_]+", key) or key in cur:
+            raise ValueError("line %s: invalid or duplicate field" % number)
+        if (not value or value.startswith(("{", "&", "*", "!", "|", ">"))
+                or (value.startswith("[") != value.endswith("]"))
+                or (value.startswith(('"', "'")) and value[-1:] != value[0])):
+            raise ValueError("line %s: unsupported scalar or inline list" % number)
+        _kv(s, cur)
+    allowed = {"name", "url", "location", "link_contains", "role_contains", "remote"}
+    for cfg in items:
+        if set(cfg) - allowed:
+            raise ValueError("unknown company configuration field")
+        if any(not isinstance(cfg.get(key), str) or not cfg[key].strip()
+               for key in ("name", "url")):
+            raise ValueError("company name and URL are required strings")
+        url = urlsplit(cfg["url"])
+        if url.scheme not in ("http", "https") or not url.netloc:
+            raise ValueError("company URL must be an HTTP(S) URL")
+        for key in ("link_contains", "role_contains"):
+            if key in cfg and any(not isinstance(v, str) or not v.strip()
+                                  for v in _as_list(cfg[key])):
+                raise ValueError("%s requires strings" % key)
+        if "location" in cfg and not isinstance(cfg["location"], str):
+            raise ValueError("company location must be a string")
+        if "remote" in cfg and not isinstance(cfg["remote"], bool):
+            raise ValueError("company remote flag must be a boolean")
     return items
 
 
@@ -670,12 +706,15 @@ def main(argv=None):
         if not os.path.isfile(args.companies):
             log("discover: companies configuration is missing: %s" % args.companies)
             return 2
+        try:
+            with open(args.companies, encoding="utf-8") as fh:
+                cfg_list = parse_companies(fh.read())
+        except (OSError, ValueError) as exc:
+            log("discover: companies configuration is invalid: %s" % exc)
+            return 2
         internsg, errs = collect_internsg(today, log)
         errors += errs
         raw += internsg
-        cfg_list = []
-        with open(args.companies, encoding="utf-8") as fh:
-            cfg_list = parse_companies(fh.read())
         company_raw, errs = collect_companies(cfg_list, today, log)
         errors += errs
         raw += company_raw

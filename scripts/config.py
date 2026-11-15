@@ -1,5 +1,6 @@
 """Small stdlib helpers for neutral repo and runtime paths."""
 
+import math
 import os
 import re
 
@@ -50,9 +51,12 @@ def int_setting(name, default):
 def float_setting(name, default):
     value = _setting(name, str(default))
     try:
-        return float(value)
+        number = float(value)
     except ValueError:
         raise SystemExit("configuration error: %s must be a number" % name)
+    if not math.isfinite(number) or number < 0:
+        raise SystemExit("configuration error: %s must be finite and non-negative" % name)
+    return number
 
 
 def default_repo_dir():

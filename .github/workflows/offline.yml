@@ -25,3 +25,6 @@ jobs:
           python test_stages.py
           python test_dashboard.py
           python test_config.py
+          python test_automerge.py
+          python test_review_contract.py
+          python test_discover.py

@@ -97,6 +97,37 @@ class PortableSetupTests(unittest.TestCase):
         self.assertIn("companies configuration is missing", result.stderr)
         self.assertFalse(repo.exists())
 
+    def test_malformed_companies_stop_before_network_or_repo_creation(self):
+        repo = self.root / "must-not-be-created"
+        companies = self.root / "companies.yaml"
+        self.env.update({"JOBSEARCH_REPO": str(repo),
+                         "JOBSEARCH_COMPANIES": str(companies)})
+        cases = [
+            "not a company list\n",
+            "- name: Synthetic\n  url: https://\n",
+            "- name: Synthetic\n  url: https://example.invalid/careers\n  name: Duplicate\n",
+            "[]\n- name: Mixed list\n",
+        ]
+        for content in cases:
+            with self.subTest(content=content):
+                companies.write_text(content, encoding="utf-8")
+                result = self.run_script("discover.py", "--limit", "1")
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn("companies configuration is invalid", result.stderr)
+                self.assertFalse(repo.exists())
+
+    def test_invalid_sleep_stops_before_work_output(self):
+        work = self.root / "work"
+        self.env["JOBSEARCH_WORK"] = str(work)
+        for value in ("nan", "inf", "-0.5"):
+            with self.subTest(value=value):
+                self.env["JOBSEARCH_TAILOR_SLEEP"] = value
+                result = self.run_script("tailor.py", "--list", "--json")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("JOBSEARCH_TAILOR_SLEEP must be finite and non-negative",
+                              result.stderr)
+                self.assertFalse(work.exists())
+
 
 if __name__ == "__main__":
     unittest.main()
