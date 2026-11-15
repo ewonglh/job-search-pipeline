@@ -29,7 +29,7 @@ It only reports readiness. The owner merge remains the enqueue authorization
 and is recorded by GitHub; narrative approval for cover letters and unseen form
 answers stays an owner decision during the drain.
 
-## Five lanes
+## Six lanes
 
 | Lane | Script | Runs without an agent | What it does |
 |---|---|---|---|
@@ -37,13 +37,23 @@ answers stays an owner decision during the drain.
 | Rank | `rank.py` | yes | Scores guarded postings and applies profile-derived eligibility without a model |
 | Tailor | `tailor.py` | no, emits work items | Select untracked postings, fetch each JD, resolve the real apply URL |
 | Drain | `queue.py` | no | Turn merged `app/*` PRs into a submit queue, oldest first |
+| Email ingest | `email_ingest.py` (optional managed adapter) | yes | Bounded read-only IMAP history ingestion into the private evidence ledger |
 | Track | `application_identity.py` `recruitment_evidence.py` `outcomes.py` `stages.py` `summary.py` `dashboard.py` | mostly | Canonical joins, private evidence ledger, verified stage machine, digests, local board |
 
-Three of these are pure mechanics. Tailoring and submission need judgement, so
+Four of these are pure mechanics. Tailoring and submission need judgement, so
 those are where an agent earns its place or you spend your own time.
 
 The split exists because a model is bad at determinism and good at reading a job
 description. Put each where it belongs.
+
+Email ingestion is optional. Its offline `import` command reads normalized
+message JSON without OpenClaw or mailbox access. The optional managed adapter
+uses OpenClaw's supported SDK to resolve a configured SecretRef in memory and
+passes it to the read-only Python worker over stdin. It selects folders read
+only, fetches with `BODY.PEEK`, and writes sanitized evidence and coverage to the
+private ledger. It never edits tracker stages or sends notifications. A caught
+up UID cursor is transport progress, not proof that every callback was found.
+See [SETUP.md](SETUP.md#email-ingestion) for configuration and commands.
 
 Rank reads availability, degree, study year, graduation, citizenship, work
 authorization, credit, school approval and skills from the selected resume
@@ -208,14 +218,18 @@ or a repository inside this checkout. Empty path overrides fail immediately.
 | `JOBSEARCH_ACTIONS_STATE` | Local action acknowledgements | `~/.local/state/job-search-pipeline/actions-state.json` |
 | `JOBSEARCH_RANKINGS` | Ranking output used by reports | `~/.local/state/job-search-pipeline/rankings.json` |
 | `JOBSEARCH_DASHBOARD_OUT` | Dashboard output | `~/.local/state/job-search-pipeline/dashboard/index.html` |
+| `JOBSEARCH_INGEST_STATE` | Private email-ingestion cursors | `~/.local/state/job-search-pipeline/email_ingest_state.json` |
+| `JOBSEARCH_EMAIL_ADDRESS` | Mailbox's own address for outbound detection | unset |
+| `JOBSEARCH_EMAIL_FOLDERS` | Comma-separated managed IMAP folders | `INBOX` |
 
 `gh` must be authenticated once (`gh auth login`). Discovery, rank, and queue
 read your repository through it. Keep queue, review, work, skip, deadline,
-outcome, and draft state outside Git. `JOBSEARCH_REPO` is shared by discovery, rank,
-tailoring, queue, stages, summary, dashboard, and the readiness helper. Import
-normalized message JSON with `recruitment_evidence.py`, review corrections with
-`outcomes.py`, then use `stages.py apply-evidence` to propose evidence-backed
-stage changes. Mailbox access and notifications are outside these commands.
+outcome, and draft state outside Git. `JOBSEARCH_REPO` is shared by discovery,
+rank, tailoring, queue, stages, summary, dashboard, and the readiness helper.
+Import normalized message JSON with `email_ingest.py import` or use its optional
+managed IMAP adapter. Review corrections with `outcomes.py`, then use
+`stages.py apply-evidence` to propose evidence-backed stage changes. Ingestion
+never changes stages or sends mail.
 
 ## Setup tracks
 
@@ -224,8 +238,8 @@ Pick by what you already run. Full commands in [SETUP.md](SETUP.md).
 | Track | Scheduler | Can run | Needs |
 |---|---|---|---|
 | 1 | cron | discover, rank, queue | `gh` auth, Python 3 |
-| 2 | OpenClaw | all five, agent does tailoring and draining | OpenClaw gateway, a model |
-| 3 | Hermes Agent | all five, same split | Hermes install, a model |
+| 2 | OpenClaw | core lanes; optional managed email ingestion | OpenClaw gateway, a model |
+| 3 | Hermes Agent | core lanes; offline email import | Hermes install, a model |
 
 Track 1 costs nothing and covers the two lanes that find and score work. Tracks 2
 and 3 add tailoring and submission, which is where the judgement is.
