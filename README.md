@@ -34,7 +34,7 @@ answers stays an owner decision during the drain.
 | Lane | Script | Runs without an agent | What it does |
 |---|---|---|---|
 | Discover | `discover.py` | yes | Fetch postings from boards, keep new ones, commit to your resume repo |
-| Rank | `rank.py` | yes | Deterministic zero-token scoring against `rubric.yaml`, vetoes hostile postings |
+| Rank | `rank.py` | yes | Scores guarded postings and applies profile-derived eligibility without a model |
 | Tailor | `tailor.py` | no, emits work items | Select untracked postings, fetch each JD, resolve the real apply URL |
 | Drain | `queue.py` | no | Turn merged `app/*` PRs into a submit queue, oldest first |
 | Track | `application_identity.py` `recruitment_evidence.py` `outcomes.py` `stages.py` `summary.py` `dashboard.py` | mostly | Canonical joins, private evidence ledger, verified stage machine, digests, local board |
@@ -44,6 +44,12 @@ those are where an agent earns its place or you spend your own time.
 
 The split exists because a model is bad at determinism and good at reading a job
 description. Put each where it belongs.
+
+Rank reads availability, degree, study year, graduation, citizenship, work
+authorization, credit, school approval and skills from the selected resume
+repo's `data/profile.yaml`. Missing or unclear required facts stay `unknown` in
+the shortlist and ranking output; explicit conflicts are excluded. JD caching
+and the posting guard run before requirement checks, with no extra fetches.
 
 ## Approval gates
 
