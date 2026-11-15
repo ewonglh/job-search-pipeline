@@ -2,12 +2,18 @@ name: Offline tests
 
 on:
   push:
+    branches: [main]
   pull_request:
 
 jobs:
   offline:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
+    env:
+      GIT_AUTHOR_NAME: Synthetic Test
+      GIT_AUTHOR_EMAIL: synthetic@example.invalid
+      GIT_COMMITTER_NAME: Synthetic Test
+      GIT_COMMITTER_EMAIL: synthetic@example.invalid
     strategy:
       fail-fast: false
       matrix:
