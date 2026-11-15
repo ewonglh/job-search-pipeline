@@ -147,8 +147,9 @@ try:
     assert all(_item["input_provenance"].get(key) for key in
                ("profile_sha256", "master_sha256", "jd_sha256",
                 "role_title_sha256", "combined_text_sha256")), _item
-    # hostile JD -> needs_jd with reason guard_hostile, no work item
-    assert not _os2.path.exists(_os2.path.join(_work, _slugs[1] + ".json"))
+    # Hostile JD replaces any earlier ready item with an authoritative hold.
+    _held = _json.load(open(_os2.path.join(_work, _slugs[1] + ".json")))
+    assert _held["status"] == "hold" and _held["code"] == "guard_hostile"
     _needs = _json.load(open(_os2.path.join(_work, "_needs_jd.json")))
     _host = [e for e in _needs["postings"] if e.get("reason") == "guard_hostile"]
     assert len(_host) == 1 and _host[0]["slug"] == _slugs[1], _needs

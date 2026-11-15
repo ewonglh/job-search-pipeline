@@ -398,16 +398,16 @@ def _extract_jd(html_text, source, link=""):
         got = _linkedin_jd(html_text)
     else:
         got = None
-    if got and got[0] and len(got[0]) >= MIN_JD_LEN:
+    if got and got[0] and (len(got[0]) >= MIN_JD_LEN or is_explicitly_closed(got[0])):
         return got
     if got is None and link:
         # Workday/other JS-shell posting pages: ask the ATS API instead of
         # accepting the empty shell the generic extractor would return.
         wd = _workday_jd(link)
-        if wd and len(wd[0]) >= MIN_JD_LEN:
+        if wd and (len(wd[0]) >= MIN_JD_LEN or is_explicitly_closed(wd[0])):
             return wd
     generic = _generic_jd(html_text)
-    if generic and generic[0] and len(generic[0]) >= MIN_JD_LEN:
+    if generic and generic[0] and (len(generic[0]) >= MIN_JD_LEN or is_explicitly_closed(generic[0])):
         return generic
     return got  # may be (short text, block) or None
 
@@ -423,7 +423,7 @@ def fetch_jd(posting):
     if not got:
         return None
     jd, scope_html = got
-    if not jd or len(jd) < MIN_JD_LEN:
+    if not jd or (len(jd) < MIN_JD_LEN and not is_explicitly_closed(jd)):
         return None
     # Resolve the company apply URL from the description block only, so page
     # chrome (share buttons, footer, Discord invites) is not mistaken for it.
@@ -979,9 +979,10 @@ def build_work_item(posting, slug, jd, profile, profile_source,
 def write_work_item(work_dir, slug, item):
     os.makedirs(work_dir, exist_ok=True)
     path = os.path.join(work_dir, slug + ".json")
-    with open(path, "w", encoding="utf-8") as fh:
+    with open(path + ".tmp", "w", encoding="utf-8") as fh:
         json.dump(item, fh, indent=2, ensure_ascii=False)
         fh.write("\n")
+    os.replace(path + ".tmp", path)
     return path
 
 
@@ -1233,7 +1234,10 @@ def main(argv=None):
             import time
             time.sleep(FETCH_SLEEP)
 
-    if not args.dry_run and pending:
+    if not args.dry_run:
+        # A hold replaces an earlier ready item at the same routing path.
+        for hold in pending:
+            write_work_item(args.work, hold["slug"], hold)
         write_needs_jd(args.work, pending)
 
     if args.json:

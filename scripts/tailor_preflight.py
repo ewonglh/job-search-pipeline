@@ -10,6 +10,8 @@ are identical.
 import argparse
 import hashlib
 import json
+from pathlib import Path
+import subprocess
 import sys
 
 import cv_checks
@@ -81,12 +83,15 @@ def _reuse_status(record, hashes, artifact_sha256, head):
 
 
 def check_artifact(work_item, master_bytes, profile_bytes, artifact_bytes, head,
-                   accepted_record=None, layout_checker=None):
+                   accepted_record=None, layout_checker=None, *, current_jd=None):
     """Return content-free findings and exact input hashes for review.
 
     ``layout_checker`` is an optional callable receiving artifact bytes and
     returning a list of stable findings. An absent or failing checker is
     visible as infrastructure/build evidence, never as a clean layout result.
+    ``current_jd`` must be supplied from a fresh posting read, independently
+    of the saved work item. ``head`` is a caller assertion in this interface;
+    callers must verify the artifact against Git, as the CLI does below.
     """
     findings = []
     artifact_sha256 = _sha256(artifact_bytes) if isinstance(artifact_bytes, bytes) else ""
@@ -122,7 +127,11 @@ def check_artifact(work_item, master_bytes, profile_bytes, artifact_bytes, head,
             result = guard_text(str(guarded_posting.get(key) or ""))
             guarded_posting[key] = result["clean_text"]
             metadata_findings.extend(result["findings"])
-        jd_guard = guard_text(str(work_item.get("jd_text") or ""))
+        if not isinstance(current_jd, str) or not current_jd.strip():
+            findings.append(_finding("infrastructure", "current_jd_unavailable",
+                                     "A fresh current JD is required before reusing prior checks."))
+            current_jd = ""
+        jd_guard = guard_text(current_jd)
         guarded_jd = jd_guard["clean_text"]
         if jd_guard["verdict"] == "hostile" or any(
                 finding.get("kind") == "injection" for finding in metadata_findings):
@@ -232,12 +241,36 @@ def _read_optional_json(path):
         return json.load(input_file)
 
 
+def verify_artifact_head(artifact_path, expected_head):
+    """Resolve checkout HEAD and require the artifact's exact committed bytes."""
+    artifact = Path(artifact_path).resolve()
+    def git(*args):
+        return subprocess.run(["git", "-C", str(artifact.parent), *args],
+                              capture_output=True, check=True, timeout=15).stdout
+    try:
+        root = Path(git("rev-parse", "--show-toplevel").decode().strip()).resolve()
+        actual_head = git("rev-parse", "HEAD").decode().strip()
+        if actual_head != expected_head:
+            return [_finding("staleness", "artifact_head_mismatch",
+                             "Expected artifact head does not match the checkout HEAD.")]
+        relative = artifact.relative_to(root).as_posix()
+        if git("show", "HEAD:" + relative) != artifact.read_bytes():
+            return [_finding("staleness", "artifact_content_mismatch",
+                             "Artifact bytes differ from its current Git commit.")]
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return [_finding("infrastructure", "artifact_head_unavailable",
+                         "Could not verify the artifact at its checkout HEAD.")]
+    return []
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--work-item", required=True)
     parser.add_argument("--master", required=True)
     parser.add_argument("--profile", required=True)
     parser.add_argument("--artifact", required=True)
+    parser.add_argument("--current-jd", required=True,
+                        help="UTF-8 JD text from a fresh posting read, separate from the saved work item")
     parser.add_argument("--head", required=True,
                         help="exact artifact commit head to compare with prior acceptance")
     parser.add_argument("--accepted-record",
@@ -253,6 +286,8 @@ def main(argv=None):
             profile_bytes = profile_file.read()
         with open(args.artifact, "rb") as artifact_file:
             artifact_bytes = artifact_file.read()
+        with open(args.current_jd, encoding="utf-8") as jd_file:
+            current_jd = jd_file.read()
     except (OSError, ValueError) as exc:
         report = {"schema_version": 1, "status": "review_required", "findings": [
             _finding("infrastructure", "input_read_failed",
@@ -264,7 +299,12 @@ def main(argv=None):
     if args.pdf:
         layout_checker = lambda _artifact: cv_checks.check_pdf(args.pdf)
     report = check_artifact(work_item, master_bytes, profile_bytes, artifact_bytes,
-                            args.head, accepted_record, layout_checker)
+                            args.head, accepted_record, layout_checker, current_jd=current_jd)
+    head_findings = verify_artifact_head(args.artifact, args.head)
+    if head_findings:
+        report["findings"].extend(head_findings)
+        report["status"] = "review_required"
+        report["reuse_status"] = "review_required"
     print(json.dumps(report, indent=2, ensure_ascii=False))
     return 0 if report["status"] == "exact_prior_acceptance" else 1
 

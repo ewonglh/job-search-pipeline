@@ -160,8 +160,11 @@ _NUMBERS = re.compile(r"(?<![A-Za-z])\d[\d,]*(?:\.\d+)?\+?(?![A-Za-z])")
 
 
 def _numbers(text):
-    return {match.group(0).replace(",", "").rstrip("+")
-            for match in _NUMBERS.finditer(text)}
+    numbers = {match.group(0).replace(",", "").rstrip("+")
+               for match in _NUMBERS.finditer(text)}
+    numbers.update(_WORD_NUM[match.group(0).lower()] for match in
+                   re.finditer(r"\b(?:" + "|".join(_WORD_NUM) + r")\b", text, re.I))
+    return numbers
 
 
 _WORD_NUM = {"one": "1", "two": "2", "three": "3", "four": "4",
@@ -239,7 +242,8 @@ def check(master_text, resume_text):
                                      "Team attribution from the source may have been lost.", index))
         supported = _numbers(source.title + " " + source.date + " " + source.details + " " +
                              " ".join(source.bullets))
-        candidate_numbers = set().union(*(_numbers(bullet) for bullet in item.bullets))
+        candidate_numbers = _numbers(item.title + " " + item.date + " " + item.details + " " +
+                                     " ".join(item.bullets))
         if candidate_numbers - supported:
             findings.append(_finding("unsupported_number",
                                      "A numeric claim is absent from this source entry; review it.", index))

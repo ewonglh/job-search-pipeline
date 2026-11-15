@@ -38,6 +38,10 @@ assert clean_findings == [], clean_findings
 unsupported_number = VARIANT.replace("Built 2 services", "Built 7 services")
 assert "unsupported_number" in {item["code"] for item in
                                 cv_checks.check(MASTER, unsupported_number)}
+for changed in (VARIANT.replace("Small research group", "Managed 100 engineers"),
+                VARIANT.replace("Built 2 services", "Built seven services")):
+    assert "unsupported_number" in {item["code"] for item in cv_checks.check(MASTER, changed)}
+assert cv_checks.check(MASTER, VARIANT.replace("Built 2 services", "Built two services")) == []
 
 lost_team_credit = VARIANT.replace("{Team of 3 engineers}{}", "{}{}")
 assert "team_attribution" in {item["code"] for item in

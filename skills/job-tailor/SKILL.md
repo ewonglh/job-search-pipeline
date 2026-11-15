@@ -30,7 +30,7 @@ Never do the mechanical half by hand. Never do the judgement half with a regex.
 
 ## Procedure
 
-1. Read the work item. If `jd_text` is empty or the guard verdict is `needs_jd`,
+1. Read the work item. Require `status: ready`. If `jd_text` is empty or the guard verdict is `needs_jd`,
    stop and report; do not tailor from a guessed description.
    Stop for `eligibility.status: ineligible` or `unknown`, a `posting_closed`
    hold, or any missing/unavailable input. `--force` skips duplicate selection
@@ -47,7 +47,10 @@ Never do the mechanical half by hand. Never do the judgement half with a regex.
    A finding requests review; an empty finding list only means these structural
    checks passed. They do not prove semantic truth. Build/render the PDF using
    the configured resume toolchain and check its page count.
-4. After the artifact is committed on its branch, run the exact-input preflight
+4. Fetch the posting again immediately before reuse or PR review. Save its
+   current JD text to a separate private file; do not copy it from an old work
+   item. If retrieval fails, stop for review. After the artifact is committed
+   on its branch, run the exact-input preflight
    from `scripts/`:
 
    ```bash
@@ -56,12 +59,14 @@ Never do the mechanical half by hand. Never do the judgement half with a regex.
      --master "$JOBSEARCH_REPO/master/resume.tex" \
      --profile "$JOBSEARCH_REPO/data/profile.yaml" \
      --artifact "$JOBSEARCH_REPO/variants/<slug>/resume.tex" \
+     --current-jd "$JOBSEARCH_WORK/<slug>.current-jd.txt" \
      --head "$(git -C "$JOBSEARCH_REPO" rev-parse HEAD)" \
      --pdf "$JOBSEARCH_REPO/variants/<slug>/resume.pdf"
    ```
 
-   The report compares exact master, profile, guarded JD, role/title, artifact
-   and head hashes. Without a layout checker or a matching prior owner-accepted
+   The report compares exact master, profile, fresh guarded JD, role/title and
+   artifact hashes. The CLI resolves the artifact checkout's actual Git HEAD
+   and verifies that the file matches its committed bytes. Without a layout checker or a matching prior owner-accepted
    record it reports `review_required`; unavailable inputs and stale evidence
    are never clean results. `--accepted-record PATH` may check an existing
    `owner_accepted_preflight` record (schema version 1, `accepted`,

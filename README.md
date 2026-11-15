@@ -60,10 +60,14 @@ requirements, missing source files, and unavailable JDs also stay out of
 generation. `--force` bypasses duplicate selection only. Ready work items carry
 exact profile and master byte hashes plus the evaluator's guarded JD,
 role/title, and combined-text hashes.
+Each hold replaces the previous ready item for its posting. The hold list is
+refreshed on every writing pass, including recovery with no remaining holds.
 
 Before PR review, run `scripts/cv_checks.py` on the master and generated TeX, then
 `scripts/tailor_preflight.py` with the current work item, master, profile,
-artifact, and commit head. The structural findings cover only supported
+artifact, freshly retrieved JD text (`--current-jd`) and expected commit head.
+The CLI verifies the actual artifact checkout head and committed file bytes.
+The structural findings cover only supported
 templates, source-entry matching, bullet coverage, numeric claims, team credit,
 and chronology; semantic review remains required. The preflight reports
 `review_required` when inputs or the optional layout checker are unavailable,

@@ -5,7 +5,9 @@ import contextlib
 import io
 import json
 import os
+from pathlib import Path
 import shutil
+import subprocess
 import tempfile
 
 import eligibility
@@ -29,6 +31,11 @@ ARTIFACT = rb"""\section{Experience}
 PROFILE = b"availability: 1 May 2027 to 31 August 2027\n"
 JD = "Internship period: 9 May 2027 to 1 August 2027."
 POSTING = {"role": "Software Engineering Intern", "title": "Engineering Intern"}
+
+
+def _check_artifact(*args, **kwargs):
+    kwargs.setdefault("current_jd", JD)
+    return tailor_preflight.check_artifact(*args, **kwargs)
 
 
 def _work_item(master_bytes=MASTER, profile_bytes=PROFILE, jd=JD):
@@ -102,7 +109,11 @@ def _tailor_with(profile_text, jd_result, include_profile=True, include_master=T
         pending_path = os.path.join(work, "_needs_jd.json")
         pending = json.load(open(pending_path, encoding="utf-8")) if os.path.exists(pending_path) else None
         work_files = [name for name in os.listdir(work) if name.endswith(".json") and
-                      name != "_needs_jd.json"] if os.path.isdir(work) else []
+                      name != "_needs_jd.json" and
+                      json.load(open(os.path.join(work, name), encoding="utf-8")).get("status") == "ready"]
+        for hold in (pending or {}).get("postings", []):
+            saved = json.load(open(os.path.join(work, hold["slug"] + ".json"), encoding="utf-8"))
+            assert saved == hold and saved["status"] == "hold", saved
         return result, pending, work_files, stdout.getvalue(), stderr.getvalue(), fetch_calls
     finally:
         shutil.rmtree(temp)
@@ -113,49 +124,50 @@ def _tailor_with(profile_text, jd_result, include_profile=True, include_master=T
 item = _work_item()
 head = "a" * 40
 record = _accepted_record(item, MASTER, PROFILE, ARTIFACT, head)
-report = tailor_preflight.check_artifact(
+report = _check_artifact(
     item, MASTER, PROFILE, ARTIFACT, head, record, lambda _artifact: [])
 assert report["status"] == "exact_prior_acceptance", report
 assert report["findings"] == [], report
 
-without_record = tailor_preflight.check_artifact(
+without_record = _check_artifact(
     item, MASTER, PROFILE, ARTIFACT, head, None, lambda _artifact: [])
 assert without_record["status"] == "review_required", without_record
 assert "reuse_evidence_missing" in {finding["code"] for finding in without_record["findings"]}
 
 changed_master = MASTER + b"% new source byte\n"
-master_report = tailor_preflight.check_artifact(
+master_report = _check_artifact(
     item, changed_master, PROFILE, ARTIFACT, head, record, lambda _artifact: [])
 assert "stale_inputs" in {finding["code"] for finding in master_report["findings"]}
 
 changed_profile = b"availability: 1 January 2027 to 30 June 2027\n"
-profile_report = tailor_preflight.check_artifact(
+profile_report = _check_artifact(
     item, MASTER, changed_profile, ARTIFACT, head, record, lambda _artifact: [])
 profile_codes = {finding["code"] for finding in profile_report["findings"]}
 assert "stale_inputs" in profile_codes and "eligibility_conflict" in profile_codes
 
 changed_jd_item = dict(item)
 changed_jd_item["jd_text"] = JD + " Applicants must graduate by 2027."
-jd_report = tailor_preflight.check_artifact(
-    changed_jd_item, MASTER, PROFILE, ARTIFACT, head, record, lambda _artifact: [])
+jd_report = _check_artifact(
+    item, MASTER, PROFILE, ARTIFACT, head, record, lambda _artifact: [],
+    current_jd=changed_jd_item["jd_text"])
 assert "stale_inputs" in {finding["code"] for finding in jd_report["findings"]}
 
 changed_artifact = ARTIFACT + b"% changed artifact byte\n"
-artifact_report = tailor_preflight.check_artifact(
+artifact_report = _check_artifact(
     item, MASTER, PROFILE, changed_artifact, head, record, lambda _artifact: [])
 assert "artifact_content_mismatch" in {
     finding["code"] for finding in artifact_report["findings"]}
 
-head_report = tailor_preflight.check_artifact(
+head_report = _check_artifact(
     item, MASTER, PROFILE, ARTIFACT, "b" * 40, record, lambda _artifact: [])
 assert "artifact_head_mismatch" in {finding["code"] for finding in head_report["findings"]}
 
-missing_layout = tailor_preflight.check_artifact(
+missing_layout = _check_artifact(
     item, MASTER, PROFILE, ARTIFACT, head, record)
 assert "layout_checker_unavailable" in {
     finding["code"] for finding in missing_layout["findings"]}
 
-failed_layout = tailor_preflight.check_artifact(
+failed_layout = _check_artifact(
     item, MASTER, PROFILE, ARTIFACT, head, record,
     lambda _artifact: (_ for _ in ()).throw(OSError("synthetic failure")))
 assert "layout_checker_failed" in {finding["code"] for finding in failed_layout["findings"]}
@@ -163,14 +175,16 @@ assert {finding["category"] for finding in failed_layout["findings"]} == {"infra
 
 closed_item = dict(item)
 closed_item["jd_text"] = JD + " This position has been filled."
-closed_report = tailor_preflight.check_artifact(
-    closed_item, MASTER, PROFILE, ARTIFACT, head, None, lambda _artifact: [])
+closed_report = _check_artifact(
+    closed_item, MASTER, PROFILE, ARTIFACT, head, None, lambda _artifact: [],
+    current_jd=closed_item["jd_text"])
 assert "posting_closed" in {finding["code"] for finding in closed_report["findings"]}
 
 conflict_item = dict(item)
 conflict_item["jd_text"] = "Internship period: 1 January 2027 to 1 March 2027."
-conflict_report = tailor_preflight.check_artifact(
-    conflict_item, MASTER, PROFILE, ARTIFACT, head, None, lambda _artifact: [])
+conflict_report = _check_artifact(
+    conflict_item, MASTER, PROFILE, ARTIFACT, head, None, lambda _artifact: [],
+    current_jd=conflict_item["jd_text"])
 assert "eligibility_conflict" in {
     finding["code"] for finding in conflict_report["findings"]}
 
@@ -221,15 +235,71 @@ hostile_metadata_result = _tailor_with(
 assert hostile_metadata_result[2] == [] and hostile_metadata_result[5] == [], hostile_metadata_result
 assert hostile_metadata_result[1]["postings"][0]["code"] == "guard_hostile", hostile_metadata_result
 
-unavailable_bytes = tailor_preflight.check_artifact(item, None, PROFILE, ARTIFACT,
+unavailable_bytes = _check_artifact(item, None, PROFILE, ARTIFACT,
                                                     head, record, lambda _artifact: [])
 assert "input_unavailable" in {finding["code"] for finding in unavailable_bytes["findings"]}
-unavailable_artifact = tailor_preflight.check_artifact(item, MASTER, PROFILE, None,
+unavailable_artifact = _check_artifact(item, MASTER, PROFILE, None,
                                                        head, record, lambda _artifact: [])
 assert "artifact_unavailable" in {
     finding["code"] for finding in unavailable_artifact["findings"]}
-invalid_master = tailor_preflight.check_artifact(
+invalid_master = _check_artifact(
     item, b"\xff", PROFILE, ARTIFACT, head, record, lambda _artifact: [])
 assert "master_decode_failed" in {finding["code"] for finding in invalid_master["findings"]}
+
+missing_current = tailor_preflight.check_artifact(
+    item, MASTER, PROFILE, ARTIFACT, head, record, lambda _artifact: [])
+assert missing_current["status"] == "review_required"
+assert "current_jd_unavailable" in {finding["code"] for finding in missing_current["findings"]}
+
+# A ready -> unavailable -> recovered sequence cannot leave stale routing state.
+with tempfile.TemporaryDirectory(prefix="i3-lifecycle-") as temp:
+    root = Path(temp)
+    (root / "data").mkdir(); (root / "master").mkdir()
+    (root / "data/profile.yaml").write_bytes(PROFILE)
+    (root / "master/resume.tex").write_bytes(MASTER)
+    (root / "data/postings.json").write_text(json.dumps([
+        dict(POSTING, company="Example Co", link="https://example.invalid/job/1")]))
+    work = root / "work"
+    real_fetch = tailor.fetch_jd
+    try:
+        for response, expected in (({"jd_text": JD}, "ready"), (None, "hold"),
+                                   ({"jd_text": JD}, "ready")):
+            tailor.fetch_jd = lambda _posting: response
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                assert tailor.main(["--repo", temp, "--work", str(work), "--force",
+                                    "--queue", str(root / "no-queue"),
+                                    "--skipped", str(root / "no-skips")]) == 0
+            routed = [json.loads(path.read_text()) for path in work.glob("*.json")
+                      if path.name != "_needs_jd.json"]
+            assert len(routed) == 1 and routed[0]["status"] == expected, routed
+            holds = json.loads((work / "_needs_jd.json").read_text())
+            assert holds["count"] == (1 if expected == "hold" else 0), holds
+    finally:
+        tailor.fetch_jd = real_fetch
+
+# Short closure evidence passes extraction; an unavailable page remains unknown.
+real_fetch_html = tailor.fetch_jd_html
+try:
+    tailor.fetch_jd_html = lambda *_args: "<html><body>This position has been filled.</body></html>"
+    short_closed = tailor.fetch_jd({"link": "https://example.invalid/job/1"})
+    assert short_closed and tailor.is_explicitly_closed(short_closed["jd_text"]), short_closed
+finally:
+    tailor.fetch_jd_html = real_fetch_html
+
+# The CLI's Git verifier checks both actual checkout HEAD and committed bytes.
+with tempfile.TemporaryDirectory(prefix="i3-artifact-git-") as temp:
+    artifact_path = Path(temp) / "resume.tex"
+    artifact_path.write_bytes(ARTIFACT)
+    def git(*args):
+        return subprocess.check_output(["git", "-C", temp, *args], stderr=subprocess.DEVNULL)
+    git("init", "-q")
+    git("add", "resume.tex")
+    git("-c", "user.name=Synthetic Owner", "-c", "user.email=synthetic@example.invalid",
+        "-c", "core.autocrlf=false", "commit", "-qm", "synthetic artifact")
+    actual_head = git("rev-parse", "HEAD").decode().strip()
+    assert tailor_preflight.verify_artifact_head(artifact_path, actual_head) == []
+    assert tailor_preflight.verify_artifact_head(artifact_path, "0" * 40)[0]["code"] == "artifact_head_mismatch"
+    artifact_path.write_bytes(ARTIFACT + b"% uncommitted change\n")
+    assert tailor_preflight.verify_artifact_head(artifact_path, actual_head)[0]["code"] == "artifact_content_mismatch"
 
 print("test_tailor_preflight: all assertions passed")
