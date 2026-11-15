@@ -172,7 +172,7 @@ with tempfile.TemporaryDirectory(prefix="synthetic-ingest-outbound-") as temp:
     assert item["event_type"] == "unrelated" and item["direction"] == "outbound"
     assert item["origin"] == "unknown"
 
-# Folder and header limits are reported; a too-large header is not interpreted.
+# Folder limits are reported. Oversized headers retain bounded review evidence.
 with tempfile.TemporaryDirectory(prefix="synthetic-ingest-folder-limit-") as temp:
     ledger, state_path, state = setup(temp)
     folders = ["F%d" % index for index in range(21)]
@@ -188,9 +188,61 @@ with tempfile.TemporaryDirectory(prefix="synthetic-ingest-header-limit-") as tem
     transport = FakeIMAP()
     transport.headers = lambda _uid: (b"Subject: " + b"x" * 1500 + b"\r\n\r\n", 999)
     result = scan(transport, ledger, state_path, state, max_header_bytes=1024)
-    assert result["candidate_exclusions"] == 1
+    assert result["candidate_exclusions"] == 0
+    assert result["candidate_messages"] == 1
     assert result["folder_results"][0]["header_limit_exclusions"] == 1
-    assert events(ledger) == []
+    item = events(ledger)[0]
+    assert item["verification"] == "review_required"
+    assert item["fetch_limitation"] == "header_size_limit"
+    assert item["provider_identity"] == {"account": "synthetic", "folder": "INBOX",
+                                         "uidvalidity": "11", "uid": 1}
+    assert "x" * 1500 not in ledger.read_text(encoding="utf-8")
+    assert next(iter(ingest.load_state(state_path)["scopes"].values()))["uid"] == 1
+    restarted = scan(transport, ledger, state_path, ingest.load_state(state_path),
+                     max_header_bytes=1024)
+    assert restarted["scanned"] == 0 and len(events(ledger)) == 1
+
+
+# A deadline reached during any transport operation stops further mailbox I/O,
+# including empty folders. Failed/unfinished UIDs remain replayable.
+for slow_operation in ("select", "search", "headers", "body"):
+    with tempfile.TemporaryDirectory(prefix="synthetic-ingest-deadline-") as temp:
+        ledger, state_path, state = setup(temp)
+        virtual_time = [0.0]
+        calls, budgets = [], []
+        transport = FakeIMAP({"INBOX": {1: raw_message()}, "Archive": {}})
+        transport.set_timeout = lambda remaining: budgets.append(remaining)
+        for operation in ("select", "search", "headers", "body"):
+            original = getattr(transport, operation)
+            def timed(*args, operation=operation, original=original):
+                calls.append(operation)
+                result = original(*args)
+                virtual_time[0] += 2 if operation == slow_operation else 0.1
+                return result
+            setattr(transport, operation, timed)
+        result = scan(transport, ledger, state_path, state,
+                      folders=["INBOX", "Archive"], max_seconds=1,
+                      monotonic=lambda: virtual_time[0])
+        assert result["interrupted"] and not result["transport_complete"]
+        assert calls[-1] == slow_operation and calls.count("select") == 1, calls
+        assert all(0 < budget <= 1 for budget in budgets)
+        assert all(row.get("reason") == "time_limit" for row in result["folder_results"])
+        assert not state["scopes"] and events(ledger) == []
+
+with tempfile.TemporaryDirectory(prefix="synthetic-ingest-empty-deadline-") as temp:
+    ledger, state_path, state = setup(temp)
+    virtual_time = [0.0]
+    transport = FakeIMAP({"A": {}, "B": {}})
+    selected = []
+    def slow_select(folder):
+        selected.append(folder)
+        virtual_time[0] += 2
+        return {"ok": True, "uidvalidity": "11"}
+    transport.select = slow_select
+    result = scan(transport, ledger, state_path, state, folders=["A", "B"],
+                  max_seconds=1, monotonic=lambda: virtual_time[0])
+    assert selected == ["A"] and result["interrupted"]
+    assert not result["transport_complete"]
 
 # The production wrapper asks for read-only SELECT and never fetches a non-PEEK body.
 class FakeClient:
@@ -211,6 +263,14 @@ class FakeClient:
 
 client = FakeClient()
 transport = ingest.IMAPTransport(client)
+class FakeSocket:
+    def settimeout(self, value):
+        self.timeout = value
+client.sock = FakeSocket()
+transport.set_timeout(0.25)
+assert client.sock.timeout == 0.25
+transport.set_timeout(30)
+assert client.sock.timeout == 15
 assert transport.select("INBOX")["ok"]
 transport.search("INBOX")
 transport.headers(1)
