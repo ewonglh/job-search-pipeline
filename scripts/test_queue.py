@@ -259,12 +259,11 @@ try:
                    "--status", "submitted", "--date", "2026-10-06"]) == 2
     assert q.main(["status", "--queue", qfile, "--pr", "12",
                    "--status", "submitted", "--sent", "PDF via company ATS"]) == 2
-    # A complete confirmation is still blocked until the prepared bytes were
-    # verified for this exact application and attempt.
+    # Confirmation must match the durable attempt, even with concrete evidence.
     assert q.main(["status", "--queue", qfile, "--pr", "12",
                    "--status", "submitted", "--date", "2026-10-06",
                    "--sent", "PDF via company ATS; availability Jun-Dec 2027",
-                   "--attempt-id", "synthetic-attempt-12",
+                   "--attempt-id", "another-attempt-12",
                    "--confirmation-evidence", "Employer portal confirmed receipt.",
                    "--no-tracker"]) == 2
     pdf_file = os.path.join(tmp, "selected-resume.pdf")
