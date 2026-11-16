@@ -33,19 +33,21 @@ import urllib.error
 import urllib.request
 from datetime import date, datetime, timedelta
 from urllib.parse import urljoin, urlsplit, urlunsplit
+from config import (default_repo_dir, float_setting, github_repo_setting,
+                    int_setting, path_setting, value_setting)
 
 SGT_OFFSET_DAYS = 0  # dates are plain local dates; kept explicit for clarity
 HERE = os.path.dirname(os.path.abspath(__file__))
-GH_REPO = os.environ.get("JOBSEARCH_GH_REPO", "example-user/resume")
-REPO_URL = os.environ.get("JOBSEARCH_REPO_URL",
+GH_REPO = github_repo_setting("JOBSEARCH_GH_REPO", "your-user/your-resume-repo")
+REPO_URL = value_setting("JOBSEARCH_REPO_URL",
                           "https://github.com/%s.git" % GH_REPO)
-REPO_DIR = os.environ.get("JOBSEARCH_REPO", os.path.join(HERE, "repo"))
-COMPANIES_FILE = os.path.join(HERE, "companies.yaml")
+REPO_DIR = path_setting("JOBSEARCH_REPO", default_repo_dir())
+COMPANIES_FILE = path_setting("JOBSEARCH_COMPANIES", os.path.join(HERE, "companies.yaml"))
 STORE_PATH = "data/postings.json"
-CONTACT_URL = os.environ.get("JOBSEARCH_CONTACT_URL", "https://github.com/example-user")
+CONTACT_URL = value_setting("JOBSEARCH_CONTACT_URL", "https://example.invalid/")
 USER_AGENT = "job-search-discover/1.0 (+%s)" % CONTACT_URL
-MAX_PAGES = int(os.environ.get("JOBSEARCH_PAGES", "2"))
-PAGE_SLEEP = float(os.environ.get("JOBSEARCH_PAGE_SLEEP", "1.0"))
+MAX_PAGES = int_setting("JOBSEARCH_PAGES", 2)
+PAGE_SLEEP = float_setting("JOBSEARCH_PAGE_SLEEP", 1.0)
 
 # InternSG sources: the home page plus the software/tech filtered listings.
 # f_p=107 -> profession "IT / Information Technology"
@@ -88,7 +90,7 @@ YEARS_RE = re.compile(r"\b(?:[5-9]|[1-9]\d)\s*\+?\s*years?\b", re.I)
 # Location terms accepted by the filter. Override with JOBSEARCH_LOCATION_RE
 # (a regex) to target another market, e.g. "\b(?:london|uk|remote)\b".
 LOCATION_OK_RE = re.compile(
-    os.environ.get("JOBSEARCH_LOCATION_RE", r"\b(?:sg|singapore|remote)\b"), re.I)
+    value_setting("JOBSEARCH_LOCATION_RE", r"\b(?:sg|singapore|remote)\b"), re.I)
 _MONTHS = {m: i for i, m in enumerate(
     ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
      "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"], 1)}
@@ -284,20 +286,56 @@ def parse_companies(text):
     """Minimal YAML subset: top-level list of mappings, scalar values and
     inline lists. Enough for the documented companies.yaml format."""
     items = []
-    cur = None
-    for raw in text.splitlines():
+    cur, empty = None, False
+    for number, raw in enumerate(text.splitlines(), 1):
         line = _strip_comment(raw)
         s = line.strip()
-        if not s or s in ("[]", "---"):
+        if not s or s in ("---", "..."):
             continue
-        if s.startswith("- "):
+        if "\t" in raw:
+            raise ValueError("line %s: tabs are unsupported" % number)
+        if s == "[]":
+            if items or empty:
+                raise ValueError("line %s: mixed empty and populated lists" % number)
+            empty = True
+            continue
+        if empty:
+            raise ValueError("line %s: content after empty list" % number)
+        if line.startswith("- "):
             cur = {}
             items.append(cur)
             s = s[2:].strip()
-            if s:
-                _kv(s, cur)
-        elif cur is not None and ":" in s:
-            _kv(s, cur)
+        elif not (line.startswith("  ") and not line.startswith("   ") and cur is not None):
+            raise ValueError("line %s: expected a flat list mapping" % number)
+        if ":" not in s:
+            raise ValueError("line %s: expected key: value" % number)
+        key, value = s.split(":", 1)
+        key, value = key.strip(), value.strip()
+        if not re.fullmatch(r"[a-z_]+", key) or key in cur:
+            raise ValueError("line %s: invalid or duplicate field" % number)
+        if (not value or value.startswith(("{", "&", "*", "!", "|", ">"))
+                or (value.startswith("[") != value.endswith("]"))
+                or (value.startswith(('"', "'")) and value[-1:] != value[0])):
+            raise ValueError("line %s: unsupported scalar or inline list" % number)
+        _kv(s, cur)
+    allowed = {"name", "url", "location", "link_contains", "role_contains", "remote"}
+    for cfg in items:
+        if set(cfg) - allowed:
+            raise ValueError("unknown company configuration field")
+        if any(not isinstance(cfg.get(key), str) or not cfg[key].strip()
+               for key in ("name", "url")):
+            raise ValueError("company name and URL are required strings")
+        url = urlsplit(cfg["url"])
+        if url.scheme not in ("http", "https") or not url.netloc:
+            raise ValueError("company URL must be an HTTP(S) URL")
+        for key in ("link_contains", "role_contains"):
+            if key in cfg and any(not isinstance(v, str) or not v.strip()
+                                  for v in _as_list(cfg[key])):
+                raise ValueError("%s requires strings" % key)
+        if "location" in cfg and not isinstance(cfg["location"], str):
+            raise ValueError("company location must be a string")
+        if "remote" in cfg and not isinstance(cfg["remote"], bool):
+            raise ValueError("company remote flag must be a boolean")
     return items
 
 
@@ -665,13 +703,18 @@ def main(argv=None):
         assume_sg = True
     else:
         raw = []
+        if not os.path.isfile(args.companies):
+            log("discover: companies configuration is missing: %s" % args.companies)
+            return 2
+        try:
+            with open(args.companies, encoding="utf-8") as fh:
+                cfg_list = parse_companies(fh.read())
+        except (OSError, ValueError) as exc:
+            log("discover: companies configuration is invalid: %s" % exc)
+            return 2
         internsg, errs = collect_internsg(today, log)
         errors += errs
         raw += internsg
-        cfg_list = []
-        if args.companies and os.path.isfile(args.companies):
-            with open(args.companies, encoding="utf-8") as fh:
-                cfg_list = parse_companies(fh.read())
         company_raw, errs = collect_companies(cfg_list, today, log)
         errors += errs
         raw += company_raw

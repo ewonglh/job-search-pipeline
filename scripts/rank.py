@@ -25,15 +25,16 @@ from datetime import datetime, timedelta, timezone
 
 import tailor as t
 from posting_guard import guard_text
+from config import default_runtime_path, value_setting
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SGT = timezone(timedelta(hours=8))
-CONTACT_URL = os.environ.get("JOBSEARCH_CONTACT_URL", "https://github.com/example-user")
+CONTACT_URL = value_setting("JOBSEARCH_CONTACT_URL", "https://example.invalid/")
 USER_AGENT = "job-search-rank/1.0 (+%s)" % CONTACT_URL
 CACHE_TTL_DAYS = 30
 RUBRIC_PATH = os.path.join(HERE, "rubric.yaml")
-DEFAULT_CACHE = os.path.join(HERE, "rank_cache.json")
-DEFAULT_RANKINGS = os.path.join(HERE, "rankings.json")
+DEFAULT_CACHE = default_runtime_path("rank_cache.json")
+DEFAULT_RANKINGS = default_runtime_path("rankings.json")
 
 VETO_ORDER = ["requires_graduation", "clearance_citizenship", "seniority",
               "immediate_fulltime"]
@@ -104,6 +105,7 @@ def load_cache(path):
 
 
 def save_cache(path, data):
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
         json.dump(data, fh, indent=2, ensure_ascii=False)
@@ -406,6 +408,7 @@ def main(argv=None):
                    "count": len(ranked), "ranked": ranked,
                    "excluded": excluded, "needs_jd": needs_jd}
         tmp = args.rankings + ".tmp"
+        os.makedirs(os.path.dirname(os.path.abspath(args.rankings)), exist_ok=True)
         with open(tmp, "w", encoding="utf-8") as fh:
             json.dump(payload, fh, indent=2, ensure_ascii=False)
             fh.write("\n")

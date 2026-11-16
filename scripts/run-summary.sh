@@ -18,7 +18,4 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$HERE" || exit 1
 
-export JOBSEARCH_GH_REPO="${JOBSEARCH_GH_REPO:-example-user/resume}"
-export JOBSEARCH_REPO="${JOBSEARCH_REPO:-$HERE/repo}"
-
 exec python3 gate_summary.py "$@"

@@ -29,9 +29,10 @@ This script is the mechanical half of that flow:
     date or no record of what was sent). It does **not** require a separate
     approval: the merge already approved the CV.
 
-**Queue store location.** ``queue.yaml`` lives here in the service dir (default
-``./queue.yaml``), next to ``summary_state.json`` and ``gmail_state.json`` --
-it is operational runner state, not resume content and not shared bookkeeping.
+**Queue store location.** The queue is operational runner state, not resume
+content or shared bookkeeping. Its default is
+``~/.local/state/job-search-pipeline/queue.yaml``; override it with
+``JOBSEARCH_QUEUE``. Keep it outside the code checkout.
 The drain flips ``queued -> in_progress -> submitted`` several times per
 application; committing that churn to the resume repo would add a push per state
 change and race the other lanes, and the queue is reconstructible from the merged
@@ -76,11 +77,13 @@ import re
 import subprocess
 import sys
 from datetime import datetime, timezone
+from config import (default_repo_dir, default_runtime_path, github_repo_setting,
+                    path_setting)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-REPO_DIR = os.environ.get("JOBSEARCH_REPO", os.path.join(HERE, "repo"))
-QUEUE_FILE = os.environ.get("JOBSEARCH_QUEUE", os.path.join(HERE, "queue.yaml"))
-GH_REPO = os.environ.get("JOBSEARCH_GH_REPO", "example-user/resume")
+REPO_DIR = path_setting("JOBSEARCH_REPO", default_repo_dir())
+QUEUE_FILE = path_setting("JOBSEARCH_QUEUE", default_runtime_path("queue.yaml"))
+GH_REPO = github_repo_setting("JOBSEARCH_GH_REPO", "your-user/your-resume-repo")
 
 BRANCH_PREFIX = "app/"
 TRACKER_PATH = "applications.yaml"
@@ -374,6 +377,7 @@ def load_queue(path):
 
 def write_queue(path, items):
     items = sort_items(items)
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     tmp = f"{path}.tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
         fh.write(dump_queue(items))
@@ -1045,7 +1049,7 @@ def cmd_status(args, log):
 # ---------------------------------------------------------------- parser
 def add_common(ap):
     ap.add_argument("--queue", default=QUEUE_FILE,
-                    help="queue store (default: ./queue.yaml, env JOBSEARCH_QUEUE)")
+                    help="queue store (env JOBSEARCH_QUEUE; default under user state directory)")
 
 
 def build_parser():
@@ -1057,7 +1061,7 @@ def build_parser():
     e = sub.add_parser("enqueue", help="append newly merged app/* tailoring PRs")
     add_common(e)
     e.add_argument("--repo", default=REPO_DIR,
-                   help="resume clone (default: ./repo, env JOBSEARCH_REPO)")
+                   help="resume clone (env JOBSEARCH_REPO)")
     e.add_argument("--dry-run", action="store_true", help="print, write nothing")
     e.add_argument("--json", action="store_true", help="emit added/skipped as JSON")
     e.add_argument("--limit", type=int, default=0, help="add at most N items (0 = all)")
@@ -1079,7 +1083,7 @@ def build_parser():
     add_common(s)
     s.add_argument("--repo", default=REPO_DIR,
                    help="resume clone for the tracker write-back "
-                        "(default: ./repo, env JOBSEARCH_REPO)")
+                        "(env JOBSEARCH_REPO)")
     s.add_argument("--pr", type=int, required=True, help="PR number of the item")
     s.add_argument("--status", required=True,
                    choices=["queued", "in_progress", "submitted", "failed"],

@@ -6,7 +6,8 @@ posting store (``data/postings.json``) and the application tracker
 (``applications.yaml``) from a clone of your resume repo, selects postings
 that are not yet in the tracker, fetches each job description over plain HTTP,
 resolves the company's own apply URL when the page exposes it, and writes one
-JSON *work item* per posting under ``work/<slug>.json``.
+JSON *work item* per posting under ``JOBSEARCH_WORK`` (default
+``~/.local/state/job-search-pipeline/work``).
 
 The judgement half — selecting, rewriting and compressing resume evidence — is
 an agent turn, not code. See README.md for the exact per-work-item procedure
@@ -38,13 +39,15 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
+from config import (default_repo_dir, default_runtime_path, float_setting,
+                    github_repo_setting, path_setting, value_setting)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-REPO_DIR = os.environ.get("JOBSEARCH_REPO", os.path.join(HERE, "repo"))
-WORK_DIR = os.environ.get("JOBSEARCH_WORK", os.path.join(HERE, "work"))
-GH_REPO = os.environ.get("JOBSEARCH_GH_REPO", "example-user/resume")
-DOCTRINE_REPO = os.environ.get("JOBSEARCH_DOCTRINE_REPO",
-                               "example-user/resume-tailor-doctrine")
+REPO_DIR = path_setting("JOBSEARCH_REPO", default_repo_dir())
+WORK_DIR = path_setting("JOBSEARCH_WORK", default_runtime_path("work"))
+GH_REPO = github_repo_setting("JOBSEARCH_GH_REPO", "your-user/your-resume-repo")
+DOCTRINE_REPO = value_setting("JOBSEARCH_DOCTRINE_REPO",
+                              "your-user/your-resume-tailor-doctrine")
 BRANCH_PREFIX = "app/"
 # One authoritative all-states PR index (see pr_index). Posting links that
 # already shipped in a MERGED PR are in flight just like open ones; the
@@ -59,15 +62,15 @@ TRACKER_PATH = "applications.yaml"
 # because a skip is not a submission. Entries are shaped like tracker entries
 # so the same key normalisation applies; see skipped.yaml for the fields.
 SKIPPED_PATH = "skipped.yaml"
-SKIPPED_FILE = os.environ.get("JOBSEARCH_SKIPPED", os.path.join(HERE, SKIPPED_PATH))
+SKIPPED_FILE = path_setting("JOBSEARCH_SKIPPED", default_runtime_path("skipped.yaml"))
 # Temporary posting gates (per-company caps with a known reset window).
-GATE_FILE = os.environ.get("JOBSEARCH_GATES", os.path.join(HERE, "gates.yaml"))
-QUEUE_FILE = os.environ.get("JOBSEARCH_QUEUE", os.path.join(HERE, "queue.yaml"))
+GATE_FILE = path_setting("JOBSEARCH_GATES", os.path.join(HERE, "gates.yaml"))
+QUEUE_FILE = path_setting("JOBSEARCH_QUEUE", default_runtime_path("queue.yaml"))
 MASTER_PATH = "master/resume.tex"
-CONTACT_URL = os.environ.get("JOBSEARCH_CONTACT_URL", "https://github.com/example-user")
+CONTACT_URL = value_setting("JOBSEARCH_CONTACT_URL", "https://example.invalid/")
 USER_AGENT = "job-search-tailor/1.0 (+%s)" % CONTACT_URL
 SGT = timezone(timedelta(hours=8))
-FETCH_SLEEP = float(os.environ.get("JOBSEARCH_TAILOR_SLEEP", "0.5"))
+FETCH_SLEEP = float_setting("JOBSEARCH_TAILOR_SLEEP", 0.5)
 MIN_JD_LEN = 200  # shorter extractions are treated as a failed fetch
 
 # Company domains that are never the "apply" target (social / sharing / boards).

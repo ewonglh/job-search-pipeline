@@ -20,8 +20,4 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$HERE" || exit 1
 
-export JOBSEARCH_GH_REPO="${JOBSEARCH_GH_REPO:-example-user/resume}"
-export JOBSEARCH_REPO="${JOBSEARCH_REPO:-$HERE/repo}"
-export JOBSEARCH_CONTACT_URL="${JOBSEARCH_CONTACT_URL:-https://github.com/example-user}"
-
 exec python3 rank.py "$@"

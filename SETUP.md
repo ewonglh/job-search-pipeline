@@ -10,16 +10,29 @@ Common prerequisites for all three:
 - A resume repo of your own. The scripts read `data/postings.json` and
   `applications.yaml` from a clone, and open PRs against it.
 
-Set these before anything else:
+Set these before running a lane. Keep the private resume clone and mutable
+runtime state outside the code checkout:
 
 ```bash
-export JOBSEARCH_GH_REPO="your-user/your-resume-repo"
-export JOBSEARCH_REPO_URL="https://github.com/your-user/your-resume-repo.git"
-export JOBSEARCH_REPO="$HOME/job-search/repo"
+export JOBSEARCH_GH_REPO="owner/private-resume"
+export JOBSEARCH_REPO_URL="https://github.com/owner/private-resume.git"
+export JOBSEARCH_REPO="$HOME/.local/share/job-search-pipeline/resume"
+export JOBSEARCH_QUEUE="$HOME/.local/state/job-search-pipeline/queue.yaml"
+export JOBSEARCH_SKIPPED="$HOME/.local/state/job-search-pipeline/skipped.yaml"
+export JOBSEARCH_DEADLINES="$HOME/.local/state/job-search-pipeline/deadlines.yaml"
+export JOBSEARCH_OUTBOX="$HOME/.local/state/job-search-pipeline/outbox"
+export JOBSEARCH_WORK="$HOME/.local/state/job-search-pipeline/work"
+export JOBSEARCH_SUMMARY_STATE="$HOME/.local/state/job-search-pipeline/summary_state.json"
+export JOBSEARCH_REVIEW_STATE="$HOME/.local/state/job-search-pipeline/review_state.json"
+export JOBSEARCH_ACTIONS_STATE="$HOME/.local/state/job-search-pipeline/actions-state.json"
+export JOBSEARCH_DASHBOARD_OUT="$HOME/.local/state/job-search-pipeline/dashboard/index.html"
+mkdir -p "$(dirname "$JOBSEARCH_REPO")" "$(dirname "$JOBSEARCH_QUEUE")"
+mkdir -p "$(dirname "$JOBSEARCH_SUMMARY_STATE")" "$JOBSEARCH_OUTBOX" "$JOBSEARCH_WORK"
 ```
 
-Put them in your shell rc file so every scheduled job inherits them. A cron job
-that cannot see these variables will clone the wrong repo or fail.
+Use the same values in the scheduler environment. Cron does not inherit your
+interactive shell variables. Empty or malformed path overrides stop with a
+configuration error instead of resolving to the current directory.
 
 ---
 
@@ -63,18 +76,18 @@ script with your arguments. Read one, they are under 25 lines.
 
 ```cron
 # discovery, every morning
-0 8 * * *  cd $HOME/job-search/scripts && JOBSEARCH_GH_REPO=your-user/your-resume-repo ./run.sh --limit 20 >> $HOME/job-search/discover.log 2>&1
+0 8 * * *  cd $HOME/job-search/scripts && JOBSEARCH_GH_REPO=owner/private-resume JOBSEARCH_REPO=$HOME/.local/share/job-search-pipeline/resume JOBSEARCH_REPO_URL=https://github.com/owner/private-resume.git ./run.sh --limit 20 >> $HOME/job-search/discover.log 2>&1
 
 # ranking, after discovery
-30 8 * * * cd $HOME/job-search/scripts && JOBSEARCH_GH_REPO=your-user/your-resume-repo ./run-rank.sh --top 10 >> $HOME/job-search/rank.log 2>&1
+30 8 * * * cd $HOME/job-search/scripts && JOBSEARCH_GH_REPO=owner/private-resume JOBSEARCH_REPO=$HOME/.local/share/job-search-pipeline/resume ./run-rank.sh --top 10 >> $HOME/job-search/rank.log 2>&1
 
 # queue enqueue, hourly, cheap and silent when nothing merged
-15 * * * * cd $HOME/job-search/scripts && JOBSEARCH_GH_REPO=your-user/your-resume-repo ./run-queue.sh >> $HOME/job-search/queue.log 2>&1
+15 * * * * cd $HOME/job-search/scripts && JOBSEARCH_GH_REPO=owner/private-resume JOBSEARCH_REPO=$HOME/.local/share/job-search-pipeline/resume JOBSEARCH_QUEUE=$HOME/.local/state/job-search-pipeline/queue.yaml ./run-queue.sh >> $HOME/job-search/queue.log 2>&1
 ```
 
-Cron does not inherit your shell environment. The `JOBSEARCH_GH_REPO=...` prefix
-on each line is not redundant, it is the thing that stops a job writing to the
-wrong repo.
+Cron does not inherit your shell environment, so each line supplies the repo
+settings it needs. Add runtime path overrides to each scheduled command when
+they differ from the user-local defaults.
 
 To read the shortlist, cron output goes to a log. Have `run-rank.sh` mail it, or
 read the log, or let Track 2 or 3 send it to you.
@@ -229,48 +242,53 @@ is identical to Track 2, so a wrong flag is a rename, not a redesign.
 
 ## Check it works
 
-First load the demo data into the shape the scripts expect. `demo/` mirrors the
-layout of a resume repo, so one copy is enough:
+Create an isolated synthetic resume repo outside the checkout. `demo/` mirrors
+the layout the scripts read:
 
 ```bash
-cd scripts
-mkdir -p repo/data
-cp ../demo/repo/data/postings.json  repo/data/postings.json
-cp ../demo/repo/data/profile.yaml   repo/data/profile.yaml
-cp ../demo/repo/applications.yaml   repo/applications.yaml
-cp ../demo/queue.yaml ../demo/skipped.yaml ../demo/deadlines.yaml .
+DEMO_ROOT="$(mktemp -d)"
+export JOBSEARCH_REPO="$DEMO_ROOT/resume"
+export JOBSEARCH_QUEUE="$DEMO_ROOT/runtime/queue.yaml"
+export JOBSEARCH_SKIPPED="$DEMO_ROOT/runtime/skipped.yaml"
+export JOBSEARCH_DEADLINES="$DEMO_ROOT/runtime/deadlines.yaml"
+export JOBSEARCH_OUTBOX="$DEMO_ROOT/runtime/outbox"
+mkdir -p "$JOBSEARCH_REPO/data" "$DEMO_ROOT/runtime/outbox"
+cp demo/repo/data/postings.json "$JOBSEARCH_REPO/data/postings.json"
+cp demo/repo/data/profile.yaml "$JOBSEARCH_REPO/data/profile.yaml"
+cp demo/repo/applications.yaml "$JOBSEARCH_REPO/applications.yaml"
 ```
 
 Then run these. Each is independent and cheap:
 
 ```bash
-python3 test_queue.py            # queue logic, offline
-python3 test_tailor.py           # tailoring selection, offline
-python3 test_stages.py           # stage machine, offline
-python3 test_dashboard.py        # board rendering and the PII assertion
-python3 dashboard.py --json      # prints the computed board, no files written
-python3 queue.py list            # reads the demo queue
-python3 stages.py list           # reads the demo tracker
-python3 tailor.py --list         # reports selection counts
+cd scripts
+python3 test_queue.py
+python3 test_tailor.py
+python3 test_stages.py
+python3 test_dashboard.py
+python3 test_config.py
+python3 queue.py list
+python3 stages.py list
+python3 tailor.py --list --force
 ```
 
-Expected: the four `test_*.py` suites print `all assertions passed`, and the
-three listing commands produce rows.
+The four required offline suites print `all assertions passed`; `test_config.py`
+checks external paths and invalid setup. The listing commands read only the
+synthetic external repo or runtime paths.
 
-### The one failure you will see with demo data
+### Live repository access
 
-`tailor.py`, `rank.py`, `dashboard.py` and `queue.py` call `gh` to check for open
-pull requests. With `JOBSEARCH_GH_REPO=example-user/resume` that repo does not
-exist, so you get:
+Before running a live lane, set `JOBSEARCH_GH_REPO`, `JOBSEARCH_REPO_URL`, and
+`JOBSEARCH_REPO` to a repository you control, then authenticate `gh`. Without
+that setup, PR lookup cannot resolve the placeholder account:
 
 ```
-GraphQL: Could not resolve to a Repository with the name 'example-user/resume'.
+GraphQL: Could not resolve to a Repository with the name 'your-user/your-resume-repo'.
 ```
 
-That is correct behaviour, not a bug. Point `JOBSEARCH_GH_REPO` at a repo you own
-and the warning goes away. The scripts degrade rather than crash: `tailor.py`
-says `WARNING in-flight check unavailable`, and `dashboard.py` says `Found may
-over-count`. Read those warnings as "the PR check is blind", not "no PRs exist".
+That placeholder is for offline examples only. In live use, set a real private
+repository. A temporary `gh` failure is reported by the relevant lane; do not
+interpret missing PR data as proof that no PR exists.
 
 `test_dashboard.py` includes an assertion that no profile value reaches the
 rendered HTML. If you add a field to `profile.yaml`, that test starts guarding it
@@ -280,9 +298,9 @@ automatically. Do not weaken it.
 
 1. Their own resume repo, with a `data/postings.json` and `applications.yaml`.
 2. `gh auth login`, plus write access to that repo.
-3. Their board list in `companies.yaml`, or just InternSG alone.
-4. Their own `profile.yaml` answers. Start from `demo/profile.yaml` and replace
-   every value.
+3. Their optional board list in `scripts/companies.yaml`, or just InternSG.
+4. Their own `data/profile.yaml` answers. Start from
+   `demo/repo/data/profile.yaml` and replace every value.
 5. Their own `rubric.yaml` weights, if the defaults do not match what they care
    about.
 6. A model, for Tracks 2 and 3.

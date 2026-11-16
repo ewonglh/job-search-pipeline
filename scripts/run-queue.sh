@@ -6,7 +6,7 @@
 #
 # Environment:
 #   JOBSEARCH_GH_REPO  your resume repo, "user/repo"
-#   JOBSEARCH_QUEUE    queue store path (default ./queue.yaml)
+#   JOBSEARCH_QUEUE    queue store path (default under ~/.local/state/job-search-pipeline)
 #
 # Usage: run-queue.sh [queue.py args]
 #   run-queue.sh                      # enqueue (silent when nothing merged)
@@ -24,8 +24,5 @@ fi
 case "${1:-}" in
   -*) set -- enqueue "$@" ;;
 esac
-
-export JOBSEARCH_GH_REPO="${JOBSEARCH_GH_REPO:-example-user/resume}"
-export JOBSEARCH_QUEUE="${JOBSEARCH_QUEUE:-$HERE/queue.yaml}"
 
 exec python3 queue.py "$@"

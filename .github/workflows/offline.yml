@@ -1,0 +1,36 @@
+name: Offline tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  offline:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      GIT_AUTHOR_NAME: Synthetic Test
+      GIT_AUTHOR_EMAIL: synthetic@example.invalid
+      GIT_COMMITTER_NAME: Synthetic Test
+      GIT_COMMITTER_EMAIL: synthetic@example.invalid
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.9', '3.x']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Run offline suites
+        working-directory: scripts
+        run: |
+          python test_queue.py
+          python test_tailor.py
+          python test_stages.py
+          python test_dashboard.py
+          python test_config.py
+          python test_automerge.py
+          python test_review_contract.py
+          python test_discover.py
