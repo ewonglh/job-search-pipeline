@@ -1,0 +1,9 @@
+{
+  "id": "jobs-command",
+  "name": "Jobs command",
+  "description": "Authenticated read-only summary from the committed jobs projection.",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false
+  }
+}

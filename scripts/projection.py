@@ -1148,7 +1148,9 @@ def read_snapshot(db_path=None):
 
 
 def format_compact(snapshot):
-    """Shared compact status line block for CLI, a future web view, or command."""
+    """Shared compact status block for CLI, dashboard, and authenticated command."""
+    import pipeline_health
+
     facts = snapshot.get("facts", {})
     attempts = facts.get("attempts", [])
     statuses = {}
@@ -1168,14 +1170,43 @@ def format_compact(snapshot):
         return status
     health = ", ".join("{}={}".format(name, source_status(value))
                        for name, value in sorted(sources.items()))
+    daily = pipeline_health.build_report(
+        snapshot,
+        timezone_name=os.environ.get("JOBSEARCH_TIMEZONE", "Asia/Singapore"),
+        weekday_goal=1,
+        weekend_goal=0,
+        ready_buffer=1,
+        as_of=snapshot.get("as_of"),
+    )
+
+    def count(value):
+        return "unavailable" if value is None else str(value)
+
+    goal = daily["submission_goal"]
+    submissions = goal["submissions"]
+    attempts = daily["attempts"]
+    sync = daily["tracker_sync"]
+    gaps = daily["snapshot_gaps"]
+    buffer = daily["ready_buffer"]
+    queue_source = sources.get("queue", {})
+    queue_summary = (
+        (", ".join("{} {}".format(key, value)
+                   for key, value in sorted(statuses.items())) or "empty")
+        if queue_source.get("status") in ("fresh", "stale") else "unavailable"
+    )
     review = facts.get("review_quality", {})
     model = review.get("first_pass", {}).get("model", {})
     owner = review.get("first_pass", {}).get("owner", {})
     lines = ["Jobs snapshot {} · as of {} · generated {}".format(
         snapshot.get("snapshot_id", "unknown"), snapshot.get("as_of", "unknown"),
         snapshot.get("generated_at", "unknown")),
-        "Queue: " + (", ".join("{} {}".format(key, value)
-                                for key, value in sorted(statuses.items())) or "empty"),
+        "Daily goal ({}): {} / {} confirmed · coverage={} · ready queue={}/{}".format(
+            daily["timezone"], count(goal["confirmed"]), goal["target"], submissions["coverage"],
+            count(buffer["queued"]), buffer["target"]),
+        "Queue: " + queue_summary,
+        "Attention: stale in progress {} · outcome unknown {} · sync pending/error {} · snapshot gaps {}".format(
+            count(attempts["stale_in_progress"]), count(attempts["outcome_unknown"]),
+            count(sync["pending_or_error"]), count(gaps["total"])),
         "Review heads: {} · model {}/{}/{} accepted/not/unknown · owner {}/{}/{}".format(
             review.get("unique_artifact_heads", 0), model.get("accepted", 0),
             model.get("not_accepted", 0), model.get("unknown", 0),
