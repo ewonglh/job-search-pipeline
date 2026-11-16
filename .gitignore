@@ -56,6 +56,13 @@ review_state.json
 # Local logs
 *.log
 
+# Private SQLite projections and SQLite sidecars
+*.sqlite
+*.sqlite3
+*.db
+*-wal
+*-shm
+
 # Editor and OS noise
 .venv/
 .DS_Store

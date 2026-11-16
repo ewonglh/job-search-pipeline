@@ -36,6 +36,7 @@ jobs:
           python test_stages.py
           python test_dashboard.py
           python test_reports.py
+          python test_projection.py
           python test_eligibility.py
           python test_rank.py
           python test_application_identity.py

@@ -205,12 +205,8 @@ def render_text(report):
 
 def _parser():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--repo", default=default_repo_dir())
-    parser.add_argument("--tracker", default=None)
-    parser.add_argument("--queue", default=None)
-    parser.add_argument("--ledger", default=None)
-    parser.add_argument("--ingest-state", default=None)
-    parser.add_argument("--snapshot-root", default=None)
+    parser.add_argument("--db", default=None,
+                        help="cached projection database (read-only; collect separately)")
     parser.add_argument("--as-of", default=None, help="local calendar day, YYYY-MM-DD")
     parser.add_argument("--timezone", default=os.environ.get("JOBSEARCH_TIMEZONE", "Asia/Singapore"))
     parser.add_argument("--weekday-goal", type=int, default=1)
@@ -222,31 +218,38 @@ def _parser():
 
 def collect(args):
     zone = report_snapshot.timezone_for(args.timezone)
-    as_of = date.fromisoformat(args.as_of) if args.as_of else datetime.now(zone).date()
+    as_of_value = getattr(args, "as_of", None)
+    repo = getattr(args, "repo", default_repo_dir())
+    as_of = date.fromisoformat(as_of_value) if as_of_value else datetime.now(zone).date()
     return report_snapshot.collect_snapshot(
-        tracker_path=args.tracker or path_setting(
-            "JOBSEARCH_TRACKER", os.path.join(args.repo, "applications.yaml")),
-        queue_path=args.queue or path_setting("JOBSEARCH_QUEUE", default_runtime_path("queue.yaml")),
-        ledger_path=args.ledger or path_setting("JOBSEARCH_RECRUITMENT_LEDGER",
-                                                 default_runtime_path("recruitment_events.json")),
-        ingestion_path=args.ingest_state or path_setting("JOBSEARCH_INGEST_STATE",
-                                                          default_runtime_path("email_ingest_state.json")),
-        snapshot_root=args.snapshot_root or path_setting("JOBSEARCH_SNAPSHOT_ROOT",
-                                                          default_runtime_path("submission-snapshots")),
+        tracker_path=getattr(args, "tracker", None) or path_setting(
+            "JOBSEARCH_TRACKER", os.path.join(repo, "applications.yaml")),
+        queue_path=getattr(args, "queue", None) or path_setting(
+            "JOBSEARCH_QUEUE", default_runtime_path("queue.yaml")),
+        ledger_path=getattr(args, "ledger", None) or path_setting(
+            "JOBSEARCH_RECRUITMENT_LEDGER", default_runtime_path("recruitment_events.json")),
+        ingestion_path=getattr(args, "ingest_state", None) or path_setting(
+            "JOBSEARCH_INGEST_STATE", default_runtime_path("email_ingest_state.json")),
+        snapshot_root=getattr(args, "snapshot_root", None) or path_setting(
+            "JOBSEARCH_SNAPSHOT_ROOT", default_runtime_path("submission-snapshots")),
         as_of=as_of.isoformat())
 
 
 def main(argv=None):
     args = _parser().parse_args(argv)
+    import projection
     if min(args.weekday_goal, args.weekend_goal, args.ready_buffer) < 0:
         print("pipeline_health: goals and ready buffer must be non-negative", file=sys.stderr)
         return 2
     try:
-        snapshot = collect(args)
+        snapshot = projection.read_snapshot(args.db)
         report = build_report(snapshot, timezone_name=args.timezone,
                               weekday_goal=args.weekday_goal,
                               weekend_goal=args.weekend_goal,
                               ready_buffer=args.ready_buffer, as_of=args.as_of)
+    except projection.ProjectionError as exc:
+        print("pipeline_health: " + str(exc), file=sys.stderr)
+        return 2
     except (OSError, ValueError, ZoneInfoNotFoundError) as exc:
         print("pipeline_health: invalid report input: {}".format(type(exc).__name__), file=sys.stderr)
         return 2

@@ -38,7 +38,7 @@ Usage:
   summary.py [digest] [--repo DIR] [--days N] [--dry-run] [--json]
   summary.py nudges [--repo DIR] [--dry-run] [--json]
   summary.py newpost [--repo DIR] [--skipped PATH] [--rankings PATH] [--dry-run] [--json]
-  summary.py health|funnel [report source options] [--json]
+  summary.py health|funnel [--db PATH] [--json]
 
   Bare invocation = digest mode. ``--mode {digest,nudges,newpost}`` is also
   accepted and wins over the positional subcommand.
@@ -1502,11 +1502,10 @@ def build_parser():
                     help="owner-skip list (env JOBSEARCH_SKIPPED)")
     ap.add_argument("--rankings", default=RANKINGS_DEFAULT,
                     help="rankings join file (env JOBSEARCH_RANKINGS)")
-    ap.add_argument("--tracker", default=None, help="tracker path for health/funnel reports")
-    ap.add_argument("--queue", default=None, help="queue path for health/funnel reports")
-    ap.add_argument("--ledger", default=None, help="outcome ledger path for health/funnel reports")
-    ap.add_argument("--ingest-state", default=None, help="ingestion state path for health/funnel reports")
-    ap.add_argument("--snapshot-root", default=None, help="private submission snapshot root")
+    ap.add_argument("--db", default=path_setting("JOBSEARCH_PROJECTION_DB",
+                                                   os.path.join(default_runtime_path("projection"),
+                                                                "index.sqlite3")),
+                    help="cached projection database for health/funnel reports")
     ap.add_argument("--as-of", default=None, help="fixed local report date (YYYY-MM-DD)")
     ap.add_argument("--timezone", default=os.environ.get("JOBSEARCH_TIMEZONE", "Asia/Singapore"),
                     help="IANA local timezone for report dates")
@@ -1600,15 +1599,13 @@ def run_newpost(args, log):
 
 
 def run_report(args):
-    """Explicit local health/funnel reports; bypass digest state and Jev gate."""
+    """Read cached health/funnel reports; bypass digest state and Jev gate."""
     import funnel_report
     import pipeline_health
 
     module = pipeline_health if resolve_mode(args) == "health" else funnel_report
-    argv = ["--repo", args.repo, "--timezone", args.timezone]
-    for option, value in (("--tracker", args.tracker), ("--queue", args.queue),
-                          ("--ledger", args.ledger), ("--ingest-state", args.ingest_state),
-                          ("--snapshot-root", args.snapshot_root), ("--as-of", args.as_of)):
+    argv = ["--db", args.db, "--timezone", args.timezone]
+    for option, value in (("--as-of", args.as_of),):
         if value is not None:
             argv.extend([option, value])
     if args.json:

@@ -136,18 +136,51 @@ default.
 
 ## Local health and funnel reports
 
-From `scripts/`, run `python3 summary.py health --as-of YYYY-MM-DD` for daily
-submission and queue health, or `python3 summary.py funnel --as-of YYYY-MM-DD`
-for mature 14/28-day outcome cohorts. Add `--json` for the same report data as
-JSON. Health goals and the ready buffer accept `--weekday-goal`,
-`--weekend-goal`, and `--ready-buffer` (defaults: 1 weekday, 0 weekend, and
-1 queued item); `--timezone` sets the local calendar.
-The reports read tracker, queue, outcome ledger, ingestion state, and snapshot
-metadata only at the collection boundary. Missing or malformed sources remain
-unavailable in the report. Rendering makes no model or mailbox calls and does
-not update state. A missing reply is not treated as a confirmed non-response.
-Ledger freshness uses its declared observation or scan time; touching the file
-does not refresh it. Missing observation time is explicitly unknown/stale.
+From `scripts/`, run `python3 projection.py collect` to explicitly read the
+configured local tracker, queue, outcome ledger, ingestion state, submission
+snapshot metadata, review state and optional preflight records. This writes a
+private SQLite cache outside the checkout. It does not contact GitHub, a
+mailbox or a model. Sources are full replacements: valid empty input publishes
+deletions, interrupted batches resume from committed cursors, and readers
+continue seeing the last fully published snapshot while collection is
+incomplete. A failed source retains its last good facts while successful
+sources can update. The cache keeps at most eight published snapshots plus the
+active and resumable source generations. Its default directory is created
+with owner-only permissions on POSIX; a configured database directory must
+also be private.
+Manifest generations retain only confirmed application/attempt bindings and
+resume hashes. Manifest read errors retain the last complete generation with
+an error; a complete scan can confirm deletion. Cached reads never reopen
+manifests, and snapshot/progress metadata is read in one SQLite transaction.
+URL fragments and known tracking fields are removed. Query parameters are
+limited to numeric/UUID job identifiers (`id`, `job_id`, `jobid`, `gh_jid`,
+`req_id`, `requisitionid`); other queries make the source visibly invalid
+rather than storing private values or merging distinct posting identities.
+
+`python3 projection.py read` prints the cached versioned snapshot and
+`python3 projection.py report compact` prints the shared compact status.
+`python3 summary.py health --as-of YYYY-MM-DD` shows daily submission and queue
+health; `python3 summary.py funnel --as-of YYYY-MM-DD` shows mature 14/28-day
+outcome cohorts. Add `--json` for JSON. These read/report commands open the
+cache read-only and never collect, rebuild or repair it. Health goals and the
+ready buffer accept `--weekday-goal`, `--weekend-goal`, and `--ready-buffer`
+(defaults: 1 weekday, 0 weekend, and 1 queued item); `--timezone` sets the
+local calendar.
+
+Tracker and queue sources do not declare when their facts were observed, so
+their observation time stays unknown and freshness is reported as stale. The
+ledger and ingestion sources use explicit observed/scan timestamps;
+filesystem modification times never refresh source age. Collection time,
+source observation time and snapshot generation time remain separate. A
+missing reply is not treated as a confirmed non-response.
+
+`JOBSEARCH_PREFLIGHT_STATE` optionally points to a private schema-1 JSON file
+with a `records` list. Each item contains the result shape returned by
+`tailor_preflight.check_artifact` under `report`, and may include a separate
+`owner_record`. The cache keeps artifact heads, hash metadata, structured
+finding codes and owner acceptance state; it discards messages, summaries,
+reviewer names and other free text. Missing provenance stays unknown, and a
+model verdict never implies owner acceptance.
 Acknowledgements are excluded from hiring outcomes. Text and JSON both expose
 identity and malformed-evidence diagnostics.
 
@@ -241,6 +274,8 @@ or a repository inside this checkout. Empty path overrides fail immediately.
 | `JOBSEARCH_RANKINGS` | Ranking output used by reports | `~/.local/state/job-search-pipeline/rankings.json` |
 | `JOBSEARCH_DASHBOARD_OUT` | Dashboard output | `~/.local/state/job-search-pipeline/dashboard/index.html` |
 | `JOBSEARCH_INGEST_STATE` | Private email-ingestion cursors | `~/.local/state/job-search-pipeline/email_ingest_state.json` |
+| `JOBSEARCH_PROJECTION_DB` | Private cached report projection | `~/.local/state/job-search-pipeline/projection/index.sqlite3` |
+| `JOBSEARCH_PREFLIGHT_STATE` | Optional content-free preflight records | `~/.local/state/job-search-pipeline/preflight_records.json` |
 | `JOBSEARCH_TIMEZONE` | Local day used by health and funnel reports | `Asia/Singapore` |
 | `JOBSEARCH_EMAIL_ADDRESS` | Mailbox's own address for outbound detection | unset |
 | `JOBSEARCH_EMAIL_FOLDERS` | Comma-separated managed IMAP folders | `INBOX` |

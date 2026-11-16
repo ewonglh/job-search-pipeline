@@ -30,6 +30,8 @@ export JOBSEARCH_ACTIONS_STATE="$HOME/.local/state/job-search-pipeline/actions-s
 export JOBSEARCH_DASHBOARD_OUT="$HOME/.local/state/job-search-pipeline/dashboard/index.html"
 export JOBSEARCH_RECRUITMENT_LEDGER="$HOME/.local/state/job-search-pipeline/recruitment_events.json"
 export JOBSEARCH_INGEST_STATE="$HOME/.local/state/job-search-pipeline/email_ingest_state.json"
+export JOBSEARCH_PROJECTION_DB="$HOME/.local/state/job-search-pipeline/projection/index.sqlite3"
+export JOBSEARCH_PREFLIGHT_STATE="$HOME/.local/state/job-search-pipeline/preflight_records.json"
 export JOBSEARCH_EMAIL_ADDRESS="mailbox@example.invalid"
 export JOBSEARCH_EMAIL_FOLDERS="INBOX,Archive"
 mkdir -p "$(dirname "$JOBSEARCH_REPO")" "$(dirname "$JOBSEARCH_QUEUE")" \
