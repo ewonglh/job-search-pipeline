@@ -6,6 +6,7 @@ import json
 import unittest
 
 import notify_state
+import notify_delivery
 import quiet_routing as Q
 
 
@@ -15,6 +16,24 @@ ACCEPTANCE = {
     "phone": {"accepted": True, "revision": REVISION, "recorded_at": "2026-11-16T05:50:00Z"},
     "desktop": {"accepted": True, "revision": REVISION, "recorded_at": "2026-11-16T05:55:00Z"},
 }
+
+
+def confirmed_delivery(notices):
+    state = notify_state.empty_state()
+    for index, notice in enumerate(notices, 1):
+        created = datetime.datetime.fromisoformat(notice["created_at"].replace("Z", "+00:00"))
+        notify_state.record_decision(state, notice["notice_id"], "deliver", created)
+        batch_id = notify_state.add_pending_batch(
+            state, notice["notice_id"], "Synthetic notice", created, format(index, "032x"))
+        receipt = {"jobId": "synthetic-job", "action": "finished", "status": "ok",
+                   "completionStatus": "succeeded", "runId": "synthetic-run-" + str(index),
+                   "runAtMs": int(created.timestamp() * 1000), "durationMs": 1000,
+                   "delivered": True, "deliveryStatus": "delivered",
+                   "summary": "NOTIFY_BATCH=" + batch_id + "\nSynthetic notice"}
+        notify_delivery.reconcile_state(
+            state, [receipt], job_id="synthetic-job", now=created + datetime.timedelta(seconds=10))
+        assert batch_id in state["acknowledgments"]
+    return state
 
 
 class QuietRoutingTests(unittest.TestCase):
@@ -91,12 +110,48 @@ class QuietRoutingTests(unittest.TestCase):
         restarted, duplicate_results = Q.plan_notices(
             restarted, notices, dashboard_status="fresh", dashboard_working=True,
             parity_revision=REVISION)
-        self.assertTrue(all(item["route"] == "skipped" for item in duplicate_results))
+        self.assertTrue(all(item["reason"] == "pending_delivery" for item in duplicate_results))
+        self.assertFalse(restarted["seen_notice_ids"])
+        self.assertFalse(restarted["recovered_incidents"])
+        receipts = confirmed_delivery(notices[1:])
+        before = copy.deepcopy(receipts)
+        restarted = Q.reconcile_deliveries(restarted, receipts)
+        self.assertEqual(receipts, before)
+        restarted, acknowledged = Q.plan_notices(restarted, notices)
+        self.assertEqual(acknowledged[0]["reason"], "pending_delivery")
+        self.assertTrue(all(item["route"] == "skipped" for item in acknowledged[1:]))
         restarted, duplicate_recovery = Q.plan_notices(
             restarted, [{"notice_id": "recovery-2", "category": "recovery",
                          "incident_id": "incident-1", "created_at": "2026-11-16T06:06:00Z"}],
             dashboard_status="fresh", dashboard_working=True, parity_revision=REVISION)
         self.assertEqual(duplicate_recovery[0]["reason"], "recovery_already_emitted")
+
+    def test_unacknowledged_retries_survive_toggle_and_recovery_alias(self):
+        callback = {"notice_id": "pending-callback", "category": "callback",
+                    "created_at": "2026-11-16T06:01:00Z"}
+        recovery = {"notice_id": "pending-recovery", "category": "recovery",
+                    "incident_id": "incident-pending", "created_at": "2026-11-16T06:02:00Z"}
+        policy, _ = Q.plan_notices(Q.empty_state(), [callback, recovery])
+        unconfirmed = notify_state.empty_state()
+        created = datetime.datetime.fromisoformat(callback["created_at"].replace("Z", "+00:00"))
+        notify_state.record_decision(unconfirmed, callback["notice_id"], "deliver", created)
+        notify_state.add_pending_batch(unconfirmed, callback["notice_id"], "Synthetic notice",
+                                       created, "f" * 32)
+        self.assertEqual(Q.reconcile_deliveries(policy, unconfirmed), policy)
+        with self.assertRaises(Q.PolicyError):
+            Q.reconcile_deliveries(policy, {"acknowledgments": {"fake": True}})
+        policy, _ = Q.set_quiet_mode(
+            policy, True, cursor="2026-11-16T06:03:00Z", revision=REVISION,
+            dashboard_status="fresh", dashboard_working=True,
+            parity_revision=REVISION, acceptance=ACCEPTANCE)
+        policy, retried = Q.plan_notices(json.loads(json.dumps(policy)), [
+            callback, dict(recovery, notice_id="recovery-alias", created_at="2026-11-16T06:04:00Z")])
+        self.assertEqual([row["notice_id"] for row in retried],
+                         [callback["notice_id"], recovery["notice_id"]])
+        self.assertTrue(all(row["reason"] == "pending_delivery" for row in retried))
+        self.assertEqual(len(policy["pending_notices"]), 2)
+        with self.assertRaises(Q.PolicyError):
+            Q.plan_notices(policy, [dict(callback, category="progress")])
 
     def test_toggle_baselines_block_historical_replay_and_stale_dashboard_falls_back(self):
         initial = Q.empty_state()

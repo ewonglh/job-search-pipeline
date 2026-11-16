@@ -581,6 +581,14 @@ incident on Telegram; stale dashboard or parity gates fall back to Telegram.
 Each mode change records a history baseline to prevent replay. Pending delivery
 state remains in the #9 receipt adapter and is acknowledged only from its exact
 native delivery receipt; a generated routing decision is not delivery.
+The policy keeps new plans in bounded `pending_notices` across restarts and
+mode changes. A recovery retry reuses the original incident's notice ID. A
+future transport must reuse that ID as the #9 `decision_id`, stage its batch
+idempotently, and use #9 reconciliation for the exact native receipt.
+`quiet_routing.reconcile_deliveries` reads validated receipt state before
+finalizing notice or recovery deduplication; planning never acknowledges a
+batch. Dashboard-only plans also remain pending; a future integration needs
+an explicit dashboard resolution policy rather than claiming message delivery.
 
 Before quiet-routing changes, the owner must complete human acceptance on the
 commit reported for this issue. Acceptance remains pending until the owner
