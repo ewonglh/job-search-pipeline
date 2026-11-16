@@ -34,21 +34,28 @@ Two read-mostly jobs over the same state:
 
 ## Procedure: stage from evidence
 
-1. Import normalized message JSON with `recruitment_evidence.py --messages FILE`.
-   The command reads no mailbox and stores its revision-aware ledger at
-   `JOBSEARCH_RECRUITMENT_LEDGER` outside the checkout.
-2. Review unresolved events with `outcomes.py review`. Use
+1. Prefer the offline `email_ingest.py import --messages FILE` command for
+   normalized messages. It reads no mailbox and stores its revision-aware
+   ledger at `JOBSEARCH_RECRUITMENT_LEDGER` outside the checkout. Live IMAP is
+   optional and runs only through `run-email-ingest.mjs` with the supported
+   OpenClaw SDK and a managed SecretRef.
+2. For live ingestion, use the separate initial, backfill, or named repair
+   cursor. Read-only selection and `BODY.PEEK` preserve mailbox flags. A
+   changed window gets a new cursor; inspect coverage for resets, skipped
+   folders, limits and interruptions. Transport completion never proves
+   complete callback recall.
+3. Review unresolved events with `outcomes.py review`. Use
    `outcomes.py adjudicate` only with dated source evidence; corrections append
    an auditable revision.
-3. Run `stages.py apply-evidence` first as a dry run, then with `--commit` when
+4. Run `stages.py apply-evidence` first as a dry run, then with `--commit` when
    the proposed uniquely matched events are correct.
-4. Full current message bodies, stable message IDs and exact dates are required.
+5. Full current message bodies, stable message IDs and exact dates are required.
    Quoted history, header-only hits and employer-only matches stay unresolved.
    Candidate-authored messages are excluded, and unknown origin stays unknown.
    Imported origin flags and unsigned watcher envelopes cannot verify human
    authorship or override classification of the current body. Confirm authorship
    with explicit evidence through `outcomes.py adjudicate --origin human`.
-5. Invitations do not imply assessment/interview completion or success. An
+6. Invitations do not imply assessment/interview completion or success. An
    offer does not imply acceptance. Never move a row backwards without
    `--force`, and never mark `Rejected` without dated evidence.
 

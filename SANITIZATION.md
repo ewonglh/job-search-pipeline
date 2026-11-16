@@ -10,7 +10,7 @@ any material before sharing it in a repository, screenshot, or message.
 | --- | --- | --- |
 | Local identity answers | `profile.local.yaml` | Keep outside Git with owner-only permissions. Read only when a form requires an answer. |
 | Private resume repository | `applications.yaml`, `data/profile.yaml`, `data/postings.json`, `master/`, `variants/` | Contains personal history and application materials. Use a private repository. |
-| Private runtime state | `queue.yaml`, `skipped.yaml`, `deadlines.yaml`, `submission-snapshots/`, `work/`, `inbox/`, `outbox/`, `cover-letters/`, state and cache files | Keep outside the checkout. It may contain decisions, correspondence, or application details. |
+| Private runtime state | `queue.yaml`, `skipped.yaml`, `deadlines.yaml`, `recruitment_events.json`, `email_ingest_state.json`, `submission-snapshots/`, `work/`, `inbox/`, `outbox/`, `cover-letters/`, state and cache files | Keep outside the checkout. It may contain decisions, correspondence, or application details. |
 | Publishable project files | scripts, tests, workflow, neutral configuration, documentation | Include only the mechanism and synthetic examples. |
 
 ## Resume and form data

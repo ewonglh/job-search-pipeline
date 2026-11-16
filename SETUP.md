@@ -17,6 +17,7 @@ runtime state outside the code checkout:
 export JOBSEARCH_GH_REPO="owner/private-resume"
 export JOBSEARCH_REPO_URL="https://github.com/owner/private-resume.git"
 export JOBSEARCH_REPO="$HOME/.local/share/job-search-pipeline/resume"
+export JOBSEARCH_TRACKER="$JOBSEARCH_REPO/applications.yaml"
 export JOBSEARCH_QUEUE="$HOME/.local/state/job-search-pipeline/queue.yaml"
 export JOBSEARCH_SNAPSHOT_ROOT="$HOME/.local/state/job-search-pipeline/submission-snapshots"
 export JOBSEARCH_SKIPPED="$HOME/.local/state/job-search-pipeline/skipped.yaml"
@@ -27,6 +28,10 @@ export JOBSEARCH_SUMMARY_STATE="$HOME/.local/state/job-search-pipeline/summary_s
 export JOBSEARCH_REVIEW_STATE="$HOME/.local/state/job-search-pipeline/review_state.json"
 export JOBSEARCH_ACTIONS_STATE="$HOME/.local/state/job-search-pipeline/actions-state.json"
 export JOBSEARCH_DASHBOARD_OUT="$HOME/.local/state/job-search-pipeline/dashboard/index.html"
+export JOBSEARCH_RECRUITMENT_LEDGER="$HOME/.local/state/job-search-pipeline/recruitment_events.json"
+export JOBSEARCH_INGEST_STATE="$HOME/.local/state/job-search-pipeline/email_ingest_state.json"
+export JOBSEARCH_EMAIL_ADDRESS="mailbox@example.invalid"
+export JOBSEARCH_EMAIL_FOLDERS="INBOX,Archive"
 mkdir -p "$(dirname "$JOBSEARCH_REPO")" "$(dirname "$JOBSEARCH_QUEUE")" \
   "$JOBSEARCH_SNAPSHOT_ROOT"
 mkdir -p "$(dirname "$JOBSEARCH_SUMMARY_STATE")" "$JOBSEARCH_OUTBOX" "$JOBSEARCH_WORK"
@@ -35,6 +40,64 @@ mkdir -p "$(dirname "$JOBSEARCH_SUMMARY_STATE")" "$JOBSEARCH_OUTBOX" "$JOBSEARCH
 Use the same values in the scheduler environment. Cron does not inherit your
 interactive shell variables. Empty or malformed path overrides stop with a
 configuration error instead of resolving to the current directory.
+
+## Email ingestion
+
+The offline command imports normalized JSON and has no mailbox or OpenClaw
+dependency. Point the tracker and ledger to private paths as above:
+
+```bash
+python3 scripts/email_ingest.py import \
+  --messages /path/to/normalized-messages.json \
+  --tracker "$JOBSEARCH_TRACKER" \
+  --ledger "$JOBSEARCH_RECRUITMENT_LEDGER"
+```
+
+The input may be a list of normalized messages or an object with a `messages`
+list and optional coverage. Messages use the same fields as
+`recruitment_evidence.py`; provide exact dates, stable Message-IDs, and a
+complete current body when available. Header-only and oversized messages are
+review evidence. The ledger keeps event summaries, hashes and coverage, never
+raw body text.
+
+The optional live path requires an OpenClaw installation with its supported
+runtime-config and SecretRef SDK modules. Set `OPENCLAW_PACKAGE_ROOT` to that
+installation's package root, configure a secure IMAP account with a SecretRef
+password, then run:
+
+```bash
+node scripts/run-email-ingest.mjs --account account-id --mode initial
+```
+
+If only one managed IMAP account is configured, `--account` can be omitted.
+`JOBSEARCH_EMAIL_ADDRESS` must be that mailbox's own address so outgoing copies
+are recognized. `JOBSEARCH_EMAIL_FOLDERS` is a comma-separated folder list;
+the default is `INBOX`. The adapter uses TLS, read-only selection and
+`BODY.PEEK`. It sends the resolved password to Python through an anonymous
+stdin pipe, not an argument, file or environment variable. SDK and IMAP error
+details are suppressed.
+
+Each folder has a private cursor scoped to the account, UIDVALIDITY, scan mode
+and exact window. Initial scans use `--mode initial`. Backfills require
+`--mode backfill --since YYYY-MM-DD` and accept an inclusive `--until` date.
+Matcher repairs require a new name, for example
+`--mode repair --repair-name matcher-v2`; they use an independent cursor.
+Changing a date window starts a separate cursor so historical UIDs are not
+skipped. Runs are bounded by `--max-messages`, `--max-seconds`, body and header
+limits, and a folder cap. Re-run an interrupted scan to resume it. Oversized
+headers remain in the ledger as unverified provider-bound review items.
+The time budget is checked around each IMAP operation, including empty folders;
+socket timeouts shrink to the remaining budget. Persistence and local processing
+can add overhead, so this is a cooperative scan limit. The managed adapter also
+has a separate process timeout. The health output reports skipped folders,
+UIDVALIDITY resets, exclusions and incomplete
+bodies without exposing message text. `transport_complete` means the selected
+UID range was read; `coverage.complete` remains false because transport
+completion cannot establish complete callback recall.
+
+Ingestion only writes the private evidence ledger and its private cursor. Review
+unresolved events with `outcomes.py review`; stage changes remain an explicit,
+separate `stages.py apply-evidence` action.
 
 ---
 
@@ -98,8 +161,9 @@ read the log, or let Track 2 or 3 send it to you.
 
 ## Track 2: OpenClaw
 
-Covers all five lanes. The gateway schedules the mechanical jobs, and the agent
-does the tailoring and draining under the same approval gates.
+Supports all six lanes. Email ingestion remains optional; the gateway schedules
+the mechanical jobs, and the agent does the tailoring and draining under the
+same approval gates.
 
 ### Why OpenClaw fits
 
@@ -181,7 +245,9 @@ merge remains the enqueue gate; narrative approval stays owner-only at drain.
 
 ## Track 3: Hermes Agent
 
-Same five lanes, same split, different scheduler.
+The same five existing lanes use the same split with a different scheduler.
+Normalized email import is available offline; live ingestion uses the optional
+OpenClaw managed adapter.
 
 ### Install
 
