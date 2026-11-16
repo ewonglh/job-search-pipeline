@@ -109,15 +109,14 @@ def classify_message(message):
     if kind == "unclassified":
         reasons.append("no explicit current-message recruitment event")
     origin = "unknown"
-    if message.get("origin_verification") == "verified" and message.get("origin") in ("human", "automated"):
-        origin = message["origin"]
+    # Imported metadata and unsigned watcher checksums cannot establish
+    # authorship. Human origin requires explicit ledger adjudication.
     return {"event_type": kind, "verification": "verified" if verified else "review_required",
             "origin": origin, "evidence": evidence, "occurred_at": occurred,
             "verification_reasons": reasons,
             "body_sha256": hashlib.sha256(body.encode("utf-8", "replace")).hexdigest()}
 
 
-WATCHER_ENVELOPE_SCHEMA = 1
 EVENT_TYPES = {"rejection", "oa_invitation", "interview_invitation", "unrelated",
                "availability_request", "recruiter_reply", "offer",
                "oa_completed", "oa_passed", "oa_failed", "interview_completed",
@@ -126,83 +125,6 @@ EVENT_TYPES = {"rejection", "oa_invitation", "interview_invitation", "unrelated"
 
 def _event_id(account, message_id):
     return "mail:" + hashlib.sha256((str(account or "default") + "|" + str(message_id)).encode()).hexdigest()
-
-
-def _envelope_digest(envelope):
-    payload = {k: envelope[k] for k in (
-        "schema", "source", "account", "message_id", "event_id", "body_sha256",
-        "event_type", "verification", "origin", "origin_verification",
-        "evidence", "occurred_at", "verification_reasons")}
-    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-
-
-def make_watcher_envelope(message):
-    """Build a body-private classified event envelope for gmail_watch JSON."""
-    body = message.get("body") or message.get("text") or ""
-    mid = str(message.get("message_id") or "").strip()
-    account = str(message.get("account") or "default")
-    classified = classify_message(message)
-    envelope = {
-        "schema": WATCHER_ENVELOPE_SCHEMA, "source": "gmail_watch",
-        "account": account, "message_id": mid,
-        "event_id": _event_id(account, mid) if mid else "",
-        "body_sha256": hashlib.sha256(str(body).encode("utf-8", "replace")).hexdigest(),
-        "event_type": classified["event_type"], "verification": classified["verification"],
-        "origin": classified["origin"], "origin_verification": message.get("origin_verification", ""),
-        "evidence": safe_excerpt(classified["evidence"]),
-        "occurred_at": classified["occurred_at"],
-        "verification_reasons": classified.get("verification_reasons", []),
-    }
-    envelope["digest"] = _envelope_digest(envelope)
-    return envelope
-
-
-def trusted_watcher_envelope(message):
-    """Validate the explicit local watcher format; never trust top-level flags alone.
-
-    The digest detects accidental mutation, not authenticity. External JSON
-    still requires a trusted ingestion path.
-    """
-    envelope = message.get("producer_envelope")
-    if not isinstance(envelope, dict):
-        return None
-    if envelope.get("schema") != WATCHER_ENVELOPE_SCHEMA or envelope.get("source") != "gmail_watch":
-        return None
-    mid = str(message.get("message_id") or "").strip()
-    if (not mid or mid.startswith(("sha1:", "weak:")) or mid.isdigit()
-            or envelope.get("message_id") != mid):
-        return None
-    if envelope.get("event_id") != _event_id(envelope.get("account"), mid):
-        return None
-    if not re.fullmatch(r"[0-9a-f]{64}", str(envelope.get("body_sha256") or "")):
-        return None
-    body = message.get("body") or message.get("text") or ""
-    if hashlib.sha256(str(body).encode("utf-8", "replace")).hexdigest() != envelope["body_sha256"]:
-        return None
-    if envelope.get("event_type") not in EVENT_TYPES:
-        return None
-    if envelope.get("verification") not in {"verified", "review_required"}:
-        return None
-    if envelope.get("origin") not in {"human", "automated", "unknown"}:
-        return None
-    if envelope.get("origin") != "unknown" and envelope.get("origin_verification") != "verified":
-        return None
-    if envelope.get("verification") == "verified" and not envelope.get("occurred_at"):
-        return None
-    if envelope.get("evidence") != safe_excerpt(envelope.get("evidence")):
-        return None
-    if envelope.get("digest") != _envelope_digest(envelope):
-        return None
-    # Duplicated top-level fields are convenience only and must agree with the
-    # private envelope wherever present.
-    for key in ("event_type", "verification", "origin", "occurred_at", "evidence"):
-        if key in message and message[key] != envelope[key]:
-            return None
-    if "classification_verified" in message and message["classification_verified"] != (envelope["verification"] == "verified"):
-        return None
-    return {key: envelope[key] for key in ("event_id", "message_id", "event_type",
-            "verification", "origin", "evidence", "occurred_at", "body_sha256",
-            "verification_reasons")}
 
 
 VERSION_FIELDS = {"revision", "revision_id", "supersedes", "recorded_at", "adjudicated_at"}
@@ -329,8 +251,8 @@ def reconcile(messages, tracker_rows, coverage=None):
     import stages
     events, review = [], []
     for message in messages:
-        trusted = trusted_watcher_envelope(message)
-        event = trusted or classify_message(message)
+        # Always classify the current body; producer envelopes are untrusted.
+        event = classify_message(message)
         mid = str(message.get("message_id") or "")
         scope = str(message.get("account") or "default")
         identity_key = mid or json.dumps([message.get(k) for k in ("from", "subject", "date")])
@@ -338,7 +260,7 @@ def reconcile(messages, tracker_rows, coverage=None):
         event.update(event_id=event_id, message_id=mid, application_id="",
                      subject=("[account administration message]" if event["event_type"] == "account_admin"
                               else safe_excerpt(message.get("subject"))), sender=message.get("from", ""),
-                     source=message.get("source") or ("gmail_watch" if trusted else "unknown"))
+                     source=message.get("source") or "unknown")
         if message.get('direction') in ('inbound','outbound'):event['direction']=message['direction']
         provider_identity = message.get("provider_identity")
         if isinstance(provider_identity, dict):
