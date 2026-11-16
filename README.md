@@ -148,6 +148,14 @@ sources can update. The cache keeps at most eight published snapshots plus the
 active and resumable source generations. Its default directory is created
 with owner-only permissions on POSIX; a configured database directory must
 also be private.
+Manifest generations retain only confirmed application/attempt bindings and
+resume hashes. Manifest read errors retain the last complete generation with
+an error; a complete scan can confirm deletion. Cached reads never reopen
+manifests, and snapshot/progress metadata is read in one SQLite transaction.
+URL fragments and known tracking fields are removed. Query parameters are
+limited to numeric/UUID job identifiers (`id`, `job_id`, `jobid`, `gh_jid`,
+`req_id`, `requisitionid`); other queries make the source visibly invalid
+rather than storing private values or merging distinct posting identities.
 
 `python3 projection.py read` prints the cached versioned snapshot and
 `python3 projection.py report compact` prints the shared compact status.

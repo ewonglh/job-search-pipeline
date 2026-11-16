@@ -212,13 +212,19 @@ with tempfile.TemporaryDirectory(prefix="synthetic-projection-i11-") as temp:
     def readonly_connect(database, *args, **kwargs):
         assert kwargs.get("uri") is True and "mode=ro" in database
         return real_connect(database, *args, **kwargs)
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return NOW if tz else NOW.replace(tzinfo=None)
     with mock.patch.object(projection.sqlite3, "connect", side_effect=readonly_connect), \
+            mock.patch.object(projection, "datetime", FixedDatetime), \
             mock.patch.object(projection, "_collect_inputs",
                               side_effect=AssertionError("cached read attempted collection")), \
             mock.patch.object(socket, "create_connection",
                               side_effect=AssertionError("cached read attempted network")), \
             mock.patch.object(urllib.request, "urlopen",
                               side_effect=AssertionError("cached read attempted network")):
+        replayed = projection.read_snapshot(str(db))
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             assert projection.main(["report", "compact", "--db", str(db)]) == 0
@@ -311,5 +317,87 @@ with tempfile.TemporaryDirectory(prefix="synthetic-projection-i11-") as temp:
     assert cold_snapshot["sources"]["queue"]["record_count"] == 0
     assert cold_snapshot["sources"]["queue"]["empty"] is True
     assert cold_snapshot["sources"]["events"]["status"] == "unavailable"
+
+    # Manifest collection stores hash-only provenance. An I/O failure retains
+    # the complete prior generation; a confirmed deletion clears it.
+    manifest_paths = _fixture(root / "manifest-case", tracker=[{
+        "company": "Manifest Co", "role": "Intern", "pr_number": 41,
+        "status": "Applied", "applied_date": "2026-11-16"}])
+    manifest = {"schema_version": 1, "captured_at": "2026-11-16T05:00:00Z",
+                "canonical_application_id": "pr:41", "attempt_id": "attempt-41",
+                "confirmation": {"submitted_at": "2026-11-16", "evidence": CANARY},
+                "artifacts": {"resume_pdf": {"sha256": "a" * 64, "path": CANARY}}}
+    encoded = json.dumps(manifest, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    manifest_id = hashlib.sha256(encoded.encode()).hexdigest()
+    manifest_directory = Path(manifest_paths["snapshot_root"]) / "manifests"
+    manifest_directory.mkdir()
+    manifest_path = manifest_directory / (manifest_id + ".json")
+    manifest_path.write_text(encoded, encoding="utf-8")
+    Path(manifest_paths["queue"]).write_text(_yaml([{
+        "company": "Manifest Co", "role": "Intern", "pr_number": 41,
+        "status": "submitted", "submitted_at": "2026-11-16T05:00:00Z",
+        "snapshot_provenance": "complete", "snapshot_id": manifest_id,
+        "attempt_id": "attempt-41"}]), encoding="utf-8")
+    manifest_db = root / "manifest-db" / "index.sqlite3"
+    _collect(manifest_db, manifest_paths)
+    assert projection.read_snapshot(str(manifest_db))["facts"]["applications"][0]["resume_hash"] == "a" * 64
+    original_json_read = projection._read_json
+    def unreadable_manifest(path):
+        if Path(path) == manifest_path:
+            raise PermissionError("synthetic manifest I/O failure")
+        return original_json_read(path)
+    with mock.patch.object(projection, "_read_json", side_effect=unreadable_manifest):
+        _collect(manifest_db, manifest_paths)
+    retained = projection.read_snapshot(str(manifest_db))
+    assert retained["facts"]["applications"][0]["resume_hash"] == "a" * 64
+    assert retained["sources"]["snapshots"]["status"] == "stale"
+    assert retained["sources"]["snapshots"]["error_code"] == "source_unreadable"
+    assert CANARY not in json.dumps(retained)
+    assert CANARY.encode() not in b"".join(_db_bytes(manifest_db).values())
+    manifest_path.unlink()
+    _collect(manifest_db, manifest_paths)
+    deleted_manifest = projection.read_snapshot(str(manifest_db))
+    assert deleted_manifest["facts"]["applications"][0]["resume_hash"] is None
+    assert deleted_manifest["sources"]["snapshots"]["empty"] is True
+
+    # Arbitrary query values never enter storage. Job IDs remain distinct.
+    assert projection._safe_url("https://jobs.example/job?job_id=41#" + CANARY) == "https://jobs.example/job?job_id=41"
+    assert projection._safe_url("https://jobs.example/job?job_id=41") != projection._safe_url("https://jobs.example/job?job_id=42")
+    url_paths = _fixture(root / "url-case", tracker=[{
+        "company": "URL Co", "role": "Intern", "link": "https://jobs.example/job?ref=" + CANARY}])
+    url_db = root / "url-db" / "index.sqlite3"
+    _collect(url_db, url_paths)
+    sanitized = projection.read_snapshot(str(url_db))
+    assert sanitized["sources"]["tracker"]["error_code"] == "source_invalid"
+    assert CANARY not in json.dumps(sanitized)
+    assert CANARY.encode() not in b"".join(_db_bytes(url_db).values())
+
+    # Publish between the reader's payload and progress queries. The reader
+    # must return both from its original SQLite transaction.
+    interleave_paths = _fixture(root / "interleave", tracker=[{
+        "company": "Atomic Co", "role": "Old Intern", "pr_number": 71}])
+    interleave_db = root / "interleave-db" / "index.sqlite3"
+    _collect(interleave_db, interleave_paths)
+    original_snapshot = projection.read_snapshot(str(interleave_db))
+    writer = projection._connect_writer(str(interleave_db))
+    projection._put_progress(writer, {"status": "in_progress", "started_at": NOW.isoformat(), "sources": {}})
+    writer.close()
+    Path(interleave_paths["tracker"]).write_text(_yaml([{
+        "company": "Atomic Co", "role": "New Intern", "pr_number": 71}]), encoding="utf-8")
+    loads = json.loads
+    fired = [False]
+    def publish_during_read(text, *args, **kwargs):
+        value = loads(text, *args, **kwargs)
+        if (not fired[0] and isinstance(value, dict)
+                and value.get("snapshot_id") == original_snapshot["snapshot_id"]):
+            fired[0] = True
+            _collect(interleave_db, interleave_paths)
+        return value
+    with mock.patch.object(projection.json, "loads", side_effect=publish_during_read):
+        coherent = projection.read_snapshot(str(interleave_db))
+    assert fired[0]
+    assert coherent["snapshot_id"] == original_snapshot["snapshot_id"]
+    assert coherent["collection"]["status"] == "in_progress"
+    assert projection.read_snapshot(str(interleave_db))["snapshot_id"] != coherent["snapshot_id"]
 
 print("test_projection: incremental generations, privacy, cached reads and review facts passed")

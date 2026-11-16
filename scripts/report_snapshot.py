@@ -205,7 +205,8 @@ def _read_resume_hash(snapshot_root, manifest_id, application_id, attempt_id):
 
 
 def normalize_snapshot(tracker_rows, queue_rows, event_doc, ingestion_state,
-                       sources, *, as_of, generated_at, snapshot_root=None):
+                       sources, *, as_of, generated_at, snapshot_root=None,
+                       snapshot_facts=None):
     """Build the versioned allowlisted facts payload from already-read sources."""
     if not _day(as_of):
         raise ValueError("as_of must be an ISO calendar date")
@@ -243,11 +244,17 @@ def normalize_snapshot(tracker_rows, queue_rows, event_doc, ingestion_state,
                     or attempt.get("snapshot_provenance") != "complete"
                     or not attempt.get("snapshot_id")):
                 continue
-            if not snapshot_root or not snapshots_available:
+            if (snapshot_facts is None and not snapshot_root) or not snapshots_available:
                 attempt["snapshot_manifest_status"] = "unavailable"
                 continue
-            candidate = _read_resume_hash(snapshot_root, attempt.get("snapshot_id"),
-                                          canonical_id, attempt.get("attempt_id"))
+            if snapshot_facts is not None:
+                manifest = snapshot_facts.get(attempt.get("snapshot_id"), {})
+                candidate = (manifest.get("resume_hash")
+                             if manifest.get("application_id") == canonical_id
+                             and manifest.get("attempt_id") == attempt.get("attempt_id") else None)
+            else:
+                candidate = _read_resume_hash(snapshot_root, attempt.get("snapshot_id"),
+                                              canonical_id, attempt.get("attempt_id"))
             attempt["snapshot_manifest_status"] = "verified" if candidate else "missing_or_invalid"
             if candidate and not resume_hash:
                 resume_hash = candidate

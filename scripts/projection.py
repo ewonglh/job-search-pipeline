@@ -127,14 +127,30 @@ def _safe_url(value):
         _ = parts.port
     except ValueError:
         raise _InvalidSource()
-    secret_params = {"token", "access_token", "auth", "authorization", "password",
-                     "secret", "email", "session", "sessionid", "sig", "signature",
-                     "api_key", "apikey"}
-    query_keys = {key.lower() for key, _value in parse_qsl(parts.query)}
     if (parts.scheme.lower() not in ("http", "https") or not host
-            or parts.username or parts.password or secret_params.intersection(query_keys)):
+            or parts.username or parts.password):
         raise _InvalidSource()
-    return text
+    import application_identity
+    normalized = application_identity.normalize_posting_url(text)
+    # Preserve job identity without accepting arbitrary query values as safe
+    # display metadata. Unknown queries invalidate the source, never coalesce jobs.
+    safe_keys = {"id", "job_id", "jobid", "gh_jid", "req_id", "requisitionid"}
+    for key, value in parse_qsl(urlsplit(normalized).query, keep_blank_values=True):
+        if key.lower() not in safe_keys or not re.fullmatch(
+                r"(?:[0-9]{1,30}|[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})", value):
+            raise _InvalidSource()
+    return normalized
+
+
+def _safe_application_id(value):
+    value = _safe_text(value, 2048)
+    if value and value.startswith("link:"):
+        return "link:" + _safe_url(value[len("link:"):])
+    if value and re.fullmatch(r"pr:[1-9][0-9]*", value):
+        return value
+    if value and value.startswith("identity:") and "|" in value[len("identity:"):]:
+        return value
+    raise _InvalidSource()
 
 
 def _strict_rows(rows, fields, *, queue_statuses=None, tracker_statuses=None):
@@ -305,17 +321,7 @@ def _read_events(path):
                     if value:
                         value = "event:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
                 elif field == "application_id":
-                    value = _safe_text(value, 2048)
-                    if value and value.startswith("link:"):
-                        value = "link:" + _safe_url(value[len("link:"):])
-                    elif value and value.startswith("pr:"):
-                        if not re.fullmatch(r"pr:[1-9][0-9]*", value):
-                            raise _InvalidSource()
-                    elif value and value.startswith("identity:"):
-                        if "|" not in value[len("identity:"):]:
-                            raise _InvalidSource()
-                    elif value:
-                        raise _InvalidSource()
+                    value = _safe_application_id(value)
                 elif field == "event_type":
                     if value not in recruitment_evidence.EVENT_TYPES:
                         raise _InvalidSource()
@@ -372,8 +378,46 @@ def _read_snapshots(root):
     if not os.path.isdir(root):
         return {"records": None, "observed_at": None, "error_code": "source_missing",
                 "quarantined_count": 0}
-    return {"records": [{"present": True}], "observed_at": None,
-            "error_code": None, "quarantined_count": 0}
+    try:
+        directory = os.path.join(root, "manifests")
+        try:
+            names = sorted(os.listdir(directory))
+        except FileNotFoundError:
+            names = []
+        if len(names) > MAX_SOURCE_RECORDS:
+            raise _InvalidSource()
+        records, observed = [], None
+        for name in names:
+            if not name.endswith(".json") or not HASH64_RE.fullmatch(name[:-5]):
+                raise _InvalidSource()
+            document = _read_json(os.path.join(directory, name))
+            if (not isinstance(document, dict) or document.get("schema_version") != 1
+                    or hashlib.sha256(json.dumps(document, sort_keys=True, ensure_ascii=False,
+                        separators=(",", ":")).encode("utf-8")).hexdigest() != name[:-5]):
+                raise _InvalidSource()
+            confirmation = document.get("confirmation")
+            if not confirmation:
+                continue
+            if not isinstance(confirmation, dict):
+                raise _InvalidSource()
+            submitted = _timestamp(confirmation.get("submitted_at")) or _day(confirmation.get("submitted_at"))
+            artifacts = document.get("artifacts", {})
+            resume = artifacts.get("resume_pdf", {}) if isinstance(artifacts, dict) else {}
+            resume_hash = resume.get("sha256") if isinstance(resume, dict) else None
+            attempt_id = document.get("attempt_id")
+            if (not submitted or not isinstance(resume_hash, str) or not HASH64_RE.fullmatch(resume_hash)
+                    or not isinstance(attempt_id, str) or not re.fullmatch(r"[A-Za-z0-9._:-]{1,120}", attempt_id)):
+                raise _InvalidSource()
+            records.append({"snapshot_id": name[:-5], "application_id": _safe_application_id(
+                document.get("canonical_application_id")), "attempt_id": attempt_id,
+                "resume_hash": resume_hash})
+            stamp = _timestamp(document.get("captured_at"))
+            if stamp:
+                observed = max(observed, stamp) if observed else stamp
+        return {"records": records, "observed_at": observed,
+                "error_code": None, "quarantined_count": 0}
+    except (OSError, UnicodeError, ValueError, TypeError, _InvalidSource) as exc:
+        return _source_error(root, exc)
 
 
 def _read_reviews(path):
@@ -901,14 +945,13 @@ def _make_snapshot(connection, *, as_of, generated_at, snapshot_root):
     scopes = {"scope-{}".format(index): item.get("value", {})
               for index, item in enumerate(ingestion_rows)}
     ingestion = {"schema": 1, "scopes": scopes}
-    snapshot_state = connection.execute("SELECT active_generation FROM source_state WHERE source='snapshots'").fetchone()
-    root_for_facts = (snapshot_root if snapshot_state and snapshot_state[0]
-                      and os.path.isdir(snapshot_root) else None)
+    manifest_facts = {item["snapshot_id"]: item
+                      for item in _read_active_records(connection, "snapshots")}
     sources = _health_sources(connection)
     snapshot = report_snapshot.normalize_snapshot(
         tracker, queue, event_doc, ingestion, sources, as_of=as_of,
         generated_at=datetime.fromisoformat(generated_at.replace("Z", "+00:00")),
-        snapshot_root=root_for_facts)
+        snapshot_facts=manifest_facts)
     quarantined_ids = {item.get("value", {}).get("event_id") for item in event_records
                        if item.get("kind") == "event" and item.get("quarantined")}
     for event in snapshot["facts"].get("events", []):
@@ -1048,6 +1091,7 @@ def read_snapshot(db_path=None):
     """Return the last fully published sanitized snapshot using read-only SQLite."""
     connection = _connect_reader(db_path or _db_default())
     try:
+        connection.execute("BEGIN")
         active = connection.execute("SELECT value FROM meta WHERE key='active_snapshot'").fetchone()
         if not active:
             raise ProjectionError("cached projection has no published snapshot; run projection.py collect")
