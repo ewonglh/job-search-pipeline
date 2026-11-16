@@ -1,34 +1,27 @@
 #!/usr/bin/env python3
-"""Local job-search dashboard: kanban board + source->status sankey (stdlib only).
+"""Private, cached-only job-search dashboard plus an explicit legacy collector.
 
-Renders a **single self-contained** HTML file (inline CSS + inline SVG, a few
-lines of vanilla JS, no CDN, no external assets -- the Pi renders it offline).
+The ordinary CLI and HTTP reader consume the shared, sanitized projection.
+Rendering is deterministic for a fixed snapshot and as-of date. The optional
+``--legacy-collect`` path retains the old source collector for migration use.
 
-Data sources (all read-only):
-  * ``repo/data/postings.json`` -- discovered postings (company/role/source/...)
-  * ``repo/applications.yaml``  -- the application tracker
-  * ``queue.py list --json``    -- drain-queue state (subprocess, best effort)
-
-Status/PR logic is **not duplicated**: it is imported from ``summary.py``
-(``parse_yaml_list``, ``canonical_status``, ``tracker_keys``, ``is_tracked``,
-``effective_tailor_prs``, ``fetch_open_tailor_prs``, ...). When the gh check or
-the queue subprocess is unavailable the board degrades gracefully: the board is
-still rendered, without queue and/or PR data, and the reason is logged to
-stderr.
-
-PII policy: this module never reads ``profile.local.yaml`` and renders only
-company / role / status / date / PR link. No NRIC, address, phone, email.
+The output is one self-contained HTML document with inline CSS and SVG. No
+browser-side source reads, network calls, framework, or state-changing control.
 
 Usage:
-  dashboard.py [--repo DIR] [--out PATH] [--json] [--queue-cmd CMD]
+  dashboard.py [--db PATH] [--out PATH] [--json]
+  dashboard.py --legacy-collect [--repo DIR] [--out PATH] [--json]
 """
 import argparse
+import copy
 import datetime as dt
 import html
 import json
 import os
 import subprocess
 import sys
+from collections import Counter, defaultdict
+from urllib.parse import urlsplit
 
 import summary as s
 from config import default_repo_dir, default_runtime_path, path_setting
@@ -80,8 +73,8 @@ def load_queue(cmd=None, log=lambda *a: None):
 
 # ---------------------------------------------------------------- date / age
 def card_age(card, today):
-    """Days in the card's current status, with the date it is measured from."""
-    for key in ("applied_date", "enqueued_at", "added"):
+    """Return elapsed days and their actual date basis; never imply a stage age."""
+    for key in ("stage_since", "applied_date", "enqueued_at", "added"):
         d = s.parse_date(card.get(key))
         if d is not None:
             return max(0, (today - d).days), key
@@ -117,7 +110,8 @@ def card_pr_url(card):
 
 
 # ---------------------------------------------------------------- board build
-def _card(status, company, role, date_key=None, date_val=None, pr=None, today=None):
+def _card(status, company, role, date_key=None, date_val=None, pr=None, today=None,
+          stage_since=None):
     card = {
         "company": s.norm_text(company) or "?",
         "role": s.norm_text(role) or "?",
@@ -125,6 +119,7 @@ def _card(status, company, role, date_key=None, date_val=None, pr=None, today=No
         "applied_date": date_val if date_key == "applied_date" else None,
         "enqueued_at": date_val if date_key == "enqueued_at" else None,
         "added": date_val if date_key == "added" else None,
+        "stage_since": stage_since,
         "pr": pr,
     }
     days, src = card_age(card, today) if today is not None else (None, None)
@@ -282,7 +277,7 @@ def build_board(apps, postings, prs, queue, today, links=None):
         q = best_queue(a)
         card = _card(bucket, a.get("company"), a.get("role"),
                      "applied_date", a.get("applied_date"),
-                     card_pr_url(a), today)
+                     card_pr_url(a), today, stage_since=a.get("stage_since"))
         if bucket == "Tailored":
             if q and q.get("enqueued_at") and not card["applied_date"]:
                 card["enqueued_at"] = q["enqueued_at"]
@@ -369,7 +364,7 @@ def build_sankey(postings, board, min_count=SOURCE_MIN, status_of=None):
             continue
         src = s.norm_text(p.get("source")) or "Unknown"
         key = s.normalize_url(p.get("link", "")).lower()
-        status = status_of.get(key, "Applied")
+        status = status_of.get(key, "Unknown/unmatched")
         sources[src] = sources.get(src, 0) + 1
         flows[(src, status)] = flows.get((src, status), 0) + 1
     # Collapse sources with < min_count postings into a single "Other" band,
@@ -386,8 +381,8 @@ def build_sankey(postings, board, min_count=SOURCE_MIN, status_of=None):
         kept[(OTHER, status)] = kept.get((OTHER, status), 0) + n
     flows = kept
     left = major + ([OTHER] if collapsed else [])
-    left = [n for n in left if any((n, c) in flows for c in COLUMNS)]
-    right = [c for c in COLUMNS if any((n, c) in flows for n in left)]
+    left = [n for n in left if any((n, c) in flows for c in COLUMNS + ["Unknown/unmatched"])]
+    right = [c for c in COLUMNS + ["Unknown/unmatched"] if any((n, c) in flows for n in left)]
     return {"left": left, "right": right,
             "flows": [{"from": a, "to": b, "count": n}
                       for (a, b), n in sorted(flows.items()) if n]}
@@ -515,7 +510,7 @@ def render_html(data, generated=None):
            "<meta name='viewport' content='width=device-width,initial-scale=1'>",
            "<title>Job search dashboard</title>", f"<style>{CSS}</style></head><body>",
            "<header><h1>Job search dashboard</h1>",
-           f"<div class='meta'>Generated {html.escape(gen)} \u00b7 {cards_total} "
+            f"<div class='meta'>Generated {html.escape(gen)} \u00b7 {cards_total} "
            f"cards \u00b7 {sum(f['count'] for f in sankey['flows'])} postings sourced</div>",
            "</header>", "<section class='board'>"]
     for col in COLUMNS:
@@ -528,20 +523,22 @@ def render_html(data, generated=None):
             out.append("<li class='card'>")
             out.append(f"<div class='co'>{html.escape(c['company'])}</div>")
             out.append(f"<div class='ro'>{html.escape(c['role'])}</div>")
-            day = f"{c['days']}d in {c['status'].lower()}" if c["days"] is not None else "no date"
-            pr = (f"<a href='{html.escape(c['pr'], quote=True)}'>PR</a>"
-                  if c.get("pr") else "")
+            day = _age_label(c)
+            href = _safe_http_url(c.get("pr"))
+            pr = (f"<a href='{html.escape(href, quote=True)}' rel='noreferrer'>PR</a>"
+                  if href else "")
             out.append(f"<div class='foot'><span>{html.escape(day)}</span>{pr}</div>")
             out.append("</li>")
         out.append("</ul></div>")
     out.append("</section>")
-    out.append("<h2>Sankey \u2014 posting source \u2192 status</h2>")
+    out.append("<h2>Sankey \u2014 posting source \u2192 current status</h2>")
     svg, _h = render_sankey_svg(sankey)
     out.append(svg)
-    out.append("<footer>Local dashboard \u2014 company / role / status / date / PR "
-               "only. No personal data (no NRIC, address, phone, email).</footer>")
-    out.append("<script>document.documentElement.dataset.board=JSON.stringify("
-               f"{json.dumps(data)}).length?1:1;</script></body></html>")
+    out.append("<footer>Private local dashboard \u00b7 read-only sanitized projection</footer>")
+    out.append("<script type='application/json' id='dashboard-state'>"
+               + _safe_json_for_script({"date": data.get("date"),
+                                        "counts": data.get("counts", {})})
+               + "</script></body></html>")
     return "".join(out)
 
 
@@ -571,41 +568,812 @@ def build_data(repo_dir=REPO_DIR, queue_cmd=None, log=lambda *a: None,
     }
 
 
+APPLICATION_STATUS_ORDER = (
+    "Found", "Tailored", "Applied", "Callback", "OA", "Interview",
+    "Accepted", "Rejected", "Unknown / unmatched",
+)
+SOURCE_COLORS = ("#2563eb", "#c2410c", "#0f766e", "#7c3aed", "#b42318",
+                 "#0e7490", "#475569", "#a16207")
+
+DASHBOARD_CSS = r"""
+:root {
+  color-scheme: light dark;
+  --bg: #f8fafc; --surface: #fff; --surface-muted: #e9eff8;
+  --text: #1e293b; --muted: #475569; --border: #cbd5e1;
+  --primary: #2563eb; --success: #166534; --warning: #9a3412;
+  --danger: #b42318; --focus: #1d4ed8;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0b1220; --surface: #111c2e; --surface-muted: #18263a;
+    --text: #e2e8f0; --muted: #cbd5e1; --border: #42536b;
+    --primary: #93c5fd; --success: #86efac; --warning: #fdba74;
+    --danger: #fca5a5; --focus: #93c5fd;
+  }
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: auto; }
+body {
+  margin: 0; background: var(--bg); color: var(--text);
+  font: 16px/1.55 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+a { color: var(--primary); text-decoration-thickness: .08em; text-underline-offset: .16em; }
+a:hover { text-decoration-thickness: .14em; }
+a:focus-visible, summary:focus-visible {
+  outline: 3px solid var(--focus); outline-offset: 3px; border-radius: 4px;
+}
+.skip { position: absolute; left: -9999px; top: 8px; z-index: 1; padding: 10px 14px; background: var(--surface); }
+.skip:focus { left: 8px; }
+.shell { width: min(100%, 1440px); margin-inline: auto; padding: 20px 16px 48px; }
+.masthead { border-bottom: 1px solid var(--border); padding: 8px 0 18px; }
+h1 { margin: 0; font-size: clamp(1.7rem, 4vw, 2.35rem); line-height: 1.2; letter-spacing: -.025em; }
+h2 { margin: 0 0 12px; font-size: 1.45rem; line-height: 1.3; }
+h3 { margin: 0 0 8px; font-size: 1.08rem; line-height: 1.35; }
+p { margin: 8px 0; }
+.mast-meta { display: grid; gap: 4px; margin-top: 12px; color: var(--muted); overflow-wrap: anywhere; }
+.snapshot-id { font: 0.88rem/1.45 ui-monospace, SFMono-Regular, Consolas, monospace; }
+.nav { display: flex; flex-wrap: wrap; gap: 8px; padding: 14px 0; border-bottom: 1px solid var(--border); }
+.nav a { display: inline-flex; align-items: center; min-height: 44px; padding: 8px 13px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); font-weight: 600; text-decoration: none; }
+.nav a:hover { background: var(--surface-muted); }
+.view { padding: 26px 0 10px; scroll-margin-top: 12px; }
+.intro { max-width: 72ch; color: var(--muted); margin: 0 0 16px; }
+.metrics { display: grid; grid-template-columns: 1fr; gap: 12px; }
+.metric, .panel, .source-card, .application-card, .run-card, .cohort {
+  border: 1px solid var(--border); border-radius: 12px; background: var(--surface);
+}
+.metric { padding: 16px; min-height: 110px; }
+.metric-label { display: block; font-size: .9rem; color: var(--muted); font-weight: 600; }
+.metric-value { display: block; margin-top: 4px; font-size: 1.45rem; line-height: 1.35; font-variant-numeric: tabular-nums; font-weight: 700; overflow-wrap: anywhere; }
+.panel { margin-top: 16px; padding: 16px; }
+.source-list { display: grid; gap: 10px; }
+.source-card { padding: 12px; min-width: 0; }
+.source-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px; }
+.source-name { font-weight: 700; }
+.state { display: inline-flex; align-items: center; gap: 7px; font-size: .92rem; font-weight: 700; }
+.state::before { content: ""; width: 9px; height: 9px; border-radius: 50%; background: currentColor; }
+.fresh { color: var(--success); }
+.stale { color: var(--warning); }
+.unavailable, .unknown { color: var(--danger); }
+.source-meta, .meta { color: var(--muted); font-size: .92rem; overflow-wrap: anywhere; }
+.compact { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: .9rem/1.55 ui-monospace, SFMono-Regular, Consolas, monospace; }
+.board { display: grid; grid-template-columns: 1fr; gap: 12px; }
+.board-column { min-width: 0; padding: 13px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface-muted); }
+.board-column h3 { display: flex; justify-content: space-between; gap: 8px; }
+.count { color: var(--muted); font-variant-numeric: tabular-nums; }
+.application-list, .run-list { display: grid; gap: 10px; }
+.application-card, .run-card { padding: 14px; min-width: 0; }
+.card-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; flex-wrap: wrap; }
+.card-title { font-weight: 700; font-size: 1.02rem; overflow-wrap: anywhere; }
+.role { color: var(--muted); overflow-wrap: anywhere; }
+.badge { display: inline-block; padding: 3px 9px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface-muted); font-size: .88rem; font-weight: 650; }
+.details { margin-top: 8px; color: var(--muted); overflow-wrap: anywhere; }
+.link-list { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 4px; }
+.link-list a { display: inline-flex; align-items: center; min-height: 44px; padding: 6px 8px; border-radius: 6px; }
+.timeline { margin: 12px 0 0; padding-left: 21px; }
+.timeline li { margin: 4px 0; }
+.empty { padding: 12px; color: var(--muted); border: 1px dashed var(--border); border-radius: 10px; }
+.chart { margin-top: 16px; }
+.chart svg { display: block; width: 100%; height: auto; color: var(--text); }
+.chart text { fill: currentColor; font: 15px system-ui, sans-serif; }
+.chart .flow { fill: none; stroke-linecap: round; opacity: .42; }
+.chart .node { fill: var(--surface); stroke: var(--border); stroke-width: 1.5; }
+.data-table-wrap { width: 100%; overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+th, td { padding: 9px 10px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; }
+th { font-size: .92rem; }
+td { overflow-wrap: anywhere; }
+caption { padding: 0 0 8px; text-align: left; font-weight: 700; }
+.cohorts, .quality-grid { display: grid; grid-template-columns: 1fr; gap: 12px; }
+.cohort { padding: 16px; min-width: 0; }
+.cohort h3 { font-size: 1.15rem; }
+.key-value { display: grid; grid-template-columns: minmax(130px, 1fr) auto; gap: 5px 12px; margin: 10px 0; }
+.key-value dt { color: var(--muted); overflow-wrap: anywhere; }
+.key-value dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
+.reason-list { display: flex; flex-wrap: wrap; gap: 8px; padding: 0; list-style: none; }
+.reason-list li { padding: 5px 9px; border: 1px solid var(--border); border-radius: 8px; overflow-wrap: anywhere; }
+details { margin-top: 10px; }
+summary { min-height: 44px; display: flex; align-items: center; cursor: pointer; font-weight: 650; }
+.caveat { color: var(--muted); font-size: .94rem; }
+footer { margin-top: 32px; padding-top: 14px; border-top: 1px solid var(--border); color: var(--muted); font-size: .92rem; }
+@media (min-width: 48rem) {
+  .shell { padding: 28px 24px 56px; }
+  .metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .source-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .board { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .cohorts, .quality-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (min-width: 64rem) {
+  .shell { padding-inline: 32px; }
+  .board { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+@media (min-width: 88rem) {
+  .board { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; }
+}
+"""
+
+
+def _safe_http_url(value):
+    """Return an absolute HTTP(S) URL, excluding credentials and controls."""
+    if not isinstance(value, str) or any(ord(ch) < 32 or ord(ch) == 127 for ch in value):
+        return None
+    try:
+        parsed = urlsplit(value)
+        if (parsed.scheme.lower() not in ("http", "https") or not parsed.hostname
+                or parsed.username is not None or parsed.password is not None):
+            return None
+        return value
+    except ValueError:
+        return None
+
+
+def _safe_json_for_script(value):
+    """JSON text safe inside an HTML script data block, including hostile ``</script>``."""
+    encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":"),
+                         allow_nan=False)
+    return (encoded.replace("&", "\\u0026").replace("<", "\\u003c")
+            .replace(">", "\\u003e").replace("\u2028", "\\u2028")
+            .replace("\u2029", "\\u2029"))
+
+
+def _safe_json_response(value):
+    """Serialize an API payload without emitting raw HTML-significant bytes."""
+    encoded = json.dumps(value, ensure_ascii=False, sort_keys=True,
+                         separators=(",", ":"), allow_nan=False)
+    return (encoded.replace("&", "\\u0026").replace("<", "\\u003c")
+            .replace(">", "\\u003e").replace("\u2028", "\\u2028")
+            .replace("\u2029", "\\u2029"))
+
+
+def _age_label(card):
+    days = card.get("days")
+    basis = card.get("age_from")
+    if days is None or basis is None:
+        return "No date recorded"
+    if basis == "stage_since":
+        status = card.get("status")
+        if status and status != "Unknown / unmatched":
+            return "{} days in {} · stage since {}".format(
+                days, str(status).lower(), card.get("stage_since"))
+        return "{} days since recorded stage date ({})".format(
+            days, card.get("stage_since"))
+    labels = {"applied_date": "applied date", "enqueued_at": "queue date",
+              "added": "posting added date"}
+    return "{} days since {}".format(days, labels.get(basis, basis.replace("_", " ")))
+
+
+def _as_dict(value):
+    return value if isinstance(value, dict) else {}
+
+
+def _display(value, fallback="Unknown", limit=240):
+    if not isinstance(value, (str, int, float)) or isinstance(value, bool):
+        return fallback
+    result = " ".join(str(value).split())
+    if not result:
+        return fallback
+    if len(result) > limit:
+        return result[:limit - 1] + "…"
+    return result
+
+
+def _status_for_row(row):
+    return s.row_stage(_as_dict(row)) or "Unknown / unmatched"
+
+
+def _application_rows(snapshot):
+    """Build a display-only board; missing joins never become Applied."""
+    facts = _as_dict(snapshot.get("facts"))
+    aliases = _as_dict(facts.get("application_aliases"))
+    conflicts = set(facts.get("conflicted_application_aliases", []))
+    events_by_id = defaultdict(list)
+    for event in facts.get("events", []):
+        if not isinstance(event, dict):
+            continue
+        event_id = event.get("application_id")
+        if not isinstance(event_id, str) or event_id in conflicts:
+            continue
+        canonical = aliases.get(event_id, event_id)
+        stamp = event.get("occurred_at")
+        if isinstance(stamp, str) and stamp:
+            events_by_id[canonical].append(event)
+
+    raw_apps = [row for row in facts.get("applications", []) if isinstance(row, dict)]
+    known_ids = {row.get("application_id") for row in raw_apps
+                 if isinstance(row.get("application_id"), str)}
+    attempts_by_id = defaultdict(list)
+    unmatched_attempts = []
+    for attempt in facts.get("attempts", []):
+        if not isinstance(attempt, dict):
+            continue
+        app_id = attempt.get("application_id")
+        if isinstance(app_id, str) and app_id in known_ids:
+            attempts_by_id[app_id].append(attempt)
+        else:
+            unmatched_attempts.append(attempt)
+
+    as_of = snapshot.get("as_of")
+    try:
+        today = dt.date.fromisoformat(as_of)
+    except (TypeError, ValueError):
+        today = None
+
+    result = []
+    for app in raw_apps:
+        row = _as_dict(app.get("row"))
+        status = _status_for_row(row)
+        days, age_from = card_age(row, today) if today else (None, None)
+        timeline = []
+        claims = app.get("submission_date_claims", [])
+        if isinstance(claims, list) and claims:
+            for claim in claims:
+                if not isinstance(claim, dict):
+                    continue
+                source = _display(claim.get("source"), "unknown source", 80)
+                value = claim.get("value")
+                if claim.get("invalid"):
+                    timeline.append("Submission date invalid in {} record".format(source))
+                elif claim.get("missing") or not value:
+                    timeline.append("Submission date unknown in {} record".format(source))
+                else:
+                    timeline.append("Submission date {} · {} record".format(
+                        _display(value, "unknown date", 40), source))
+        else:
+            timeline.append("Submission date not recorded")
+        stage_since = row.get("stage_since")
+        timeline.append("Current status {}{}".format(
+            status, " since " + _display(stage_since, "", 40) if stage_since else
+            " · stage date unknown"))
+        app_id = app.get("application_id")
+        if isinstance(app_id, str):
+            for event in events_by_id.get(app_id, []):
+                event_type = _display(event.get("event_type"), "unknown event", 80)
+                verified = "verified" if event.get("verification") == "verified" else "unverified"
+                timeline.append("{} event · {} · {}".format(
+                    _display(event.get("occurred_at"), "unknown date", 48), verified, event_type))
+        for attempt in attempts_by_id.get(app_id, []):
+            attempt_status = _display(attempt.get("status"), "unknown", 48)
+            code = attempt.get("blocker_code")
+            timeline.append("Queue attempt: {}{}".format(
+                attempt_status, " · blocker " + _display(code, "", 80) if code else ""))
+        link = _safe_http_url(row.get("link"))
+        pr = _safe_http_url(row.get("pr"))
+        if not pr and row.get("pr_number") is not None:
+            number = str(row.get("pr_number"))
+            if number.isdigit():
+                pr = "https://github.com/{}/pull/{}".format(s.GH_REPO_DEFAULT, number)
+        result.append({
+            "company": _display(row.get("company"), "Company unknown"),
+            "role": _display(row.get("role"), "Role unknown"),
+            "source": _display(row.get("source"), "Unknown source", 120),
+            "status": status,
+            "stage_since": _display(stage_since, "", 40) if stage_since else None,
+            "days": days,
+            "age_from": age_from,
+            "age_label": _age_label({"days": days, "age_from": age_from,
+                                     "stage_since": stage_since, "status": status}),
+            "link": link,
+            "pr": pr,
+            "timeline": timeline,
+        })
+
+    for attempt in unmatched_attempts:
+        attempt_status = _display(attempt.get("status"), "unknown", 48)
+        code = attempt.get("blocker_code")
+        result.append({
+            "company": _display(attempt.get("company"), "Company unknown"),
+            "role": _display(attempt.get("role"), "Role unknown"),
+            "source": _display(attempt.get("source"), "Unknown source", 120),
+            "status": "Unknown / unmatched",
+            "stage_since": None,
+            "days": None,
+            "age_from": None,
+            "age_label": "No matched application or stage date",
+            "link": _safe_http_url(attempt.get("link")),
+            "pr": _safe_http_url(attempt.get("pr")),
+            "timeline": ["Unmatched queue attempt · {}{}".format(
+                attempt_status, " · blocker " + _display(code, "", 80) if code else "")],
+        })
+
+    return sorted(result, key=lambda item: (
+        APPLICATION_STATUS_ORDER.index(item["status"])
+        if item["status"] in APPLICATION_STATUS_ORDER else len(APPLICATION_STATUS_ORDER),
+        item["company"].casefold(), item["role"].casefold()))
+
+
+def build_snapshot_sankey(snapshot):
+    """Count unique canonical applications by posting source and current status."""
+    facts = _as_dict(snapshot.get("facts"))
+    applications = [row for row in facts.get("applications", []) if isinstance(row, dict)]
+    flow_counts = Counter()
+    for app in applications:
+        row = _as_dict(app.get("row"))
+        source = _display(row.get("source"), "Unknown source", 120)
+        flow_counts[(source, _status_for_row(row))] += 1
+    left = sorted({source for source, _status in flow_counts})
+    right = [status for status in APPLICATION_STATUS_ORDER
+             if any(target == status for _source, target in flow_counts)]
+    return {"left": left, "right": right,
+            "flows": [{"from": source, "to": status, "count": count}
+                      for (source, status), count in sorted(flow_counts.items())],
+            "total": len(applications)}
+
+
+def build_snapshot_data(snapshot, timezone_name=None):
+    """Return the deterministic dashboard view model from one shared snapshot."""
+    import funnel_report
+    import pipeline_health
+    import projection
+
+    zone = timezone_name or os.environ.get("JOBSEARCH_TIMEZONE", "Asia/Singapore")
+    today = pipeline_health.build_report(
+        snapshot, timezone_name=zone, weekday_goal=1, weekend_goal=0,
+        ready_buffer=1, as_of=snapshot.get("as_of"))
+    funnel = funnel_report.build_report(
+        snapshot, as_of=snapshot.get("as_of"), timezone_name=zone)
+    traces = projection.build_trace_report(snapshot)
+    facts = _as_dict(snapshot.get("facts"))
+    quality_source = _as_dict(facts.get("review_quality"))
+    quality = {key: value for key, value in quality_source.items() if key != "records"}
+    provenance_counts = Counter(
+        _display(row.get("provenance_status"), "unknown", 80)
+        for row in quality_source.get("records", []) if isinstance(row, dict))
+    quality["provenance_status_counts"] = dict(sorted(provenance_counts.items()))
+    funnel = copy.deepcopy(funnel)
+    for cohort in funnel.get("mature_cohorts", []):
+        if isinstance(cohort, dict):
+            # The report groups by resume hash for analysis; the dashboard only
+            # needs aggregate mature outcomes and coverage, not artifact IDs.
+            cohort.pop("grouped_observed_rates", None)
+    return {
+        "schema_version": 1,
+        "snapshot_id": snapshot.get("snapshot_id"),
+        "as_of": snapshot.get("as_of"),
+        "generated_at": snapshot.get("generated_at"),
+        "compact": projection.format_compact(snapshot),
+        "today": today,
+        "applications": _application_rows(snapshot),
+        "sankey": build_snapshot_sankey(snapshot),
+        "runs": traces,
+        "quality": quality,
+        "funnel": funnel,
+        "sources": _as_dict(snapshot.get("sources")),
+    }
+
+
+def _e(value):
+    return html.escape(str(value), quote=True)
+
+
+def _count(value):
+    return "Unavailable" if value is None else _display(value, "Unavailable", 40)
+
+
+def _age_seconds(value):
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return "age unknown"
+    seconds = max(0, int(value))
+    if seconds < 3600:
+        return "{}m ago".format(seconds // 60)
+    if seconds < 86400:
+        return "{}h ago".format(seconds // 3600)
+    return "{}d ago".format(seconds // 86400)
+
+
+def _state(value):
+    state = value if value in ("fresh", "stale", "unavailable") else "unknown"
+    return state, state.capitalize()
+
+
+def _render_sources(sources):
+    out = ["<div class='source-list' aria-label='Source freshness'>"]
+    if not sources:
+        out.append("<p class='empty'>No source health records in this snapshot.</p>")
+    for name, value in sorted(sources.items()):
+        value = _as_dict(value)
+        state, state_label = _state(value.get("status"))
+        age = _age_seconds(value.get("age_seconds"))
+        error = value.get("error_code")
+        out.append("<article class='source-card'><div class='source-head'>"
+                   "<span class='source-name'>{}</span><span class='state {}'>{}</span>"
+                   "</div><div class='source-meta'>Observed: {} · {}</div>".format(
+                       _e(_display(name, "unknown", 80)), state, state_label,
+                       _e(_display(value.get("observed_at"), "unknown", 48)), _e(age)))
+        if error:
+            out.append("<div class='source-meta'>Source error: <code>{}</code></div>".format(
+                _e(_display(error, "unknown", 80))))
+        if value.get("last_success_at"):
+            out.append("<div class='source-meta'>Last successful collection: {}</div>".format(
+                _e(_display(value.get("last_success_at"), "unknown", 48))))
+        out.append("</article>")
+    out.append("</div>")
+    return "".join(out)
+
+
+def _fmt_rate(rate):
+    if not isinstance(rate, (int, float)) or isinstance(rate, bool):
+        return "Unavailable"
+    return "{:.1f}%".format(rate * 100)
+
+
+def _render_sankey_svg(sankey):
+    left = sankey.get("left", [])
+    right = sankey.get("right", [])
+    flows = sankey.get("flows", [])
+    if not flows:
+        return "<p class='empty'>No canonical applications are available for this source-to-current-status view.</p>"
+    width = 940
+    row_gap = 42
+    height = max(130, 34 + max(len(left), len(right)) * row_gap)
+    left_y = {label: 26 + index * row_gap for index, label in enumerate(left)}
+    right_y = {label: 26 + index * row_gap for index, label in enumerate(right)}
+    out = ["<svg role='img' aria-labelledby='flow-title flow-desc' viewBox='0 0 {} {}' "
+           "xmlns='http://www.w3.org/2000/svg'><title id='flow-title'>Posting source to current application status</title>"
+           "<desc id='flow-desc'>Counts of canonical applications grouped by recorded source and their current status. This is not transition history.</desc>".format(width, height)]
+    for index, flow in enumerate(flows):
+        source, status, count = flow["from"], flow["to"], flow["count"]
+        y1, y2 = left_y[source], right_y[status]
+        color = SOURCE_COLORS[index % len(SOURCE_COLORS)]
+        stroke = min(18, max(2, 2 + count * 3))
+        out.append("<path class='flow' d='M 245 {} C 390 {}, 550 {}, 700 {}' "
+                   "stroke='{}' stroke-width='{}'><title>{} to {}: {}</title></path>".format(
+                       y1, y1, y2, y2, color, stroke, _e(source), _e(status), count))
+    for label, y in left_y.items():
+        out.append("<rect class='node' x='12' y='{}' width='232' height='28' rx='6'/><text x='22' y='{}'>{}</text>".format(
+            y - 14, y + 5, _e(label)))
+    for label, y in right_y.items():
+        out.append("<rect class='node' x='700' y='{}' width='228' height='28' rx='6'/><text x='710' y='{}'>{}</text>".format(
+            y - 14, y + 5, _e(label)))
+    out.append("</svg>")
+    return "".join(out)
+
+
+def _render_applications(applications, sankey, sources):
+    sources = _as_dict(sources)
+    app_source_status = {
+        name: _as_dict(sources.get(name)).get("status", "unavailable")
+        for name in ("tracker", "queue")
+    }
+    grouped = {status: [] for status in APPLICATION_STATUS_ORDER}
+    for app in applications:
+        grouped.setdefault(app.get("status", "Unknown / unmatched"), []).append(app)
+    out = []
+    if all(status == "unavailable" for status in app_source_status.values()):
+        out.append("<div class='empty' role='status'><strong>Application data unavailable.</strong> Tracker and queue are unavailable; empty status columns do not mean zero applications.</div>")
+    elif any(status != "fresh" for status in app_source_status.values()):
+        states = ", ".join("{}: {}".format(name, status)
+                            for name, status in sorted(app_source_status.items()))
+        out.append("<div class='empty' role='status'><strong>Application source coverage is incomplete.</strong> {}. Rows below are last-good cached facts when available; read each source error on Today.</div>".format(
+            _e(states)))
+    out.append("<div class='board'>")
+    for status in APPLICATION_STATUS_ORDER:
+        cards = grouped.get(status, [])
+        out.append("<section class='board-column' aria-label='{} applications'>"
+                   "<h3><span>{}</span><span class='count'>{}</span></h3>".format(
+                       _e(status), _e(status), len(cards)))
+        if not cards:
+            out.append("<p class='empty'>No canonical application rows in this status.</p>")
+        else:
+            out.append("<div class='application-list'>")
+            for app in cards:
+                company = _e(app.get("company", "Company unknown"))
+                role = _e(app.get("role", "Role unknown"))
+                links = []
+                if app.get("link"):
+                    links.append("<a href='{}' rel='noreferrer'>Posting</a>".format(
+                        _e(app["link"])))
+                if app.get("pr"):
+                    links.append("<a href='{}' rel='noreferrer'>PR</a>".format(_e(app["pr"])))
+                out.append("<article class='application-card'><div class='card-top'>"
+                           "<div><div class='card-title'>{}</div><div class='role'>{}</div></div>"
+                           "<span class='badge'>{}</span></div>".format(
+                               company, role, _e(app.get("status"))))
+                out.append("<div class='details'>Source: {} · {}</div>".format(
+                    _e(app.get("source", "Unknown source")), _e(app.get("age_label", "No date recorded"))))
+                if links:
+                    out.append("<div class='link-list'>{}</div>".format("".join(links)))
+                out.append("<details><summary>Timeline and dated evidence</summary><ul class='timeline'>")
+                for item in app.get("timeline", []):
+                    out.append("<li>{}</li>".format(_e(item)))
+                out.append("</ul></details></article>")
+            out.append("</div>")
+        out.append("</section>")
+    out.append("</div>")
+    out.extend(["<section class='panel chart'><h3>Posting source → current status</h3>",
+                "<p class='caveat'>Each canonical application is counted once. This diagram shows current status by recorded posting source; it is not a history of stage transitions.</p>",
+                _render_sankey_svg(sankey)])
+    if sankey.get("flows"):
+        out.append("<div class='data-table-wrap'><table><caption>Source-to-current-status counts</caption><thead><tr><th scope='col'>Posting source</th><th scope='col'>Current status</th><th scope='col'>Applications</th></tr></thead><tbody>")
+        for flow in sankey["flows"]:
+            out.append("<tr><td>{}</td><td>{}</td><td>{}</td></tr>".format(
+                _e(flow["from"]), _e(flow["to"]), flow["count"]))
+        out.append("</tbody></table></div>")
+    out.append("</section>")
+    return "".join(out)
+
+
+def _render_today(report, sources, compact):
+    goal = _as_dict(report.get("submission_goal"))
+    buffer = _as_dict(report.get("ready_buffer"))
+    attempts = _as_dict(report.get("attempts"))
+    sync = _as_dict(report.get("tracker_sync"))
+    gaps = _as_dict(report.get("snapshot_gaps"))
+    blockers = _as_dict(report.get("blockers"))
+    out = ["<div class='metrics'>",
+           "<article class='metric'><span class='metric-label'>Daily submission goal · {}</span>"
+           "<span class='metric-value'>{} / {}</span><span class='meta'>Coverage: {}</span></article>".format(
+               _e(report.get("timezone", "unknown")), _e(_count(goal.get("confirmed"))),
+               _e(_count(goal.get("target"))), _e(_as_dict(goal.get("submissions")).get("coverage", "unknown"))),
+           "<article class='metric'><span class='metric-label'>Ready buffer</span>"
+           "<span class='metric-value'>{} / {}</span><span class='meta'>Gap: {}</span></article>".format(
+               _e(_count(buffer.get("queued"))), _e(_count(buffer.get("target"))),
+               _e(_count(buffer.get("gap")))),
+           "<article class='metric'><span class='metric-label'>Attention</span>"
+           "<span class='metric-value'>Review signals</span><span class='meta'>Stale in progress: {} · outcome unknown: {} · sync pending: {} · snapshot gaps: {}</span></article>".format(
+               _e(_count(attempts.get("stale_in_progress"))),
+               _e(_count(attempts.get("outcome_unknown"))),
+               _e(_count(sync.get("pending_or_error"))),
+               _e(_count(gaps.get("total"))))]
+    out.append("</div>")
+    by_code = blockers.get("by_code")
+    if by_code:
+        out.append("<section class='panel'><h3>Structured blockers</h3><ul class='reason-list'>")
+        for code, count in sorted(by_code.items()):
+            out.append("<li><code>{}</code> · {}</li>".format(_e(code), _e(count)))
+        out.append("</ul><p class='meta'>Unclassified blockers: {}</p></section>".format(
+            _e(_count(blockers.get("unclassified")))))
+    out.append("<section class='panel'><h3>Source freshness</h3>{}</section>".format(
+        _render_sources(sources)))
+    out.append("<section class='panel'><h3>Shared compact summary</h3><pre class='compact'>{}</pre></section>".format(
+        _e(compact)))
+    return "".join(out)
+
+
+def _render_runs(trace_report):
+    source = _as_dict(trace_report.get("source"))
+    state, state_label = _state(source.get("status"))
+    runs = trace_report.get("runs", [])
+    out = ["<p class='intro'>Run records are available only when the trace source has collected them. Tool arguments and output are not included; cost remains unavailable.</p>",
+           "<p><span class='state {}'>Trace source: {}</span>{}</p>".format(
+               state, _e(state_label), " · source error: <code>{}</code>".format(_e(source.get("error_code")))
+               if source.get("error_code") else "")]
+    if not runs:
+        if source.get("status") == "unavailable":
+            out.append("<p class='empty'>Run history is unavailable in this snapshot.</p>")
+        else:
+            out.append("<p class='empty'>No run records were observed in this snapshot.</p>")
+        return "".join(out)
+    out.append("<div class='run-list'>")
+    for run in runs:
+        if not isinstance(run, dict):
+            continue
+        job = _display(run.get("job_id"), "Unknown job", 100)
+        run_id = _display(run.get("run_id"), "Unknown run", 100)
+        out.append("<article class='run-card'><h3>{} · {}</h3>".format(_e(job), _e(run_id)))
+        fields = (("Execution", "execution_result"), ("Completion", "completion_status"),
+                  ("Business result", "business_result"), ("Application join", "application_join_status"),
+                  ("Artifact join", "artifact_join_status"), ("Delivery", "delivery_status"),
+                  ("Tool trace", "tool_trace_status"))
+        out.append("<dl class='key-value'>")
+        for label, key in fields:
+            out.append("<dt>{}</dt><dd>{}</dd>".format(
+                _e(label), _e(_display(run.get(key), "unknown", 100))))
+        out.append("</dl>")
+        attention = run.get("attention_codes") or []
+        out.append("<p class='details'>Attention codes: {}</p>".format(
+            _e(", ".join(_display(code, "unknown", 80) for code in attention) or "none")))
+        tools = run.get("tool_events") or []
+        if tools:
+            out.append("<details><summary>Redacted tool details ({})</summary><ul class='timeline'>".format(len(tools)))
+            for tool in tools:
+                if not isinstance(tool, dict):
+                    continue
+                out.append("<li><strong>{}</strong> · start {} · end {} · duration {} ms · result {} · retry {}</li>".format(
+                    _e(_display(tool.get("name"), "unknown tool", 100)),
+                    _e(_display(tool.get("started_at") or tool.get("at"), "unknown", 48)),
+                    _e(_display(tool.get("finished_at"), "unknown", 48)),
+                    _e(_count(tool.get("duration_ms"))),
+                    _e(_display(tool.get("result"), "unknown", 48)),
+                    _e(_display(tool.get("retry_context"), "unknown", 80))))
+            out.append("</ul></details>")
+        else:
+            out.append("<p class='meta'>No redacted tool details are available for this run.</p>")
+        out.append("</article>")
+    out.extend(["</div>", "<p class='caveat'>Usage scopes may overlap. Cost is unavailable and is not estimated.</p>"])
+    return "".join(out)
+
+
+def _render_quality(quality):
+    unique = quality.get("unique_artifact_heads", 0)
+    first = _as_dict(quality.get("first_pass"))
+    out = ["<p class='intro'>First-pass acceptance is counted once per unique artifact head. Model and explicit owner decisions use the same head denominator and remain separate.</p><div class='quality-grid'>"]
+    for label, key in (("Model review", "model"), ("Owner review", "owner")):
+        values = _as_dict(first.get(key))
+        accepted = values.get("accepted", 0)
+        out.append("<article class='cohort'><h3>{}</h3><div class='metric-value'>{} / {}</div>"
+                   "<dl class='key-value'><dt>Accepted</dt><dd>{}</dd><dt>Not accepted</dt><dd>{}</dd>"
+                   "<dt>Unknown</dt><dd>{}</dd><dt>Acceptance rate</dt><dd>{}</dd></dl></article>".format(
+                       _e(label), _e(_count(accepted)), _e(_count(unique)),
+                       _e(_count(accepted)), _e(_count(values.get("not_accepted"))),
+                       _e(_count(values.get("unknown"))), _e(_fmt_rate(accepted / unique if unique else None))))
+    out.append("</div>")
+    provenance = Counter(quality.get("provenance_status_counts", {}))
+    out.append("<section class='panel'><h3>Unknowns and provenance</h3><p>Review/preflight records without a usable artifact head: {}</p><p>Unique heads with provenance status unknown: {}</p>".format(
+        _e(_count(quality.get("unknown_head_records"))),
+        _e(provenance.get("unknown", 0))))
+    if provenance:
+        out.append("<ul class='reason-list'>")
+        for status, count in sorted(provenance.items()):
+            out.append("<li>Provenance <code>{}</code> · {}</li>".format(_e(status), count))
+        out.append("</ul>")
+    out.append("</section><section class='panel'><h3>Structured rework reasons</h3>")
+    reasons = quality.get("rework_by_code", {})
+    if reasons:
+        out.append("<ul class='reason-list'>")
+        for code, count in sorted(reasons.items()):
+            out.append("<li><code>{}</code> · {}</li>".format(_e(code), _e(count)))
+        out.append("</ul>")
+    else:
+        out.append("<p class='empty'>No structured rework reason codes are recorded.</p>")
+    out.append("</section>")
+    interpretation = quality.get("interpretation")
+    if interpretation:
+        out.append("<p class='caveat'>{}</p>".format(_e(interpretation)))
+    return "".join(out)
+
+
+def _render_funnel(report):
+    out = ["<p class='intro'>Outcome types are independent observations, not a sequence of workflow stages. Only mature cohorts are included; missing evidence is not counted as a confirmed non-response.</p><div class='cohorts'>"]
+    for cohort in report.get("mature_cohorts", []):
+        window = cohort.get("window_days", "?")
+        coverage = _as_dict(cohort.get("coverage"))
+        out.append("<article class='cohort'><h3>{}-day mature cohort</h3><p>Eligible applications: <strong>{}</strong></p><p>Submission cutoff: {} · event source: {}</p>".format(
+            _e(window), _e(_count(cohort.get("eligible_denominator"))),
+            _e(cohort.get("cutoff_date", "unknown")),
+            _e(cohort.get("event_source_status", "unavailable"))))
+        if coverage:
+            out.append("<p>Event coverage: <strong>{}</strong></p>".format(
+                _e(coverage.get("status", "unknown"))))
+        else:
+            out.append("<p>Event coverage: <strong>Unavailable</strong></p>")
+        out.append("<dl class='key-value'>")
+        numerator = _as_dict(cohort.get("observed_numerator"))
+        rates = _as_dict(cohort.get("outcome_rates"))
+        for name in ("callback", "oa", "interview", "offer", "other"):
+            out.append("<dt>{}</dt><dd>{} · {}</dd>".format(
+                _e(name.upper() if name == "oa" else name.capitalize()),
+                _e(_count(numerator.get(name))), _e(_fmt_rate(rates.get(name)))))
+        out.append("</dl><details><summary>Coverage and exclusion counts</summary>")
+        exclusions = _as_dict(cohort.get("exclusions"))
+        if exclusions:
+            out.append("<dl class='key-value'>")
+            for key, value in sorted(exclusions.items()):
+                out.append("<dt>{}</dt><dd>{}</dd>".format(_e(key.replace("_", " ")),
+                                                             _e(_count(value))))
+            out.append("</dl>")
+        if coverage.get("ledger"):
+            ledger = coverage["ledger"]
+            out.append("<p>Ledger coverage: complete={} · observed={} · last scan={}</p>".format(
+                _e(_count(ledger.get("complete"))),
+                _e(_display(ledger.get("observed_at"), "unknown", 48)),
+                _e(_display(ledger.get("last_scan_at"), "unknown", 48))))
+        out.append("</details><p class='caveat'>{}</p></article>".format(
+            _e(cohort.get("coverage_caveat", "Coverage unknown."))))
+    out.append("</div>")
+    out.append("<section class='panel'><h3>Data quality notes</h3><p>Identity conflicts: {}</p><p>{}</p><p>{}</p></section>".format(
+        _e(_count(_as_dict(report.get("identity_diagnostics")).get("identity_conflict_count"))),
+        _e(report.get("human_callback_rule", "Human callback origin is not established.")),
+        _e(report.get("grouping_caveat", "Grouped rates are descriptive only."))))
+    return "".join(out)
+
+
+def render_snapshot_html(snapshot, data=None):
+    """Render all views from a cached snapshot as one self-contained HTML file."""
+    data = data or build_snapshot_data(snapshot)
+    snapshot_id = _display(snapshot.get("snapshot_id"), "unknown", 128)
+    snapshot_date = _display(snapshot.get("as_of"), "unknown", 48)
+    generated = _display(snapshot.get("generated_at"), "unknown", 48)
+    out = ["<!doctype html><html lang='en'><head><meta charset='utf-8'>",
+           "<meta name='viewport' content='width=device-width,initial-scale=1'>",
+           "<meta name='color-scheme' content='light dark'>",
+           "<meta name='referrer' content='no-referrer'>",
+           "<title>Private jobs dashboard</title><style>", DASHBOARD_CSS,
+           "</style></head><body><a class='skip' href='#main'>Skip to dashboard content</a><div class='shell'>",
+           "<header class='masthead'><h1>Private jobs dashboard</h1><div class='mast-meta'>",
+           "<span>Snapshot as of {}</span><span>Collected {}</span>".format(
+               _e(snapshot_date), _e(generated)),
+           "<span class='snapshot-id'>Snapshot ID: <code>{}</code></span></div></header>".format(
+               _e(snapshot_id)),
+           "<nav class='nav' aria-label='Dashboard views'><a href='#today'>Today</a><a href='#applications'>Applications</a><a href='#runs'>Runs</a><a href='#quality'>Tailoring quality</a><a href='#funnel'>Hiring funnel</a></nav>",
+           "<main id='main'>",
+           "<section class='view' id='today' aria-labelledby='today-heading'><h2 id='today-heading'>Today</h2>",
+           _render_today(data["today"], data["sources"], data["compact"]),
+           "</section><section class='view' id='applications' aria-labelledby='applications-heading'><h2 id='applications-heading'>Applications</h2><p class='intro'>Read-only status board. Counts include canonical tracker/queue rows in this snapshot; discovered postings without a canonical row are not in the snapshot and unmatched rows never default to Applied. Status age uses a known stage start when present; otherwise the displayed label names the date basis. Timelines contain dated submission claims and recorded events only.</p>",
+           _render_applications(data["applications"], data["sankey"], data["sources"]),
+           "</section><section class='view' id='runs' aria-labelledby='runs-heading'><h2 id='runs-heading'>Runs</h2>",
+           _render_runs(data["runs"]),
+           "</section><section class='view' id='quality' aria-labelledby='quality-heading'><h2 id='quality-heading'>Tailoring quality</h2>",
+           _render_quality(data["quality"]),
+           "</section><section class='view' id='funnel' aria-labelledby='funnel-heading'><h2 id='funnel-heading'>Hiring funnel</h2>",
+           _render_funnel(data["funnel"]),
+           "</section></main><footer>Private local dashboard · read-only snapshot · no source collection is triggered by viewing this page.</footer>",
+           "<script type='application/json' id='dashboard-state'>",
+           _safe_json_for_script({"snapshot_id": snapshot.get("snapshot_id"),
+                                  "as_of": snapshot.get("as_of")}),
+           "</script></div></body></html>"]
+    return "".join(out)
+
+
+def render_unavailable_html():
+    """Render an explicit no-cache state without exposing a local path/error."""
+    return ("<!doctype html><html lang='en'><head><meta charset='utf-8'>"
+            "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+            "<title>Dashboard unavailable</title><style>"
+            "body{margin:0;padding:24px;background:#f8fafc;color:#1e293b;"
+            "font:16px/1.55 system-ui,sans-serif}main{max-width:48rem;margin:auto}"
+            "</style></head><body><main><h1>Cached dashboard unavailable</h1>"
+            "<p>No committed snapshot could be read. The page did not contact or scan any source.</p>"
+            "<p>An operator can run the explicit projection collection command after checking private runtime configuration.</p>"
+            "</main></body></html>")
+
+
 # ---------------------------------------------------------------- cli
 def build_parser():
     ap = argparse.ArgumentParser(
-        description="Render the local job-search dashboard (read-only).",
+        description="Render the private dashboard from the shared cached projection.",
         formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--db", default=None,
+                    help="cached projection database (read-only; collect separately)")
     ap.add_argument("--repo", default=REPO_DIR,
-                    help="resume clone path (env JOBSEARCH_REPO)")
+                    help="legacy source path; used only with --legacy-collect")
     ap.add_argument("--out", default=OUT_PATH,
                     help="output HTML path (env JOBSEARCH_DASHBOARD_OUT)")
     ap.add_argument("--json", action="store_true",
-                    help="print the computed board+sankey data object instead")
+                    help="print the dashboard view model instead of writing HTML")
     ap.add_argument("--queue-cmd", default=None,
-                    help="override the queue command (space-separated); for tests")
+                    help="legacy queue command; used only with --legacy-collect")
+    ap.add_argument("--legacy-collect", action="store_true",
+                    help="explicitly run the old source collector (may call gh)")
     return ap
 
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
     log = lambda *a: print(*a, file=sys.stderr)  # noqa: E731
-    queue_cmd = args.queue_cmd.split() if args.queue_cmd else None
-    data = build_data(args.repo, queue_cmd, log=log)
-
-    if args.json:
-        print(json.dumps(data, indent=2, ensure_ascii=False))
-        return 0
-
-    html_doc = render_html(data, generated=data.get("generated"))
+    if args.legacy_collect:
+        queue_cmd = args.queue_cmd.split() if args.queue_cmd else None
+        data = build_data(args.repo, queue_cmd, log=log)
+        if args.json:
+            print(json.dumps(data, indent=2, ensure_ascii=False, allow_nan=False))
+            return 0
+        html_doc = render_html(data, generated=data.get("generated"))
+    else:
+        import projection
+        try:
+            snapshot = projection.read_snapshot(args.db)
+            data = build_snapshot_data(snapshot)
+        except (projection.ProjectionError, OSError, ValueError, KeyError, TypeError):
+            print("dashboard: cached snapshot unavailable or invalid; no source collection was run",
+                  file=sys.stderr)
+            if args.json:
+                return 2
+            data = {"snapshot_id": "unavailable"}
+            html_doc = render_unavailable_html()
+        else:
+            if args.json:
+                print(json.dumps(data, indent=2, ensure_ascii=False, allow_nan=False))
+                return 0
+            html_doc = render_snapshot_html(snapshot, data=data)
     out_dir = os.path.dirname(os.path.abspath(args.out))
     os.makedirs(out_dir, exist_ok=True)
     tmp = f"{args.out}.tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
         fh.write(html_doc)
     os.replace(tmp, args.out)
-    log(f"dashboard: wrote {args.out} ({len(html_doc.encode('utf-8'))} bytes) "
-        f"counts={data['counts']}")
+    log("dashboard: wrote {} ({} bytes) snapshot={}".format(
+        args.out, len(html_doc.encode("utf-8")), data.get("snapshot_id", "legacy")))
     return 0
 
 

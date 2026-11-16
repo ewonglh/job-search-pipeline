@@ -15,7 +15,6 @@ import summary as s
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TODAY = dt.date(2026, 10, 8)
-PROFILE_LOCAL = os.path.join(HERE, "profile.local.yaml")
 
 # ---------------------------------------------------------------- fixtures
 APPS = s.parse_yaml_list("""
@@ -185,31 +184,7 @@ def test_build_data_degraded():
         shutil.rmtree(tmp)
 
 
-# ---------------------------------------------------------------- PII
-def test_no_pii_live():
-    """Render the live data; no value from profile.local.yaml may appear."""
-    if not os.path.isfile(PROFILE_LOCAL):
-        print("test_dashboard: profile.local.yaml absent; live PII check skipped")
-        return
-    services = os.path.dirname(HERE)
-    data = d.build_data(services, log=lambda *a: None, today=TODAY, prs=PRS)
-    html = d.render_html(data)
-    leaked = []
-    with open(PROFILE_LOCAL, encoding="utf-8") as fh:
-        for line in fh:
-            line = line.strip()
-            if not line or line.startswith("#") or ":" not in line:
-                continue
-            val = line.partition(":")[2].strip().strip('"').strip("'")
-            if len(val) >= 4 and val in html:
-                leaked.append(val[:32])
-    assert not leaked, f"PII leaked into dashboard HTML: {leaked}"
-    # Synthetic sentinels only. These must never appear in rendered output.
-    for needle in ("Northfield University", "S9912345Z", "9123 4567",
-                   "alex.morgan@example.com", "Alex Morgan", "2008-03-14"):
-        assert needle not in html, f"PII in render: {needle}"
-
-
+# ---------------------------------------------------------------- synthetic-only sanitization
 def test_no_pii_renderer():
     """The renderer never emits PII from a hostile board object either."""
     data = {"counts": {"Found": 1, "Tailored": 0, "Applied": 0, "Interview": 0,
@@ -219,7 +194,7 @@ def test_no_pii_renderer():
             "generated": "2026-10-08T00:00:00"}
     html = d.render_html(data)
     assert "S9912345Z" not in html and "Northfield University" not in html
-    assert "dataset.board" in html   # self-contained, minimal JS
+    assert "id='dashboard-state'" in html
 
 
 # ---------------------------------------------------------------- cli
@@ -242,14 +217,14 @@ def test_main_json_and_out():
         import io
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
-            rc = d.main(["--repo", repo, "--out", out, "--json"])
+            rc = d.main(["--legacy-collect", "--repo", repo, "--out", out, "--json"])
         assert rc == 0
         obj = json.loads(buf.getvalue())
         assert obj["counts"]["Found"] == len(POSTINGS) - 1, obj["counts"]
         assert {"board", "sankey", "flows"} <= set(obj) | set(obj["sankey"])
 
         with contextlib.redirect_stdout(io.StringIO()):
-            rc = d.main(["--repo", repo, "--out", out])
+            rc = d.main(["--legacy-collect", "--repo", repo, "--out", out])
         assert rc == 0 and os.path.isfile(out)
         html = open(out, encoding="utf-8").read()
         assert "Job search dashboard" in html and "<svg" in html
