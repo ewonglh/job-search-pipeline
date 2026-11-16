@@ -45,4 +45,5 @@ jobs:
           python test_review_contract.py
           python test_discover.py
           python test_email_ingest.py
+          python test_notify_delivery.py
           node test_run_email_ingest.mjs

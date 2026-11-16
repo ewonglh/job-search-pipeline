@@ -45,6 +45,7 @@ review_state.json
 /scripts/actions-state.json
 /scripts/recruitment_events.json*
 /scripts/email_ingest_state.json*
+/scripts/notify_state.json*
 /scripts/*_state.json
 /scripts/*_cache.json
 /scripts/rankings.json

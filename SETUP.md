@@ -234,6 +234,79 @@ kinds, `--cron`, `--tz`).
 - Per-job model and fallbacks: `--model`, `--fallbacks`.
 - Run history: `openclaw automations runs <job-id>`.
 
+### Optional notification receipt adapter
+
+`scripts/notify_delivery.py` can correlate an already staged notification with
+OpenClaw run history. It is opt-in and does not send messages or change any
+schedule or route. The caller records its existing gate decision as
+`deliver`, `suppressed`, or `silent`; this adapter makes no model call.
+
+Set `JOBSEARCH_NOTIFY_JOB_ID` to the native automation job id. The executable
+can be overridden with `JOBSEARCH_OPENCLAW_BIN`; private state defaults to
+`~/.local/state/job-search-pipeline/notify_state.json` and can be moved with
+`JOBSEARCH_NOTIFY_STATE`.
+
+For an upstream `deliver` decision, save the complete message in a private
+UTF-8 file and stage it before exposing its marker:
+
+```bash
+python3 scripts/notify_delivery.py --stage-file "$MESSAGE_FILE" \
+  --decision-id "$DECISION_ID" --decision deliver
+```
+
+The command atomically stores a bounded pending batch before printing
+`NOTIFY_BATCH=<id>` and the complete message. The existing native job must
+include that output in its run summary. Record suppression or silent no-work
+without a payload:
+
+```bash
+python3 scripts/notify_delivery.py --record-decision \
+  --decision-id "$DECISION_ID" --decision suppressed
+python3 scripts/notify_delivery.py --record-decision \
+  --decision-id "$DECISION_ID" --decision silent
+```
+
+These outcomes create no pending batch and are not delivery failures.
+
+After a run, reconcile pending batches with:
+
+```bash
+python3 scripts/notify_delivery.py --reconcile
+```
+
+The adapter reads pages using
+`openclaw automations runs <job-id> --limit 50 --offset <n> --json` and expects
+an `entries` array, boolean `hasMore`, and an advancing `nextOffset` while more
+history remains. With `hasMore: true`, `nextOffset` must equal the current
+offset plus the number of returned entries, and the page must not be empty. A
+finished entry must provide `jobId`, `action`, `summary`,
+`runAtMs`, `durationMs`, `delivered`, and `deliveryStatus`; `runId` or
+`sessionId` is preferred for run identity. It acknowledges only one exact
+batch marker with the complete message, matching job and timing, a stable run
+identity, `action: finished`, `delivered: true`, and
+`deliveryStatus: delivered`. Missing, failed, contradictory, ambiguous, and
+expired evidence stays pending for review.
+
+The accepted page shape is adapter schema
+`openclaw-automation-runs-offset-v1`. The native CLI does not declare a
+structured schema version, and this task did not query live history. Other
+formats, incomplete pages, pagination gaps, and reads beyond 30 pages fail
+closed without advancing discovery progress or acknowledging a batch. Each
+reconciliation reads the full paginated history, up to 40 pages, and rechecks
+the first page before accepting the scan. If history shifts during pagination,
+the scan fails. The stored discovery watermark is
+separate from pending batches, suppression decisions, and delivered
+acknowledgments. Receipt age is bounded to 24 hours. Legacy numeric positions
+are quarantined and never resumed. Valid legacy pending batches are retained
+as review-only state; the adapter does not emit or automatically acknowledge
+them. No historical notices are recreated.
+
+`--dry-run --reconcile` never fetches native history or writes state, locks, or
+diagnostics. A complete synthetic fixture can be supplied with
+`--receipts-fixture FILE`; fixture objects use the adapter schema, set
+`complete` to `true`, and contain `entries`. Dry-run output reports the
+proposed result without persisting it or emitting a batch marker.
+
 ### What still does not automate
 
 The merge. OpenClaw opens the PR, you read the diff in GitHub, and you merge it.
