@@ -540,6 +540,48 @@ routes, stop and use that installation's route-management interface to add the
 dedicated path. The dashboard server itself accepts only the exact routes
 listed above and never serves files from the checkout or runtime directories.
 
+### Optional authenticated OpenClaw `/jobs` command
+
+The optional native plugin is in `plugins/`. It registers the bare command name
+`jobs`; Telegram exposes that as `/jobs`. The plugin manifest and entrypoint
+use the command interface verified against the installed OpenClaw 2026.10.1
+SDK. To enable it, add the checkout's `plugins` directory to the installed
+instance's plugin load paths yourself. This repository does not edit the
+OpenClaw configuration.
+If `api.registerCommand` is unavailable, plugin setup fails with an explicit
+unsupported-API error.
+
+OpenClaw's `requireAuth: true` uses the channel's sender admission. The handler
+also requires the SDK's `ctx.isAuthorizedSender === true`; a missing auth field
+fails closed. It does not infer a user identity from `senderId` or any other
+field. The command bypasses the LLM and accepts no arguments. It runs the
+projection's read-only `report compact` formatter against the committed SQLite
+snapshot. It does not collect sources or call GitHub, a mailbox, a model, or a
+message transport. Collect explicitly before requesting `/jobs`:
+
+```sh
+python3 scripts/projection.py collect
+```
+
+Set `JOBSEARCH_DASHBOARD_URL` only when the private dashboard is reachable over
+HTTPS. Accepted destinations are Tailscale `.ts.net`, private IP, `.home.arpa`,
+or localhost hosts, and the dashboard's root or `/jobs` routes. Credentials,
+queries, fragments, arbitrary paths, and public hosts are rejected and never
+echoed. With no configured link, the summary still works and says the link is
+not configured. `JOBSEARCH_PYTHON` may select the Python 3 executable when the
+host does not expose it as `python3`.
+
+`scripts/quiet_routing.py` is a pure policy scaffold; it is not wired into the
+OpenClaw scheduler or alert route. Existing alerts remain the default. Any
+future activation requires a working fresh dashboard, CLI/web/command parity
+on the same commit, and recorded phone and desktop acceptance tied to that commit.
+The acceptance remains pending, so quiet routing must remain off. The policy
+keeps callbacks, owner decisions, persistent failures, and one recovery per
+incident on Telegram; stale dashboard or parity gates fall back to Telegram.
+Each mode change records a history baseline to prevent replay. Pending delivery
+state remains in the #9 receipt adapter and is acknowledged only from its exact
+native delivery receipt; a generated routing decision is not delivery.
+
 Before quiet-routing changes, the owner must complete human acceptance on the
 commit reported for this issue. Acceptance remains pending until the owner
 checks the 375px phone and 1440px desktop scenarios listed in the I13 result

@@ -205,6 +205,21 @@ with tempfile.TemporaryDirectory(prefix="synthetic-projection-i11-") as temp:
     assert rebuilt["snapshot_id"] == first["snapshot_id"]
     assert projection.format_compact(replayed).startswith(
         "Jobs snapshot {} · as of 2026-11-16".format(first["snapshot_id"]))
+    compact = projection.format_compact(replayed)
+    assert "Daily goal (Asia/Singapore): 1 / 1 confirmed" in compact, compact
+    assert "Queue: queued 1" in compact, compact
+    assert "Attention: stale in progress 0" in compact, compact
+    assert "Sources: " in compact and "tracker=stale" in compact, compact
+    cold_unavailable = {
+        "schema_version": 1, "snapshot_id": "c" * 64,
+        "generated_at": "2026-11-16T06:00:00Z", "as_of": "2026-11-16",
+        "sources": {"tracker": {"status": "unavailable"},
+                    "queue": {"status": "unavailable"}},
+        "facts": {"applications": [], "attempts": []},
+    }
+    unavailable_compact = projection.format_compact(cold_unavailable)
+    assert "Daily goal (Asia/Singapore): unavailable / 1 confirmed" in unavailable_compact
+    assert "Queue: unavailable" in unavailable_compact
 
     # Report entry points use only the selected cached snapshot and formatter.
     before = _db_bytes(db)
