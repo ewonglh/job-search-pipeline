@@ -9,6 +9,7 @@ import json
 import os
 import shutil
 import tempfile
+from unittest import mock
 
 import queue as q
 
@@ -19,6 +20,15 @@ with open(os.path.join(FIX, "merged_prs.json"), encoding="utf-8") as fh:
     PRS = json.load(fh)
 with open(os.path.join(FIX, "applications_merged.yaml"), encoding="utf-8") as fh:
     TRACKER = fh.read()
+
+
+def live_enqueue(queue_path, prs=PRS):
+    # Inject the authenticated GitHub/read-main boundary, never a writable
+    # fixture CLI flag. Real calls still require the observed owner's merge.
+    with mock.patch.object(q, "gh_merged_prs", return_value=prs), \
+            mock.patch.object(q, "read_main_tracker", return_value=TRACKER), \
+            mock.patch.object(q, "GH_REPO", "demo-user/resume"):
+        return q.main(["enqueue", "--queue", queue_path])
 
 # ---------------------------------------------------------------- yaml subset
 obj = [{"company": "Acme: Inc", "role": "SWE #1", "notes": "x | y",
@@ -197,12 +207,21 @@ try:
     assert out.count("queued:") == 2, repr(out)
     assert "Quantum Co" in out and "Ghost Co" in out, out
 
+    # Offline metadata cannot mint authorization or write even an empty store.
+    for flags in (["--prs", os.path.join(FIX, "merged_prs.json")],
+                  ["--tracker", os.path.join(FIX, "applications_merged.yaml")]):
+        assert q.main(["enqueue", "--queue", qfile] + flags) == 2
+        assert not os.path.exists(qfile)
+    # A non-owner merge and missing merge time are not enqueue authorization.
+    for bad in ([dict(pr, mergedBy={"login": "untrusted-fixture"}) for pr in PRS],
+                [dict(pr, mergedAt=None) for pr in PRS]):
+        assert live_enqueue(qfile, bad) == 0
+        assert q.load_queue(qfile) == []
+
     # real run writes the store
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
-        rc = q.main(["enqueue", "--prs", os.path.join(FIX, "merged_prs.json"),
-                     "--tracker", os.path.join(FIX, "applications_merged.yaml"),
-                     "--queue", qfile])
+        rc = live_enqueue(qfile)
     assert rc == 0 and os.path.exists(qfile)
     store = q.load_queue(qfile)
     assert [it["pr_number"] for it in store] == [12, 14], store
@@ -210,9 +229,7 @@ try:
     # re-run: silent (nothing new) but exit 0
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
-        rc = q.main(["enqueue", "--prs", os.path.join(FIX, "merged_prs.json"),
-                     "--tracker", os.path.join(FIX, "applications_merged.yaml"),
-                     "--queue", qfile])
+        rc = live_enqueue(qfile)
     assert rc == 0 and buf.getvalue() == "", repr(buf.getvalue())
 
     # next -> oldest queued (PR 12)
