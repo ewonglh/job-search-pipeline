@@ -191,7 +191,9 @@ assert [it["pr_number"] for it in ordered] == [9, 2]
 
 # ---------------------------------------------------------------- cli e2e
 tmp = tempfile.mkdtemp()
+original_snapshot_root = q.SNAPSHOT_ROOT
 try:
+    q.SNAPSHOT_ROOT = os.path.join(tmp, "private-snapshots")
     qfile = os.path.join(tmp, "queue.yaml")
     # dry-run: adds to stdout, writes nothing
     buf = io.StringIO()
@@ -249,6 +251,8 @@ try:
         "status": "in_progress", "attempt_id": "synthetic-attempt-12",
         "attempt_state": "authorized", "submit_gate": "durable",
         "claimed_at": q.now_utc()})
+    claimed_items[claimed_idx]["claim_application_id"] = q._canonical_queue_identity(
+        claimed_items[claimed_idx])
     q.write_queue(qfile, claimed_items)
     # next never skips past the in-flight item, and names the CV to submit
     buf = io.StringIO()
@@ -272,6 +276,29 @@ try:
                    "--status", "submitted", "--date", "2026-10-06"]) == 2
     assert q.main(["status", "--queue", qfile, "--pr", "12",
                    "--status", "submitted", "--sent", "PDF via company ATS"]) == 2
+    # Confirmation must match the durable attempt, even with concrete evidence.
+    assert q.main(["status", "--queue", qfile, "--pr", "12",
+                   "--status", "submitted", "--date", "2026-10-06",
+                   "--sent", "PDF via company ATS; availability Jun-Dec 2027",
+                   "--attempt-id", "another-attempt-12",
+                   "--confirmation-evidence", "Employer portal confirmed receipt.",
+                   "--no-tracker"]) == 2
+    pdf_file = os.path.join(tmp, "selected-resume.pdf")
+    answers_file = os.path.join(tmp, "selected-answers.json")
+    synthetic_repo = os.path.join(tmp, "resume-repo")
+    with open(pdf_file, "wb") as stream:
+        stream.write(b"%PDF-1.7\nSynthetic resume\n")
+    with open(answers_file, "w", encoding="utf-8") as stream:
+        stream.write('{"availability":"June to December 2027"}\n')
+    assert q.main(["prepare-snapshot", "--queue", qfile, "--repo", synthetic_repo,
+                   "--pr", "12",
+                   "--attempt-id", "synthetic-attempt-12", "--pdf", pdf_file,
+                   "--answers", answers_file, "--operator-verification",
+                   "I checked the selected PDF and answers for this posting."]) == 0
+    assert q.main(["verify-snapshot", "--queue", qfile, "--repo", synthetic_repo,
+                   "--pr", "12",
+                   "--attempt-id", "synthetic-attempt-12", "--pdf", pdf_file,
+                   "--answers", answers_file]) == 0
     # The attempt ID, confirmation, date, and sent record are mandatory.
     assert q.main(["status", "--queue", qfile, "--pr", "12",
                    "--status", "submitted", "--date", "2026-10-06",
@@ -322,6 +349,7 @@ try:
         rc = q.main(["next", "--queue", empty])
     assert rc == 0 and buf.getvalue() == "", repr(buf.getvalue())
 finally:
+    q.SNAPSHOT_ROOT = original_snapshot_root
     shutil.rmtree(tmp)
 
 

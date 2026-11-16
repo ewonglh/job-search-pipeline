@@ -9,6 +9,7 @@ profile.local.yaml
 /queue.yaml
 /skipped.yaml
 /deadlines.yaml
+/submission-snapshots/
 
 # Runtime state and caches
 /*_state.json
