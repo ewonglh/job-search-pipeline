@@ -46,7 +46,7 @@ lanes that run unattended safely: discovery and ranking.
 | Lane | Runs | Why |
 |---|---|---|
 | Discover | yes | Pure HTTP plus git. No judgement needed |
-| Rank | yes | Deterministic scoring against `rubric.yaml` |
+| Rank | yes | Scores guarded JDs and checks profile-derived eligibility |
 | Queue enqueue | yes | Reads merged PRs through `gh`, appends rows |
 
 ### What it cannot run
@@ -301,8 +301,8 @@ automatically. Do not weaken it.
 3. Their optional board list in `scripts/companies.yaml`, or just InternSG.
 4. Their own `data/profile.yaml` answers. Start from
    `demo/repo/data/profile.yaml` and replace every value.
-5. Their own `rubric.yaml` weights, if the defaults do not match what they care
-   about.
+5. Their own `rubric.yaml` scoring weights, if the defaults do not match what
+   they care about. Eligibility facts come from `data/profile.yaml`.
 6. A model, for Tracks 2 and 3.
 
 None of these are optional, and the pipeline is honest about failing when they

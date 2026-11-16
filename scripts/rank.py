@@ -24,6 +24,7 @@ import urllib.parse
 from datetime import datetime, timedelta, timezone
 
 import tailor as t
+import eligibility as el
 from posting_guard import guard_text
 from config import default_runtime_path, value_setting
 
@@ -36,12 +37,11 @@ RUBRIC_PATH = os.path.join(HERE, "rubric.yaml")
 DEFAULT_CACHE = default_runtime_path("rank_cache.json")
 DEFAULT_RANKINGS = default_runtime_path("rankings.json")
 
-VETO_ORDER = ["requires_graduation", "clearance_citizenship", "seniority",
-              "immediate_fulltime"]
+VETO_ORDER = ["seniority", "immediate_fulltime"]
 
 
 # ---------------------------------------------------------------- rubric
-def load_rubric(path):
+def load_rubric(path, profile=None):
     """Parse rubric.yaml with tailor's flat-mapping subset.
 
     Veto pairs (``veto_<name>`` / ``veto_<name>_reason``) become an ordered
@@ -62,6 +62,24 @@ def load_rubric(path):
             return [str(x).lower() for x in v]
         return [str(v).lower()] if v else []
 
+    profile = profile if isinstance(profile, dict) else {}
+    skills = profile.get("skills", profile.get("technical_skills", []))
+    if isinstance(skills, list):
+        profile_skills = [str(item).strip().lower() for item in skills if str(item).strip()]
+    else:
+        profile_skills = [part.strip().lower() for part in
+                          re.split(r"[,;]", str(skills or "")) if part.strip()]
+    year_flags = []
+    grad_match = re.search(r"\b(20\d{2})\b", str(profile.get("expected_graduation") or ""))
+    if grad_match:
+        year = grad_match.group(1)
+        year_flags.extend([f"graduating in {year}", f"class of {year}"])
+    study = str(profile.get("current_year") or profile.get("year_of_study") or
+                profile.get("current_year_sem") or "")
+    study_match = re.search(r"\b(?:year\s*)?([1-6])(?:st|nd|rd|th)?\b", study, re.I)
+    if study_match:
+        year_flags.append(f"year {study_match.group(1)}")
+
     rubric = {
         "weights": {
             "skill_overlap": num("weight_skill_overlap"),
@@ -72,10 +90,8 @@ def load_rubric(path):
             "source": num("weight_source"),
         },
         "jd_skills": words("jd_skills"),
-        "profile_skills": words("profile_skills"),
-        "gradyear_flags": words("gradyear_flags"),
-        "window_good": words("window_good"),
-        "window_half": words("window_half"),
+        "profile_skills": profile_skills,
+        "gradyear_flags": year_flags,
         "location_bad": words("location_bad"),
         "source_good": words("source_good"),
         "source_half": words("source_half"),
@@ -223,6 +239,8 @@ def dim_skill(jd_low, rubric):
     found = [k for k in rubric["jd_skills"] if kw_hit(jd_low, k)]
     if not found:
         return 0.5, ["no recognised skill keywords in JD"]
+    if not rubric["profile_skills"]:
+        return 0.5, ["profile skills not configured"]
     matched = [k for k in found if k in rubric["profile_skills"]]
     score = len(matched) / len(found)
     if matched:
@@ -233,18 +251,24 @@ def dim_skill(jd_low, rubric):
 
 
 def dim_gradyear(jd_low, rubric):
+    if not rubric["gradyear_flags"]:
+        return 0.5, ["profile year not configured"]
     hits = [f for f in rubric["gradyear_flags"] if f in jd_low]
     if hits:
-        return 0.4, [f"year-of-study bar ({hits[0]})"]
-    return 1.0, ["open to current undergrads"]
+        return 1.0, [f"profile cohort matches ({hits[0]})"]
+    return 1.0, ["no matching year restriction"]
 
 
-def dim_availability(jd_low, rubric):
-    if any(w in jd_low for w in rubric["window_good"]):
-        return 1.0, ["window fits May-Aug/Jun-Dec 2027"]
-    if any(w in jd_low for w in rubric["window_half"]):
-        return 0.5, ["H1/6-month window vs May-Aug preference"]
-    return 0.8, ["no window stated — assumed compatible"]
+def dim_availability(jd_low, rubric, eligibility=None):
+    check = (eligibility or {}).get("checks", {}).get("availability", {})
+    status = check.get("status")
+    if status == "compatible":
+        return 1.0, ["profile availability fits stated requirement"]
+    if status == "conflict":
+        return 0.0, ["profile availability conflicts with stated requirement"]
+    if status == "unknown":
+        return 0.5, ["availability requirement needs review"]
+    return 0.8, ["no supported availability requirement stated"]
 
 
 def dim_location(text_low, posting, rubric):
@@ -293,7 +317,7 @@ def check_vetoes(text, rubric):
     return None
 
 
-def score_posting(posting, jd_text, rubric):
+def score_posting(posting, jd_text, rubric, eligibility=None):
     """Return (score, reasons, dimensions) or (None, veto_reason, {}).
 
     The JD text is re-gated here (idempotent) so direct callers get the same
@@ -309,7 +333,7 @@ def score_posting(posting, jd_text, rubric):
     dims = {
         "skill_overlap": dim_skill(jd_low, rubric),
         "grad_year": dim_gradyear(jd_low, rubric),
-        "availability": dim_availability(jd_low, rubric),
+        "availability": dim_availability(jd_low, rubric, eligibility),
         "location": dim_location(loc_text_low, posting, rubric),
         "freshness": dim_freshness(posting),
         "source": dim_source(posting, rubric),
@@ -325,7 +349,21 @@ def score_posting(posting, jd_text, rubric):
 
 def format_line(entry):
     top = entry["reasons"][0] if entry.get("reasons") else "scored"
+    eligibility = entry.get("eligibility", {})
+    if eligibility.get("status") == "unknown":
+        codes = ",".join(eligibility.get("reason_codes", [])) or "review"
+        top = f"{top}; eligibility unknown ({codes})"
     return f"{entry['score']} · {entry.get('company', '')} · {entry.get('role', '')} · {top}"
+
+
+def load_profile_source(repo_dir):
+    """Read exact profile bytes for provenance; an absent profile hashes empty."""
+    path = os.path.join(repo_dir, t.PROFILE_PATH)
+    try:
+        with open(path, "rb") as fh:
+            return fh.read()
+    except OSError:
+        return b""
 
 
 # ---------------------------------------------------------------- cli
@@ -356,8 +394,9 @@ def main(argv=None):
     args = build_parser().parse_args(argv)
     log = lambda *a: print(*a, file=sys.stderr)
 
-    rubric = load_rubric(args.rubric)
-    postings, _, apps = t.load_repo(args.repo)
+    postings, profile, apps = t.load_repo(args.repo)
+    profile_source = load_profile_source(args.repo)
+    rubric = load_rubric(args.rubric, profile)
     skipped = t.load_skipped(args.skipped)
     pr_links = load_open_pr_links(args.prs, log)
 
@@ -384,17 +423,23 @@ def main(argv=None):
             log(f"rank: needs_jd  {p.get('company')} · {p.get('role')} ({reason})")
             continue
         fetched += 0 if from_cache else 1
-        score, info, dims = score_posting(p, jd, rubric)
+        eligibility = el.evaluate(p, profile, jd, profile_source)
+        score, info, dims = score_posting(p, jd, rubric, eligibility)
         base = {"company": p.get("company"), "role": p.get("role"),
                 "link": p.get("link"), "source": p.get("source", ""),
                 "location": p.get("location", ""), "added": p.get("added", ""),
                 "verdict": guard["verdict"], "n_findings": guard["n_findings"]}
         if score is None:
-            excluded.append({**base, "reason": info})
+            excluded.append({**base, "reason": info, "eligibility": eligibility})
             log(f"rank: veto  {p.get('company')} · {p.get('role')} ({info})")
             continue
+        if eligibility["status"] == "ineligible":
+            reason = ",".join(eligibility["reason_codes"])
+            excluded.append({**base, "reason": reason, "eligibility": eligibility})
+            log(f"rank: ineligible  {p.get('company')} · {p.get('role')} ({reason})")
+            continue
         ranked.append({**base, "score": score, "reasons": info,
-                       "dimensions": dims})
+                       "dimensions": dims, "eligibility": eligibility})
         src = "cache" if from_cache else "fetch"
         log(f"rank: scored {score:3d} ({src})  {p.get('company')} · {p.get('role')}")
 
