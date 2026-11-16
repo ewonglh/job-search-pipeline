@@ -13,7 +13,7 @@ from config import default_repo_dir, default_runtime_path, path_setting
 import report_snapshot
 
 
-NON_OUTCOMES = {"unrelated", "unclassified", "account_admin", "job_alert"}
+NON_OUTCOMES = {"unrelated", "unclassified", "account_admin", "job_alert", "acknowledgement"}
 CALLBACK_TYPES = {"recruiter_reply", "availability_request"}
 
 
@@ -354,6 +354,8 @@ def render_text(report):
     lines.append(report["human_callback_rule"])
     lines.append(report["maturity_and_cutoff"])
     lines.append("Response timing: " + report["response_timing_basis"])
+    lines.append("Identity and evidence diagnostics: " + json.dumps(
+        report["identity_diagnostics"], sort_keys=True))
     lines.append("Sources: " + ", ".join("{}={}{}".format(
         name, value["status"], "(" + value["error_code"] + ")" if value.get("error_code") else "")
                                            for name, value in sorted(report["sources"].items())))

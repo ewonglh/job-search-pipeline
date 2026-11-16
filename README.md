@@ -146,6 +146,10 @@ The reports read tracker, queue, outcome ledger, ingestion state, and snapshot
 metadata only at the collection boundary. Missing or malformed sources remain
 unavailable in the report. Rendering makes no model or mailbox calls and does
 not update state. A missing reply is not treated as a confirmed non-response.
+Ledger freshness uses its declared observation or scan time; touching the file
+does not refresh it. Missing observation time is explicitly unknown/stale.
+Acknowledgements are excluded from hiring outcomes. Text and JSON both expose
+identity and malformed-evidence diagnostics.
 
 ## Review readiness
 

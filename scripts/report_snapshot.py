@@ -60,7 +60,7 @@ def _timestamp(value):
         return None
     if parsed.tzinfo is None:
         return None
-    return parsed.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _day(value):
@@ -118,6 +118,9 @@ def _source(name, status, now, *, observed_at=None, error_code=None, count=None)
     observed = _timestamp(observed_at)
     collected = _iso_now(now)
     state = status
+    if status == "fresh" and observed is None:
+        state = "stale"
+        error_code = error_code or "observation_time_unknown"
     if status == "fresh" and observed:
         try:
             age = max(0, (datetime.fromisoformat(collected.replace("Z", "+00:00"))
@@ -127,7 +130,8 @@ def _source(name, status, now, *, observed_at=None, error_code=None, count=None)
         except ValueError:
             observed = None
     return {"status": state, "observed_at": observed,
-            "collected_at": collected, "last_success_at": observed,
+            "collected_at": collected,
+            "last_success_at": collected if status == "fresh" else None,
             "freshness_seconds": SOURCE_FRESHNESS_SECONDS[name],
             "error_code": error_code, "record_count": count}
 
@@ -151,8 +155,8 @@ def _read_json(path, name, now):
     try:
         with open(path, "r", encoding="utf-8") as fh:
             value = json.load(fh, object_pairs_hook=_unique_json_object)
-        observed = datetime.fromtimestamp(os.path.getmtime(path), timezone.utc).isoformat()
-        return value, _source(name, "fresh", now, observed_at=observed)
+        # Reading/touching a ledger does not establish when its facts were observed.
+        return value, _source(name, "fresh", now)
     except FileNotFoundError:
         return None, _source(name, "unavailable", now, error_code="source_missing")
     except (OSError, UnicodeError, ValueError, TypeError):
@@ -311,6 +315,11 @@ def normalize_snapshot(tracker_rows, queue_rows, event_doc, ingestion_state,
                     value = _day(coverage_raw.get(key))
                     if value:
                         coverage[key] = value
+                if safe_sources.get("events", {}).get("status") != "unavailable":
+                    safe_sources["events"] = _source(
+                        "events", "fresh", generated_at,
+                        observed_at=coverage.get("observed_at") or coverage.get("last_scan_at"),
+                        count=len(raw_events))
             except (TypeError, ValueError, KeyError):
                 evidence_diagnostics = {"invalid_ledger": 1}
                 health = safe_sources.get("events", {})
@@ -327,6 +336,10 @@ def normalize_snapshot(tracker_rows, queue_rows, event_doc, ingestion_state,
                 stamps.append(coverage_scan)
             ingestion = {"scope_count": len(scopes),
                          "last_scan_at": max((stamp for stamp in stamps if stamp), default=None)}
+            if safe_sources.get("ingestion", {}).get("status") != "unavailable":
+                safe_sources["ingestion"] = _source(
+                    "ingestion", "fresh", generated_at,
+                    observed_at=ingestion["last_scan_at"], count=len(scopes))
 
     facts = {
         "applications": applications,
@@ -347,7 +360,7 @@ def normalize_snapshot(tracker_rows, queue_rows, event_doc, ingestion_state,
     }
     source_identity = {
         name: {key: value.get(key) for key in
-               ("observed_at", "last_success_at", "freshness_seconds", "error_code", "record_count")}
+               ("observed_at", "freshness_seconds", "error_code", "record_count")}
         for name, value in safe_sources.items()
     }
     content = {"schema_version": SCHEMA_VERSION, "as_of": _day(as_of),

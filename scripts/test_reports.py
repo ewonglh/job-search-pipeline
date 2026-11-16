@@ -180,7 +180,8 @@ with tempfile.TemporaryDirectory() as root:
     assert no_app_data["mature_cohorts"][0]["observed_numerator"]["oa"] is None
 
     empty = report_snapshot.normalize_snapshot(
-        [], [], {"schema": 1, "coverage": {"complete": False}, "events": []},
+        [], [], {"schema": 1, "coverage": {"complete": False,
+                    "observed_at": NOW.isoformat()}, "events": []},
         {"schema": 1, "scopes": {}}, sources, as_of=AS_OF, generated_at=NOW)
     empty_report = funnel_report.build_report(empty)
     assert empty_report["mature_cohorts"][0]["observed_numerator"]["oa"] == 0
@@ -237,7 +238,8 @@ with tempfile.TemporaryDirectory() as root:
     snapshots_path = os.path.join(root, "snapshots")
     os.makedirs(snapshots_path)
     for path, content in ((tracker_path, "[]\n"), (queue_path, "[]\n"),
-                          (ledger_path, '{"schema":1,"coverage":{"complete":false},"events":[]}\n'),
+                          (ledger_path, json.dumps({"schema": 1, "coverage": {
+                              "complete": False, "observed_at": NOW.isoformat()}, "events": []})),
                           (ingest_path, '{"schema":1,"scopes":{}}\n')):
         with open(path, "w", encoding="utf-8") as fh:
             fh.write(content)
@@ -246,6 +248,27 @@ with tempfile.TemporaryDirectory() as root:
         ingestion_path=ingest_path, snapshot_root=snapshots_path,
         as_of="2026-02-10", now=NOW)
     assert collected["sources"]["events"]["status"] == "fresh"
+    # Touching or recopied ledger bytes cannot refresh the source observation.
+    with open(ledger_path, "w", encoding="utf-8") as fh:
+        json.dump({"schema": 1, "coverage": {"complete": False,
+                   "observed_at": "2026-01-01T00:00:00Z"}, "events": []}, fh)
+    os.utime(ledger_path, (NOW.timestamp(), NOW.timestamp()))
+    touched = report_snapshot.collect_snapshot(
+        tracker_path=tracker_path, queue_path=queue_path, ledger_path=ledger_path,
+        ingestion_path=ingest_path, snapshot_root=snapshots_path,
+        as_of="2026-02-10", now=NOW)
+    assert touched["sources"]["events"]["status"] == "stale"
+    assert touched["sources"]["events"]["observed_at"] == "2026-01-01T00:00:00Z"
+    assert touched["sources"]["events"]["last_success_at"] == "2026-02-10T12:00:00Z"
+    with open(ledger_path, "w", encoding="utf-8") as fh:
+        json.dump({"schema": 1, "coverage": {}, "events": []}, fh)
+    unknown_observation = report_snapshot.collect_snapshot(
+        tracker_path=tracker_path, queue_path=queue_path, ledger_path=ledger_path,
+        ingestion_path=ingest_path, snapshot_root=snapshots_path,
+        as_of="2026-02-10", now=NOW)
+    assert unknown_observation["sources"]["events"]["observed_at"] is None
+    assert unknown_observation["sources"]["events"]["error_code"] == "observation_time_unknown"
+    assert unknown_observation["sources"]["events"]["status"] == "stale"
     os.remove(ledger_path)
     missing = report_snapshot.collect_snapshot(
         tracker_path=tracker_path, queue_path=queue_path, ledger_path=ledger_path,
@@ -268,6 +291,33 @@ with tempfile.TemporaryDirectory() as root:
         ingestion_path=ingest_path, snapshot_root=snapshots_path,
         as_of="2026-02-10", now=NOW)
     assert duplicate_keys["sources"]["events"]["status"] == "unavailable"
+
+# Full timestamp precision controls the strict-after test. Receipts are not
+# hiring outcomes; dropped malformed rows remain visible in both formats.
+precise_queue = [dict(queue[0], submitted_at="2026-01-01T12:00:00.900000Z")]
+edge_events = [
+    _event("before-fraction", aid_a, "offer", "2026-01-01T12:00:00.500000Z", "human"),
+    _event("receipt-only", aid_a, "acknowledgement", "2026-01-02T12:00:00Z", "automated"),
+    {"event_type": "offer", "application_id": aid_a,
+     "occurred_at": "2026-01-02T12:00:00Z", "verification": "verified"},
+]
+edge_snapshot = report_snapshot.normalize_snapshot(
+    [tracker[0]], precise_queue, {"schema": 1, "coverage": {
+        "observed_at": NOW.isoformat()}, "events": edge_events},
+    {"schema": 1, "scopes": {}}, sources, as_of=AS_OF, generated_at=NOW)
+edge_report = funnel_report.build_report(edge_snapshot)
+edge_cohort = edge_report["mature_cohorts"][0]
+assert edge_cohort["observed_numerator"]["offer"] == 0
+assert edge_cohort["observed_numerator"]["other"] == 0
+assert edge_cohort["response_timing_days"]["other"]["n"] == 0
+assert edge_report["identity_diagnostics"]["effective_event_diagnostics"]["events_missing_event_id"] == 1
+assert '"events_missing_event_id": 1' in funnel_report.render_text(edge_report)
+after_fraction = _event("after-fraction", aid_a, "offer", "2026-01-01T12:00:00.950000Z", "human")
+after_snapshot = report_snapshot.normalize_snapshot(
+    [tracker[0]], precise_queue, {"schema": 1, "coverage": {
+        "observed_at": NOW.isoformat()}, "events": [after_fraction]},
+    {"schema": 1, "scopes": {}}, sources, as_of=AS_OF, generated_at=NOW)
+assert funnel_report.build_report(after_snapshot)["mature_cohorts"][0]["observed_numerator"]["offer"] == 1
 
 
 with mock.patch("pipeline_health.main", return_value=0) as health_main:
