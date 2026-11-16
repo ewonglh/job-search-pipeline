@@ -22,11 +22,15 @@ Nothing leaves your machine without a human-approved merge.
 
 1. A script writes a work item, or a script opens a pull request.
 2. You read the diff.
-3. You merge.
+3. A review report may mark the PR ready, but only you merge it in GitHub.
 4. Only then does a queue item exist, and only then does anything get submitted.
 
 The scripts never submit an application on their own. The agent never merges its
-own work. The merge is the consent event.
+own work. `scripts/automerge.py` checks that a structured review covers the
+current PR head and its master, job description, profile, and artifact hashes.
+It only reports readiness. The owner merge remains the enqueue authorization
+and is recorded by GitHub; narrative approval for cover letters and unseen form
+answers stays an owner decision during the drain.
 
 ## Five lanes
 
@@ -55,6 +59,18 @@ description. Put each where it belongs.
 
 `SANITIZATION.md` explains why the identity rule is absolute rather than a
 default.
+
+## Review readiness
+
+From `scripts/`, `python3 automerge.py` reports whether a reviewed tailoring PR
+covers its current head, master resume, job description, profile, and artifact
+hashes. Missing or stale review evidence, duplicate identities, an owner skip,
+an active queue item, a submitted application, or an active application cap
+blocks readiness. The helper does not merge, enqueue, or make a model call. Only
+the owner's GitHub merge authorizes `queue.py enqueue`, which records the merge
+actor and time. Narrative approval remains an owner decision during the drain.
+The merger must match the configured resume repository owner. Offline `--prs`
+and `--tracker` inputs require `--dry-run` and cannot persist queue approval.
 
 ## What this does not do
 

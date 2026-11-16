@@ -157,8 +157,10 @@ kinds, `--cron`, `--tz`).
 
 ### What still does not automate
 
-The merge. OpenClaw opens the PR, you read the diff in GitHub, you merge. That is
-the gate, and no scheduler changes it.
+The merge. OpenClaw opens the PR, you read the diff in GitHub, and you merge it.
+`automerge.py` can report that a structured review covers the current PR head
+and provenance, but a model verdict cannot merge or enqueue it. Your GitHub
+merge remains the enqueue gate; narrative approval stays owner-only at drain.
 
 ---
 
