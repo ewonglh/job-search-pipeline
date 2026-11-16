@@ -183,6 +183,23 @@ def test_age_basis_unknown_status_and_current_status_sankey():
     assert "Applied" not in legacy["right"]
 
 
+def test_status_fallback_agrees_with_shared_reports():
+    for stage, status, expected in (
+        ("unknown", "applied", "Applied"),
+        ("Interview", "applied", "Interview"),
+        ("unknown", "unrecognized", "Unknown / unmatched"),
+    ):
+        snapshot = synthetic_snapshot()
+        app = snapshot["facts"]["applications"][0]
+        app["row"].update(stage=stage, status=status)
+        data = d.build_snapshot_data(snapshot)
+        card = next(row for row in data["applications"]
+                    if row["company"] == "Acme & Co")
+        assert card["status"] == expected
+        assert any(flow["from"] == "Board <One>" and flow["to"] == expected
+                   for flow in data["sankey"]["flows"])
+
+
 def test_stale_blocked_and_unknown_states_remain_visible():
     data = d.build_snapshot_data(synthetic_snapshot())
     today = data["today"]

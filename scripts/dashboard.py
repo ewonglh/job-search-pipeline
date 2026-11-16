@@ -760,10 +760,7 @@ def _display(value, fallback="Unknown", limit=240):
 
 
 def _status_for_row(row):
-    row = _as_dict(row)
-    raw = row.get("stage") or row.get("status")
-    status = s.canonical_status(raw) if raw else None
-    return status or "Unknown / unmatched"
+    return s.row_stage(_as_dict(row)) or "Unknown / unmatched"
 
 
 def _application_rows(snapshot):
