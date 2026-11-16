@@ -216,6 +216,9 @@ or a repository inside this checkout. Empty path overrides fail immediately.
 | `JOBSEARCH_TRACKER` | Tracker path override for `stages.py` | `$JOBSEARCH_REPO/applications.yaml` |
 | `JOBSEARCH_RECRUITMENT_LEDGER` | Private, revision-aware outcome ledger | `~/.local/state/job-search-pipeline/recruitment_events.json` |
 | `JOBSEARCH_SUMMARY_STATE` | Digest state | `~/.local/state/job-search-pipeline/summary_state.json` |
+| `JOBSEARCH_NOTIFY_STATE` | Private optional notification receipt state | `~/.local/state/job-search-pipeline/notify_state.json` |
+| `JOBSEARCH_OPENCLAW_BIN` | OpenClaw CLI executable for receipt history | `openclaw` |
+| `JOBSEARCH_NOTIFY_JOB_ID` | Native automation job id used for receipt matching | unset |
 | `JOBSEARCH_REVIEW_STATE` | Private review evidence | `~/.local/state/job-search-pipeline/review_state.json` |
 | `JOBSEARCH_ACTIONS_STATE` | Local action acknowledgements | `~/.local/state/job-search-pipeline/actions-state.json` |
 | `JOBSEARCH_RANKINGS` | Ranking output used by reports | `~/.local/state/job-search-pipeline/rankings.json` |
