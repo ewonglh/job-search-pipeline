@@ -159,6 +159,17 @@ rather than storing private values or merging distinct posting identities.
 
 `python3 projection.py read` prints the cached versioned snapshot and
 `python3 projection.py report compact` prints the shared compact status.
+`python3 projection.py report traces` shows the cached run drilldown. Explicit
+trace collection is separate: `python3 openclaw_traces.py collect --db
+"$JOBSEARCH_PROJECTION_DB"` reads the supported OpenClaw cron history and
+publishes only allowlisted run and tool metadata through the same projection.
+OpenClaw is version-gated to 2026.10.1 (`e178c39`). Optional trajectory bundles
+are read from `JOBSEARCH_OPENCLAW_TRAJECTORY_ROOT`; the importer keeps only tool
+IDs, names, timing and result categories. Raw prompts, tool arguments/output,
+run summaries and mail content are not stored. Application/artifact joins stay
+unknown unless the native source exposes explicit IDs. Native counters stay
+separated by provider and cron-run scope; no cost or overlapping totals are
+calculated.
 `python3 summary.py health --as-of YYYY-MM-DD` shows daily submission and queue
 health; `python3 summary.py funnel --as-of YYYY-MM-DD` shows mature 14/28-day
 outcome cohorts. Add `--json` for JSON. These read/report commands open the
@@ -169,7 +180,9 @@ local calendar.
 
 Tracker and queue sources do not declare when their facts were observed, so
 their observation time stays unknown and freshness is reported as stale. The
-ledger and ingestion sources use explicit observed/scan timestamps;
+ledger and ingestion sources use explicit observed/scan timestamps. Native
+cron history also lacks a separate observation timestamp, so its freshness
+remains unknown even after collection;
 filesystem modification times never refresh source age. Collection time,
 source observation time and snapshot generation time remain separate. A
 missing reply is not treated as a confirmed non-response.
@@ -275,6 +288,8 @@ or a repository inside this checkout. Empty path overrides fail immediately.
 | `JOBSEARCH_DASHBOARD_OUT` | Dashboard output | `~/.local/state/job-search-pipeline/dashboard/index.html` |
 | `JOBSEARCH_INGEST_STATE` | Private email-ingestion cursors | `~/.local/state/job-search-pipeline/email_ingest_state.json` |
 | `JOBSEARCH_PROJECTION_DB` | Private cached report projection | `~/.local/state/job-search-pipeline/projection/index.sqlite3` |
+| `JOBSEARCH_OPENCLAW_TRAJECTORY_ROOT` | Private root of OpenClaw trajectory exports imported by explicit trace collection | unset |
+| `JOBSEARCH_TRACE_RETENTION_RECORDS` | Maximum retained native run detail records | `500` (maximum `10000`) |
 | `JOBSEARCH_PREFLIGHT_STATE` | Optional content-free preflight records | `~/.local/state/job-search-pipeline/preflight_records.json` |
 | `JOBSEARCH_TIMEZONE` | Local day used by health and funnel reports | `Asia/Singapore` |
 | `JOBSEARCH_EMAIL_ADDRESS` | Mailbox's own address for outbound detection | unset |

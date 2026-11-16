@@ -63,6 +63,9 @@ review_state.json
 *-wal
 *-shm
 
+# Sensitive OpenClaw trajectory exports
+.openclaw/trajectory-exports/
+
 # Editor and OS noise
 .venv/
 .DS_Store

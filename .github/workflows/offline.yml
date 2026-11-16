@@ -48,4 +48,5 @@ jobs:
           python test_discover.py
           python test_email_ingest.py
           python test_notify_delivery.py
+          python test_openclaw_traces.py
           node test_run_email_ingest.mjs

@@ -27,7 +27,7 @@ MAX_BATCH_SIZE = 1000
 MAX_SOURCE_RECORDS = 200000
 SNAPSHOT_HISTORY = 8
 SOURCES = ("tracker", "queue", "events", "ingestion", "snapshots",
-           "reviews", "preflight")
+           "reviews", "preflight", "traces")
 HASH40_RE = re.compile(r"^[0-9a-f]{40}$")
 HASH64_RE = re.compile(r"^[0-9a-f]{64}$")
 CODE_RE = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,63}$")
@@ -58,7 +58,7 @@ QUEUE_ENUMS = {
     "attempt_state": {"authorized", "submitted", "outcome_unknown", "failed"},
 }
 SOURCE_FRESHNESS = dict(report_snapshot.SOURCE_FRESHNESS_SECONDS)
-SOURCE_FRESHNESS.update({"reviews": 86400, "preflight": 86400})
+SOURCE_FRESHNESS.update({"reviews": 86400, "preflight": 86400, "traces": 3600})
 
 
 class ProjectionError(Exception):
@@ -966,6 +966,16 @@ def _make_snapshot(connection, *, as_of, generated_at, snapshot_root):
         review_rows, preflight_rows,
         review_meta[0] if review_meta else 0,
         preflight_meta[0] if preflight_meta else 0)
+    trace_records = _read_active_records(connection, "traces")
+    trace_collection = next((item for item in trace_records
+                             if item.get("kind") == "collection"), None)
+    trace_runs = [item for item in trace_records if item.get("kind") == "run"]
+    snapshot["facts"]["traces"] = {
+        "collection": trace_collection,
+        "runs": trace_runs,
+        "cost_status": "unavailable",
+        "usage_aggregation": "not_computed_overlapping_scopes",
+    }
     snapshot["sources"] = sources
     source_identity = {name: {key: value.get(key) for key in
                        ("observed_at", "freshness_seconds", "error_code", "record_count",
@@ -1015,7 +1025,7 @@ def _input_paths(repo=None, tracker=None, queue=None, ledger=None, ingestion=Non
     return paths
 
 
-def _collect_inputs(paths):
+def _collect_inputs(paths, trace_data=None):
     inputs = {
         "tracker": _read_tracker(paths["tracker"]),
         "queue": _read_queue(paths["queue"]),
@@ -1025,13 +1035,17 @@ def _collect_inputs(paths):
         "reviews": _read_reviews(paths["reviews"]),
         "preflight": _read_preflight(paths["preflight"]),
     }
+    if trace_data is not None:
+        import openclaw_traces
+        inputs["traces"] = openclaw_traces.sanitize_collection(trace_data)
     return {name: _source_payload(name, value) for name, value in inputs.items()}
 
 
 def collect_projection(*, db_path=None, repo=None, tracker=None, queue=None, ledger=None,
                        ingestion=None, snapshot_root=None, review_state=None,
                        preflight_state=None, as_of=None, now=None,
-                       batch_size=DEFAULT_BATCH_SIZE, interrupt_after_batches=None):
+                       batch_size=DEFAULT_BATCH_SIZE, interrupt_after_batches=None,
+                       trace_data=None):
     """Collect local sources and atomically publish the newly assembled view.
 
     ``interrupt_after_batches`` is an in-process test seam. A return with
@@ -1046,7 +1060,7 @@ def collect_projection(*, db_path=None, repo=None, tracker=None, queue=None, led
     generated_at = _now(now)
     paths = _input_paths(repo, tracker, queue, ledger, ingestion, snapshot_root,
                          review_state, preflight_state)
-    inputs = _collect_inputs(paths)
+    inputs = _collect_inputs(paths, trace_data=trace_data)
     connection = _connect_writer(db_path or _db_default())
     try:
         progress_row = connection.execute("SELECT value FROM meta WHERE key='collection_progress'").fetchone()
@@ -1059,6 +1073,11 @@ def collect_projection(*, db_path=None, repo=None, tracker=None, queue=None, led
         connection.commit()
         batches_done = 0
         for source in SOURCES:
+            if source == "traces" and trace_data is None:
+                progress["sources"][source] = {"status": "not_requested"}
+                _put_progress(connection, progress)
+                connection.commit()
+                continue
             value = inputs[source]
             done, used = _replace_source(connection, source, value, generated_at, batch_size,
                                          batch_limit=interrupt_after_batches,
@@ -1161,12 +1180,55 @@ def format_compact(snapshot):
             review.get("unique_artifact_heads", 0), model.get("accepted", 0),
             model.get("not_accepted", 0), model.get("unknown", 0),
             owner.get("accepted", 0), owner.get("not_accepted", 0), owner.get("unknown", 0)),
+        "Trace runs: {} · attention: {} · cost unavailable".format(
+            len(facts.get("traces", {}).get("runs", [])),
+            sum(1 for item in facts.get("traces", {}).get("runs", [])
+                if item.get("attention_codes"))),
         "Sources: " + health]
     collection = snapshot.get("collection", {})
     if collection.get("status") == "in_progress":
         unfinished = [name for name, state in collection.get("sources", {}).items()
                       if state.get("status") == "incomplete"]
         lines.append("Collection: in progress" + (" (" + ", ".join(unfinished) + ")" if unfinished else ""))
+    return "\n".join(lines)
+
+
+def build_trace_report(snapshot):
+    """Return the allowlisted run drilldown from one cached snapshot."""
+    source = snapshot.get("sources", {}).get("traces", {})
+    facts = snapshot.get("facts", {}).get("traces", {})
+    runs = facts.get("runs", [])
+    return {
+        "schema_version": 1,
+        "snapshot_id": snapshot.get("snapshot_id"),
+        "source": source,
+        "collection": facts.get("collection"),
+        "runs": runs,
+        "cost_status": "unavailable",
+        "usage_aggregation": "not_computed_overlapping_scopes",
+    }
+
+
+def format_traces(snapshot):
+    report = build_trace_report(snapshot)
+    lines = ["Native runs: {} · source {} · cost unavailable".format(
+        len(report["runs"]), report.get("source", {}).get("status", "unavailable"))]
+    for run in report["runs"]:
+        codes = ", ".join(run.get("attention_codes", [])) or "none"
+        tools = run.get("tool_events", [])
+        lines.append("{} / {}: execution={} completion={} business={} application_join={} artifact_join={} delivery={} tools={} trace={} attention={}".format(
+            run.get("job_id") or "unknown", run.get("run_id") or "unknown",
+            run.get("execution_result", "unknown"), run.get("completion_status", "unknown"),
+            run.get("business_result", "unknown"),
+            run.get("application_join_status", "unknown"), run.get("artifact_join_status", "unknown"),
+            run.get("delivery_status", "unknown"), len(tools),
+            run.get("tool_trace_status", "missing"), codes))
+        for tool in tools:
+            lines.append("  {} {} start={} end={} duration_ms={} result={} retry={}".format(
+                tool.get("tool_call_id") or "unknown", tool.get("name") or "unknown",
+                tool.get("started_at") or "unknown", tool.get("finished_at") or "unknown",
+                tool.get("duration_ms") if tool.get("duration_ms") is not None else "unknown",
+                tool.get("result", "unknown"), tool.get("retry_context", "unknown")))
     return "\n".join(lines)
 
 
@@ -1189,7 +1251,7 @@ def _parser():
     read.add_argument("--db", default=None)
     read.add_argument("--json", action="store_true")
     report = commands.add_parser("report", help="render a cached report (read-only)")
-    report.add_argument("kind", choices=("compact", "health", "funnel"))
+    report.add_argument("kind", choices=("compact", "health", "funnel", "traces"))
     report.add_argument("--db", default=None)
     report.add_argument("--as-of", default=None)
     report.add_argument("--timezone", default=os.environ.get("JOBSEARCH_TIMEZONE", "Asia/Singapore"))
@@ -1227,6 +1289,11 @@ def main(argv=None):
                                   "text": format_compact(snapshot)}, indent=2))
             else:
                 print(format_compact(snapshot))
+            return 0
+        if args.kind == "traces":
+            result = build_trace_report(snapshot)
+            print(json.dumps(result, indent=2, ensure_ascii=False)
+                  if args.json else format_traces(snapshot))
             return 0
         if args.kind == "health":
             import pipeline_health
