@@ -30,6 +30,9 @@ jobs:
           python test_tailor.py
           python test_stages.py
           python test_dashboard.py
+          python test_application_identity.py
+          python test_recruitment_evidence.py
+          python test_outcomes.py
           python test_config.py
           python test_automerge.py
           python test_review_contract.py

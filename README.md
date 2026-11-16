@@ -37,7 +37,7 @@ answers stays an owner decision during the drain.
 | Rank | `rank.py` | yes | Deterministic zero-token scoring against `rubric.yaml`, vetoes hostile postings |
 | Tailor | `tailor.py` | no, emits work items | Select untracked postings, fetch each JD, resolve the real apply URL |
 | Drain | `queue.py` | no | Turn merged `app/*` PRs into a submit queue, oldest first |
-| Track | `stages.py` `summary.py` `dashboard.py` | mostly | Stage machine, digests, local board |
+| Track | `application_identity.py` `recruitment_evidence.py` `outcomes.py` `stages.py` `summary.py` `dashboard.py` | mostly | Canonical joins, private evidence ledger, verified stage machine, digests, local board |
 
 Three of these are pure mechanics. Tailoring and submission need judgement, so
 those are where an agent earns its place or you spend your own time.
@@ -134,6 +134,7 @@ or a repository inside this checkout. Empty path overrides fail immediately.
 | `JOBSEARCH_WORK` | Private tailoring work items | `~/.local/state/job-search-pipeline/work` |
 | `JOBSEARCH_GATES` | Employer gate configuration | `scripts/gates.yaml` |
 | `JOBSEARCH_TRACKER` | Tracker path override for `stages.py` | `$JOBSEARCH_REPO/applications.yaml` |
+| `JOBSEARCH_RECRUITMENT_LEDGER` | Private, revision-aware outcome ledger | `~/.local/state/job-search-pipeline/recruitment_events.json` |
 | `JOBSEARCH_SUMMARY_STATE` | Digest state | `~/.local/state/job-search-pipeline/summary_state.json` |
 | `JOBSEARCH_REVIEW_STATE` | Private review evidence | `~/.local/state/job-search-pipeline/review_state.json` |
 | `JOBSEARCH_ACTIONS_STATE` | Local action acknowledgements | `~/.local/state/job-search-pipeline/actions-state.json` |
@@ -141,9 +142,12 @@ or a repository inside this checkout. Empty path overrides fail immediately.
 | `JOBSEARCH_DASHBOARD_OUT` | Dashboard output | `~/.local/state/job-search-pipeline/dashboard/index.html` |
 
 `gh` must be authenticated once (`gh auth login`). Discovery, rank, and queue
-read your repository through it. Keep queue, review, work, skip, deadline, and
-draft state outside Git. `JOBSEARCH_REPO` is shared by discovery, rank,
-tailoring, queue, stages, summary, dashboard, and the readiness helper.
+read your repository through it. Keep queue, review, work, skip, deadline,
+outcome, and draft state outside Git. `JOBSEARCH_REPO` is shared by discovery, rank,
+tailoring, queue, stages, summary, dashboard, and the readiness helper. Import
+normalized message JSON with `recruitment_evidence.py`, review corrections with
+`outcomes.py`, then use `stages.py apply-evidence` to propose evidence-backed
+stage changes. Mailbox access and notifications are outside these commands.
 
 ## Setup tracks
 
