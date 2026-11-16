@@ -5,83 +5,105 @@ description: Enqueue applications from merged tailoring PRs and drain the queue 
 
 # Queue and drain lane
 
-## The core rule
+## Approval and identity
 
-**A merged `app/*` tailoring PR is the enqueue event.** One queue item per merged
-PR. The merge **is** the per-CV approval: the item records `approved_at` from the
-PR's `mergedAt` and `approved_by` from `mergedBy`. No separate go-ahead is asked
-for that CV.
+A merged `app/*` tailoring PR is the enqueue event and the per-CV approval. The
+queue records `approved_at` and `approved_by` from the merge. It does not approve
+unseen form answers or override owner skips, caps, or unresolved eligibility.
 
-This is two operations that share one queue file:
+Enqueue is idempotent by PR and posting identity:
 
-- **enqueue**: list merged `app/*` PRs, keep only real tailoring PRs (their diff
-  adds or updates `variants/**/resume.tex`), skip ones already queued, append.
-- **drain**: take one queued item, fill the employer's form, record the outcome.
+```bash
+python3 scripts/queue.py enqueue --repo "$JOBSEARCH_REPO"
+python3 scripts/queue.py next --json
+```
 
-## Inputs
+Queue state defaults to `~/.local/state/job-search-pipeline/queue.yaml` and
+must stay outside the checkout. `JOBSEARCH_QUEUE` selects another path.
 
-- Merged PR list from the tracker repo (needs `gh`, authenticated).
-- `queue.yaml`, the queue itself.
-- `repo/data/profile.yaml` for standing form answers.
-- `profile.local.yaml` for PII, read only when a form has the field, never copied
-  anywhere else.
-- An offer letter or CV variant path for upload.
+## Durable claim gate
 
-## Outputs
+Before any external form action, claim the queued item:
 
-- New items in `queue.yaml` with `status: queued`.
-- On a drain: `status: applied` plus the submission record, or `status: in_progress`
-  with a `notes` blocker, or `status: failed` with the reason.
+```bash
+python3 scripts/queue.py claim --pr PR_NUMBER --repo "$JOBSEARCH_REPO" --json
+```
 
-## Procedure: enqueue
+Claim reads the unique matching posting from `data/postings.json`, the selected
+profile from `data/profile.yaml` (or the exact path passed with `--profile`),
+the current `applications.yaml`, and owner skip/cap files. It fetches a fresh JD
+from that posting URL, guards it, and runs the shared eligibility evaluator.
+Only `eligible` can claim. Unknown requirements, conflicts, missing profile
+facts, a duplicate identity, an active owner cap, or an owner skip stop before
+an attempt is recorded. `--force` and review notes do not override these gates.
+The tracker, owner skip list, and cap file must be readable; an explicit `[]`
+records a verified empty list. Missing or empty-unmarked owner state blocks claim.
 
-1. List merged `app/*` PRs.
-2. Keep only PRs that touch `variants/**/resume.tex`.
-3. Skip a PR whose posting link is already recorded in the tracker **or** whose
-   link already has a queue item.
-4. Append one item per remaining PR, stamping the approval from the merge.
+Success returns an `attempt_id`. The command writes `status: in_progress`,
+`attempt_id`, `attempt_state: authorized`, and `submit_gate: durable` atomically
+and flushes the state before returning success. The returned ID is required to
+record the outcome. A failed claim has no form attempt and must not proceed to
+an external form.
 
-## Procedure: drain
+## Drain and record
 
-1. Take one `queued` item. Stamp `claimed_at`.
-2. Open the employer's apply URL. Prefer the company site or ATS; LinkedIn Easy
-   Apply is the fallback when no company listing exists.
-3. Fill every field from `profile.yaml`. A field the profile does not cover is a
-   stop, not a guess.
-4. Upload the variant PDF.
-5. Record the outcome. On a submit, the item becomes `applied` and the tracker row
-   is written.
+After a successful claim, the person or agent handles the employer site. Use the
+selected profile for known answers. Stop at an ambiguous required field,
+captcha, uncovered availability or salary question, work-authorisation
+judgement, or uncertain employer cap. The queue code does not open or operate
+forms.
 
-## Approval gates
+After the employer confirms submission, record the exact attempt and observed
+confirmation:
 
-The drain never guesses. Stop and report, leaving the item `in_progress` with a
-note, at any of:
+```bash
+python3 scripts/queue.py status --pr PR_NUMBER --status submitted \
+  --attempt-id ATTEMPT_ID --date YYYY-MM-DD --sent "exact submission summary" \
+  --confirmation-evidence "employer portal confirmation observed" \
+  --route "company ATS"
+```
 
-- an ambiguous required field
-- a captcha
-- an availability or salary question the profile does not cover
-- a work-authorisation requirement needing a judgement call
-- an unverifiable employer cap
+The queue durably records `status: submitted`, the date, sent summary,
+confirmation evidence, and `tracker_sync: pending` before tracker I/O. A tracker
+failure leaves the application submitted with `tracker_sync: error`; repair
+bookkeeping with:
 
-Nothing is submitted without a merged variant PR and nothing is submitted without
-being recorded in the tracker.
+```bash
+python3 scripts/queue.py sync-tracker --pr PR_NUMBER --repo "$JOBSEARCH_REPO"
+```
 
-## Idempotency
+Tracker sync only updates `applications.yaml` bookkeeping. It does not change
+submission facts or authorize another form attempt. A submission may be
+reconciled as submitted with the same terminal behavior.
 
-The enqueue pass must be safe to run every 30 minutes: identical PR list in, no
-new items out.
+## Interrupted attempts and reconciliation
 
-Before submitting, re-read the tracker and skip an item whose company and role
-already appear as applied or beyond. This is what stops a second submission of a
-role you already applied to.
+An old or incomplete claim becomes `outcome_unknown`; it is never released
+automatically. Run:
 
-A claimed item older than a few hours is **abandoned**, not stuck. Release it back
-to `queued` with `queue.py release-stale` rather than leaving the drain blocked
-forever. A crash during a browser pass leaves exactly this state.
+```bash
+python3 scripts/queue.py release-stale
+```
+
+To retry, inspect concrete evidence that submission did not occur, then record
+the source and the specific observation. For example:
+
+```bash
+python3 scripts/queue.py reconcile --pr PR_NUMBER --attempt-id ATTEMPT_ID \
+  --result retry --evidence-source "employer portal application history" \
+  --evidence-observation "history shows no submission for this posting; it remains a draft"
+```
+
+Generic notes or `--force` cannot reopen a submitted or unresolved attempt.
+Evidence that confirms submission uses `--result submitted` with `--date`,
+`--sent`, and `--confirmation-evidence`; that result is terminal. Reconciliation
+keeps an attempt history in the private queue state.
 
 ## Stop conditions
 
-- `gh` unauthenticated: stop, do not fall back to an anonymous API call.
-- The apply page does not load or redirects to a login: stop and report the URL.
-- Two tracker rows match the same company plus role: report the ambiguity instead
-  of picking one.
+- `gh` is unauthenticated or current tracker data is unavailable.
+- The posting URL is not unique, the apply page fails, or it redirects to login.
+- Eligibility is unknown or conflicting, or current owner skip/cap state blocks
+  the posting.
+- Two tracker rows share a canonical application identity.
+- A claim was interrupted and concrete evidence cannot establish its outcome.

@@ -263,6 +263,8 @@ Then run these. Each is independent and cheap:
 ```bash
 cd scripts
 python3 test_queue.py
+python3 test_queue_eligibility.py
+python3 test_queue_recovery.py
 python3 test_tailor.py
 python3 test_cv_checks.py
 python3 test_tailor_preflight.py
@@ -274,10 +276,10 @@ python3 stages.py list
 python3 tailor.py --list --force
 ```
 
-The four required offline suites print `all assertions passed`; `test_cv_checks.py`
-and `test_tailor_preflight.py` cover the new tailoring checks. `test_config.py`
-checks external paths and invalid setup. The listing commands read only the
-synthetic external repo or runtime paths.
+The four required queue, tailor, stages, and dashboard suites print `all
+assertions passed`. `test_queue_eligibility.py` and `test_queue_recovery.py`
+cover the durable claim, recovery, and tracker-sync boundary. The listing
+commands read only the synthetic external repo or runtime paths.
 
 ### Live repository access
 

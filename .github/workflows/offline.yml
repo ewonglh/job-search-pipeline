@@ -27,6 +27,8 @@ jobs:
         working-directory: scripts
         run: |
           python test_queue.py
+          python test_queue_eligibility.py
+          python test_queue_recovery.py
           python test_tailor.py
           python test_cv_checks.py
           python test_tailor_preflight.py
