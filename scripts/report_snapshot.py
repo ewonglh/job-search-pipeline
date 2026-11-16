@@ -143,8 +143,12 @@ def _read_yaml(path, parser, name, now):
         rows = parser(raw)
         if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
             raise ValueError("invalid rows")
-        observed = datetime.fromtimestamp(os.path.getmtime(path), timezone.utc).isoformat()
-        return rows, _source(name, "fresh", now, observed_at=observed, count=len(rows))
+        if name == "tracker" and not rows and not any(
+                line.strip() == "[]" for line in raw.splitlines()):
+            raise ValueError("tracker is not an explicit empty list")
+        # File modification time says when bytes changed, not when the facts
+        # were observed. These sources have no observation-time contract.
+        return rows, _source(name, "fresh", now, observed_at=None, count=len(rows))
     except FileNotFoundError:
         return [], _source(name, "unavailable", now, error_code="source_missing")
     except (OSError, UnicodeError, ValueError, TypeError):
