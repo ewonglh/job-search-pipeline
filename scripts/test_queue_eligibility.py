@@ -184,17 +184,20 @@ with tempfile.TemporaryDirectory() as directory:
                      "  link: https://fixture.invalid/jobs/other\n  pr_number: 99\n")
     with open(os.path.join(case["repo"], "data", "postings.json"), "w", encoding="utf-8") as fh:
         json.dump([case["posting"], dict(case["posting"], link="https://fixture.invalid/jobs/13")], fh)
-    prs_path = os.path.join(directory, "new-pr.json")
-    with open(prs_path, "w", encoding="utf-8") as fh:
-        json.dump([{"number": 13, "headRefName": "app/fixture-co-swe",
+    prs = [{"number": 13, "headRefName": "app/fixture-co-swe",
                     "title": "app(fixture-co): tailored resume - Software Engineering Intern",
                     "body": "Posting: https://fixture.invalid/jobs/13",
                     "url": "https://github.com/example/resume/pull/13",
                     "mergedAt": "2026-01-01T00:00:00Z",
-                    "files": [{"path": "variants/fixture-co-swe/resume.tex"}]}], fh)
+                    "mergedBy": {"login": "example"},
+                    "files": [{"path": "variants/fixture-co-swe/resume.tex"}]}]
     def fetch_then_enqueue(_posting):
-        assert q.main(["enqueue", "--queue", case["queue"], "--repo", case["repo"],
-                       "--prs", prs_path, "--tracker", os.path.join(case["repo"], "applications.yaml")]) == 0
+        with open(os.path.join(case["repo"], "applications.yaml"), encoding="utf-8") as fh:
+            tracker = fh.read()
+        with mock.patch.object(q, "gh_merged_prs", return_value=prs), \
+                mock.patch.object(q, "read_main_tracker", return_value=tracker), \
+                mock.patch.object(q, "GH_REPO", "example/resume"):
+            assert q.main(["enqueue", "--queue", case["queue"], "--repo", case["repo"]]) == 0
         return {"jd_text": JD_FIT}
     with mock.patch.object(tailor, "fetch_jd", side_effect=fetch_then_enqueue):
         assert run_claim(case) == 2

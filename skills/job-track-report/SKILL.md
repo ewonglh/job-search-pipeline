@@ -52,6 +52,9 @@ Two read-mostly jobs over the same state:
 5. Full current message bodies, stable message IDs and exact dates are required.
    Quoted history, header-only hits and employer-only matches stay unresolved.
    Candidate-authored messages are excluded, and unknown origin stays unknown.
+   Imported origin flags and unsigned watcher envelopes cannot verify human
+   authorship or override classification of the current body. Confirm authorship
+   with explicit evidence through `outcomes.py adjudicate --origin human`.
 6. Invitations do not imply assessment/interview completion or success. An
    offer does not imply acceptance. Never move a row backwards without
    `--force`, and never mark `Rejected` without dated evidence.

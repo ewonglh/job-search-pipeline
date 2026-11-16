@@ -59,7 +59,7 @@ available, ``approved_at`` / ``approved_by`` from the merge, durable
 ``submitted_at`` / ``sent`` / ``confirmation_evidence`` after confirmation.
 
 Stdlib only; no secrets. The live ``enqueue`` path needs ``gh`` and a resume
-clone; ``--prs`` / ``--tracker`` give a fully offline path for tests.
+clone; ``--prs`` / ``--tracker`` provide non-writing offline previews only.
 
 Usage:
   queue.py enqueue [--repo DIR] [--queue FILE] [--dry-run] [--json] [--limit N]
@@ -1435,6 +1435,9 @@ def _read_claim_validation_inputs(args, item, queue_items, posting):
 
 # ---------------------------------------------------------------- cli actions
 def cmd_enqueue(args, log):
+    if (args.prs or args.tracker) and not args.dry_run:
+        log("queue: offline inputs require --dry-run; only a GitHub-observed owner merge authorizes enqueue")
+        return 2
     try:
         with queue_lock(args.queue):
             initial_items = load_queue(args.queue)
@@ -1455,6 +1458,13 @@ def cmd_enqueue(args, log):
         prs = gh_merged_prs(log)
         if prs is None:
             return 1
+        if not isinstance(prs, list) or any(not isinstance(pr, dict) for pr in prs):
+            log("queue: merged PR response is malformed")
+            return 1
+        owner = GH_REPO.split("/", 1)[0].casefold()
+        prs = [pr for pr in prs if norm_ts(pr.get("mergedAt"))
+               and isinstance(pr.get("mergedBy"), dict)
+               and str(pr["mergedBy"].get("login") or "").casefold() == owner]
 
     tracker_text = None
     if args.tracker:
@@ -2195,8 +2205,8 @@ def build_parser():
     e.add_argument("--limit", type=int, default=0, help="add at most N items (0 = all)")
     e.add_argument("--include-submitted", action="store_true",
                    help="also enqueue apps already recorded as submitted")
-    e.add_argument("--prs", help="offline: JSON list of PRs (gh shape)")
-    e.add_argument("--tracker", help="offline: applications.yaml text for candidates")
+    e.add_argument("--prs", help="preview only, requires --dry-run: JSON list of PRs (gh shape)")
+    e.add_argument("--tracker", help="preview only, requires --dry-run: applications.yaml text")
 
     l = sub.add_parser("list", help="list queue items (oldest first)")
     add_common(l)
