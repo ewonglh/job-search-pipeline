@@ -77,13 +77,15 @@ def _event(source, event_type, *, seq, session_id="session-1", data=None,
     return value
 
 
-def _write_export(root, name, events, *, session_id="session-1", version=1):
+def _write_export(root, name, events, *, session_id="session-1", version=1, warnings=None):
     directory = root / name
     directory.mkdir(parents=True)
     manifest = {"traceSchema": "openclaw-trajectory", "schemaVersion": version,
                 "traceId": session_id, "sessionId": session_id,
                 "sessionKey": "agent:main:test",
                 "generatedAt": "2026-11-16T08:00:00Z", "eventCount": len(events)}
+    if warnings is not None:
+        manifest["warnings"] = warnings
     (directory / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
     (directory / "events.jsonl").write_text(
         "".join(json.dumps(item, sort_keys=True) + "\n" for item in events), encoding="utf-8")
@@ -193,6 +195,48 @@ with tempfile.TemporaryDirectory(prefix="synthetic-openclaw-traces-") as temp:
     assert "business_result_unknown" in runs["run-5"]["attention_codes"]
     exported = json.dumps(records, sort_keys=True)
     assert all(canary not in exported for canary in CANARIES)
+
+    # Exporter warnings survive aliases as a partial-trace flag, never as raw
+    # warning messages, row details, or other private payloads.
+    warning_exports = root / "warnings"
+    warning_exports.mkdir()
+    _write_export(warning_exports, "clean-alias", [])
+    _write_export(warning_exports, "warned", [], warnings=[{
+        "code": "invalid-runtime-json", "message": CANARIES[0], "rows": [2]}])
+    warned = openclaw_traces.collect_native(
+        FakeRunner([success]), trajectory_root=warning_exports)
+    warned_run = next(row for row in warned["records"] if row["kind"] == "run")
+    assert warned_run["tool_trace_status"] == "partial"
+    assert "tool_trace_export_warning" in warned_run["attention_codes"]
+    assert CANARIES[0] not in json.dumps(warned)
+
+    # Exact unique session keys join runs missing sessionId. Reused keys and
+    # conflicting stronger session IDs stay unknown rather than guessing.
+    key_run = _run("run-key", "job-key", "ok", ts=1794815940000,
+                   sessionKey="agent:main:test")
+    for label, key_rows, expected in (
+        ("unique", [key_run], "complete"),
+        ("ambiguous", [key_run, dict(key_run, runId="run-key-other")], "partial"),
+        ("conflicting", [dict(key_run, sessionId="session-other")], "missing"),
+    ):
+        key_result = openclaw_traces.collect_native(
+            FakeRunner(key_rows), trajectory_root=exports)
+        key_runs = [row for row in key_result["records"] if row["kind"] == "run"]
+        assert all(row["tool_trace_status"] == expected for row in key_runs), label
+        if label == "unique":
+            assert key_result["records"][0]["unjoined_tool_event_count"] == 0
+            assert len(key_runs[0]["tool_events"]) == 1
+        else:
+            assert all(not row["tool_events"] for row in key_runs), label
+
+    reused_exports = root / "reused-key"
+    reused_exports.mkdir()
+    _write_export(reused_exports, "first", trajectory_events)
+    _write_export(reused_exports, "second", [], session_id="session-other")
+    reused = openclaw_traces.collect_native(FakeRunner([key_run]), trajectory_root=reused_exports)
+    reused_run = next(row for row in reused["records"] if row["kind"] == "run")
+    assert reused_run["tool_trace_status"] == "partial"
+    assert not reused_run["tool_events"]
 
     # Transcript tool results carry their fields inside data.message, while
     # content remains private. An event without a call ID becomes a visible gap.
@@ -368,6 +412,11 @@ with tempfile.TemporaryDirectory(prefix="synthetic-openclaw-traces-") as temp:
     report = projection.build_trace_report(snapshot)
     report_text = json.dumps(report, sort_keys=True)
     assert all(canary not in report_text for canary in CANARIES)
+    warned_snapshot = projection.collect_projection(
+        db_path=str(root / "warned-index.sqlite3"), as_of="2026-11-16", now=NOW,
+        trace_data=warned, **paths)
+    assert warned_snapshot["published"] is True
+    assert CANARIES[0].encode() not in (root / "warned-index.sqlite3").read_bytes()
     assert all(canary not in b"".join(path.read_bytes() for path in db_path.parent.glob("index.sqlite3*"))
                for canary in (value.encode() for value in CANARIES))
     failed_refresh = projection.collect_projection(

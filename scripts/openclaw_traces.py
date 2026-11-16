@@ -465,6 +465,9 @@ def _parse_export_directory(directory, *, deadline=None):
     if trace_id != session_id or _iso_timestamp(manifest.get("generatedAt")) is None:
         raise TraceError("trajectory_export_invalid")
     declared_count = _integer(manifest.get("eventCount"), optional=False, maximum=EVENT_COUNT_MAX)
+    warnings = manifest.get("warnings", [])
+    if not isinstance(warnings, list):
+        raise TraceError("trajectory_export_invalid")
     parsed_line_count = 0
     seen_native_ids = {}
     seen_tool_events = {}
@@ -540,6 +543,7 @@ def _parse_export_directory(directory, *, deadline=None):
     return {
         "session_id": session_id,
         "session_key": _bounded_id(manifest.get("sessionKey")),
+        "has_warnings": bool(warnings),
         "events": list(seen_tool_events.values()),
         "unidentified_tool_event_ids": {
             event_id for event_id, event in seen_native_ids.items()
@@ -644,10 +648,14 @@ def _read_exports(root, *, deadline=None):
             raise TraceError("trajectory_event_limit")
         session = sessions.setdefault(export["session_id"], {
             "session_key": export["session_key"], "events": {},
+            "has_warnings": False,
             "unidentified_tool_event_ids": set(),
             "event_count": 0, "export_count": 0, "generated_at": export["generated_at"],
         })
         session["export_count"] += 1
+        session["has_warnings"] |= export["has_warnings"]
+        if session["session_key"] != export["session_key"]:
+            raise TraceError("trajectory_export_invalid")
         session["event_count"] = max(session["event_count"], export["event_count"])
         if export["generated_at"] and (not session["generated_at"]
                                         or export["generated_at"] > session["generated_at"]):
@@ -664,9 +672,33 @@ def _read_exports(root, *, deadline=None):
 def _attach_tool_events(runs, sessions):
     by_run_id = {run["run_id"]: run for run in runs if run["run_id"]}
     by_session = {}
+    by_key = {}
     for run in runs:
         if run["session_id"]:
             by_session.setdefault(run["session_id"], []).append(run)
+        if run["session_key"]:
+            by_key.setdefault(run["session_key"], []).append(run)
+    exports_by_key = {}
+    for session_id, session in sessions.items():
+        if session["session_key"]:
+            exports_by_key.setdefault(session["session_key"], []).append(session_id)
+    # Session keys can be reused across runs and exports. Use them only when
+    # both sides are unique and the run has no stronger session identifier.
+    matched_sessions = {id(run): set() for run in runs}
+    candidates_by_session = {}
+    for session_id, session in sessions.items():
+        candidates = by_session.get(session_id, [])
+        if not candidates and session["session_key"]:
+            keyed = by_key.get(session["session_key"], [])
+            candidates = [run for run in keyed if not run["session_id"]]
+            if (len(keyed) != 1
+                    or len(exports_by_key[session["session_key"]]) != 1):
+                for run in candidates:
+                    run["attention_codes"].append("session_join_ambiguous")
+                candidates = []
+        candidates_by_session[session_id] = candidates
+        for run in candidates:
+            matched_sessions[id(run)].add(session_id)
     unjoined = 0
     ambiguous_sessions = set()
     unknown_join_sessions = set()
@@ -676,16 +708,18 @@ def _attach_tool_events(runs, sessions):
         if unidentified_count:
             unjoined += unidentified_count
             unknown_join_sessions.add(session_id)
-            for candidate in by_session.get(session_id, []):
+            for candidate in candidates_by_session[session_id]:
                 candidate["attention_codes"].append("tool_join_unknown")
     for session_id, session in sessions.items():
-        candidates = by_session.get(session_id, [])
+        candidates = candidates_by_session[session_id]
         for event in session["events"].values():
             target = None
             if event["run_id"]:
                 target = by_run_id.get(event["run_id"])
-                if (target and target["session_id"] and event["session_id"]
-                        and target["session_id"] != event["session_id"]):
+                if target and ((target["session_id"] and event["session_id"]
+                                and target["session_id"] != event["session_id"])
+                               or (target["session_key"] and session["session_key"]
+                                   and target["session_key"] != session["session_key"])):
                     unknown_join_runs.add(target["run_id"])
                     target["attention_codes"].append("tool_join_unknown")
                     target = None
@@ -703,6 +737,7 @@ def _attach_tool_events(runs, sessions):
             if target is None:
                 unjoined += 1
                 continue
+            matched_sessions[id(target)].add(session_id)
             target["tool_events"].append(event)
     for run in runs:
         calls = {}
@@ -746,15 +781,20 @@ def _attach_tool_events(runs, sessions):
                 })
                 missing_result = True
         run["tool_events"] = sorted(tool_events, key=lambda item: (item["started_at"] or "", item["tool_call_id"]))
+        joined = matched_sessions[id(run)]
+        warned = any(sessions[key]["has_warnings"] for key in joined)
+        if warned:
+            run["attention_codes"].append("tool_trace_export_warning")
         if run["run_id"] in unknown_join_runs:
             run["tool_trace_status"] = "partial"
-        elif run["session_id"] in ambiguous_sessions:
+        elif (run["session_id"] in ambiguous_sessions
+              or "session_join_ambiguous" in run["attention_codes"]):
             run["tool_trace_status"] = "partial"
             run["attention_codes"].append("session_join_ambiguous")
-        elif run["session_id"] in sessions:
-            incomplete_join = run["session_id"] in unknown_join_sessions
-            run["tool_trace_status"] = "partial" if missing_result or incomplete_join else "complete"
-            if missing_result:
+        elif joined:
+            incomplete_join = bool(joined & unknown_join_sessions)
+            run["tool_trace_status"] = "partial" if missing_result or incomplete_join or warned else "complete"
+            if missing_result or warned:
                 run["attention_codes"].append("tool_trace_partial")
         else:
             run["tool_trace_status"] = "missing"
