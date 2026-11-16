@@ -251,7 +251,7 @@ UTF-8 file and stage it before exposing its marker:
 
 ```bash
 python3 scripts/notify_delivery.py --stage-file "$MESSAGE_FILE" \
-  --decision-id "$DECISION_ID" --decision deliver
+  --decision-id "$DECISION_ID" --decision-at "$DECISION_AT" --decision deliver
 ```
 
 The command atomically stores a bounded pending batch before printing
@@ -261,12 +261,17 @@ without a payload:
 
 ```bash
 python3 scripts/notify_delivery.py --record-decision \
-  --decision-id "$DECISION_ID" --decision suppressed
+  --decision-id "$DECISION_ID" --decision-at "$DECISION_AT" --decision suppressed
 python3 scripts/notify_delivery.py --record-decision \
-  --decision-id "$DECISION_ID" --decision silent
+  --decision-id "$DECISION_ID" --decision-at "$DECISION_AT" --decision silent
 ```
 
 These outcomes create no pending batch and are not delivery failures.
+`DECISION_AT` is the immutable upstream event time, including its UTC offset.
+Keep both ID and time unchanged on retry. A repeated ID and payload retain the
+same batch binding without emitting another message; changed payloads or times
+are rejected, including after acknowledgment. A crash between persistence and
+output leaves a pending notice for review instead of automatically resending it.
 
 After a run, reconcile pending batches with:
 
@@ -275,22 +280,29 @@ python3 scripts/notify_delivery.py --reconcile
 ```
 
 The adapter reads pages using
-`openclaw automations runs <job-id> --limit 50 --offset <n> --json` and expects
+`openclaw cron runs <job-id> --limit 50 --offset <n> --json` and expects
 an `entries` array, boolean `hasMore`, and an advancing `nextOffset` while more
 history remains. With `hasMore: true`, `nextOffset` must equal the current
 offset plus the number of returned entries, and the page must not be empty. A
 finished entry must provide `jobId`, `action`, `summary`,
-`runAtMs`, `durationMs`, `delivered`, and `deliveryStatus`; `runId` or
-`sessionId` is preferred for run identity. It acknowledges only one exact
+`runAtMs`, `durationMs`, `status`, `delivered`, and `deliveryStatus`; `runId` or
+`sessionId` is required for run identity. It acknowledges only one exact
 batch marker with the complete message, matching job and timing, a stable run
-identity, `action: finished`, `delivered: true`, and
+identity, `action: finished`, `status: ok`, no run error, `delivered: true`, and
 `deliveryStatus: delivered`. Missing, failed, contradictory, ambiguous, and
 expired evidence stays pending for review.
+When present, `completionStatus` must be `succeeded`. The whole summary must
+equal the marker and staged message, allowing only the final newline emitted
+by staging. Extra prefixes or trailing content are rejected. Run end time must
+not be in the future.
 
 The accepted page shape is adapter schema
 `openclaw-automation-runs-offset-v1`. The native CLI does not declare a
-structured schema version, and this task did not query live history. Other
-formats, incomplete pages, pagination gaps, and reads beyond 30 pages fail
+structured schema version, and this task did not query live history. OpenClaw
+2026.10.1 installed source confirms the CLI in `src/cli/cron-cli` and the run
+status/completion mapping in `src/cron/completion-status.ts`; actual live
+history compatibility still needs a separate read-only setup check. Other
+formats, incomplete pages, pagination gaps, and reads beyond 40 pages fail
 closed without advancing discovery progress or acknowledging a batch. Each
 reconciliation reads the full paginated history, up to 40 pages, and rechecks
 the first page before accepting the scan. If history shifts during pagination,
@@ -306,6 +318,27 @@ diagnostics. A complete synthetic fixture can be supplied with
 `--receipts-fixture FILE`; fixture objects use the adapter schema, set
 `complete` to `true`, and contain `entries`. Dry-run output reports the
 proposed result without persisting it or emitting a batch marker.
+
+State schema 2 retains at least 30 days of terminal decision detail. Capacity
+errors remain visible; nothing evicts pending notices. An operator can close a
+notice that already has a review reason, without claiming successful delivery:
+
+```bash
+python3 scripts/notify_delivery.py --resolve-batch "$BATCH_ID" --dry-run
+python3 scripts/notify_delivery.py --resolve-batch "$BATCH_ID"
+python3 scripts/notify_delivery.py --compact-before "$UTC_CUTOFF" --dry-run
+python3 scripts/notify_delivery.py --compact-before "$UTC_CUTOFF"
+```
+
+Closure retains the decision/payload hash, review reason and resolution time;
+compaction removes old terminal details only. Pending batches remain intact.
+The cutoff must be at least 30 days old and cannot move backwards. A retained
+timestamp floor rejects all earlier upstream decisions after compaction, so
+forgetting old details cannot replay old notices. Newly resolved details remain
+until their resolution time also precedes the cutoff. Back up private state
+before maintenance. Never reset the floor or change event timestamps to retry.
+Unpublished schema-1 adapter state is rejected visibly; do not delete it to
+bypass duplicate protection. Legacy cursor state is quarantined as above.
 
 ### What still does not automate
 

@@ -45,6 +45,8 @@ class ReceiptTests(unittest.TestCase):
         row = {
             "jobId": JOB,
             "action": "finished",
+            "status": "ok",
+            "completionStatus": "succeeded",
             "runId": "synthetic-run-17",
             "runAtMs": int((CREATED.timestamp() - 1) * 1000),
             "durationMs": 5000,
@@ -78,6 +80,11 @@ class ReceiptTests(unittest.TestCase):
             ("contradictory", [self.make_receipt(delivered=True,
                                                   deliveryStatus="failed")], False,
              "contradictory_delivery_evidence"),
+            ("run_error", [self.make_receipt(status="error")], False, "run_not_successful"),
+            ("run_skipped", [self.make_receipt(status="skipped")], False, "run_not_successful"),
+            ("run_unknown", [self.make_receipt(status=None)], False, "run_not_successful"),
+            ("completion_failed", [self.make_receipt(completionStatus="failed")],
+             False, "run_not_successful"),
         ]
         for name, rows, expected_ack, expected_reason in cases:
             with self.subTest(name=name):
@@ -95,8 +102,12 @@ class ReceiptTests(unittest.TestCase):
     def test_incomplete_message_bad_timing_and_missing_run_identity_stay_pending(self):
         cases = [
             self.make_receipt(summary="NOTIFY_BATCH=" + BATCH_ID + "\nSynthetic digest:"),
+            self.make_receipt(summary=self.receipt["summary"] + "\nUNRELATED TEXT"),
+            self.make_receipt(summary="PREFIX\n" + self.receipt["summary"]),
             self.make_receipt(runAtMs=int((CREATED.timestamp() - 100) * 1000)),
             self.make_receipt(runId=None, sessionId=None, runAtMs=None),
+            self.make_receipt(runId=None, sessionId=None),
+            self.make_receipt(durationMs=1000000),
         ]
         for row in cases:
             state = self.new_state()
@@ -184,12 +195,14 @@ class ReceiptTests(unittest.TestCase):
 
     def test_state_bounds_reject_extra_pending_batches_and_oversized_messages(self):
         state = N.empty_state()
-        N.record_decision(state, "event-bound", "deliver", CREATED)
         for index in range(N.MAX_PENDING_BATCHES):
-            N.add_pending_batch(state, "event-bound", "Synthetic bounded message",
+            decision_id = "event-bound-%d" % index
+            N.record_decision(state, decision_id, "deliver", CREATED)
+            N.add_pending_batch(state, decision_id, "Synthetic bounded message",
                                 CREATED, "%032x" % (index + 1))
+        N.record_decision(state, "event-extra", "deliver", CREATED)
         with self.assertRaises(N.StateError):
-            N.add_pending_batch(state, "event-bound", "another message", CREATED,
+            N.add_pending_batch(state, "event-extra", "another message", CREATED,
                                 "%032x" % (N.MAX_PENDING_BATCHES + 1))
         self.assertEqual(len(state["pending_batches"]), N.MAX_PENDING_BATCHES)
         oversized = N.empty_state()
@@ -247,12 +260,81 @@ class ReceiptTests(unittest.TestCase):
         output = CheckingOutput()
         with contextlib.redirect_stdout(output):
             code = D.main(["--stage-file", message_path, "--decision-id", "event-stage",
-                           "--decision", "deliver", "--state", self.state_path])
+                           "--decision", "deliver", "--decision-at", CREATED.isoformat(),
+                           "--state", self.state_path])
         self.assertEqual(code, 0)
         payload = output.getvalue()
         persisted = N.load_state(self.state_path)
         batch_id = next(iter(persisted["pending_batches"]))
         self.assertTrue(payload.startswith("NOTIFY_BATCH=" + batch_id + "\n" + MESSAGE))
+
+    def test_retry_binding_survives_restart_acknowledgment_and_changed_payload(self):
+        message_path = os.path.join(self.temp.name, "message.txt")
+        with open(message_path, "w", encoding="utf-8") as stream:
+            stream.write(MESSAGE)
+        argv = ["--stage-file", message_path, "--decision-id", "event-retry",
+                "--decision", "deliver", "--decision-at", CREATED.isoformat(),
+                "--state", self.state_path]
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(D.main(argv), 0)
+        before = N.load_state(self.state_path)
+        batch_id = before["decisions"]["event-retry"]["batch_id"]
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(D.main(argv), 0)
+        self.assertNotIn("NOTIFY_BATCH=", output.getvalue())
+        self.assertEqual(N.load_state(self.state_path), before)
+        with open(message_path, "w", encoding="utf-8") as stream:
+            stream.write(MESSAGE + " changed")
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(D.main(argv), 2)
+        self.assertEqual(N.load_state(self.state_path), before)
+        with open(message_path, "w", encoding="utf-8") as stream:
+            stream.write(MESSAGE)
+        receipt = self.make_receipt(summary="NOTIFY_BATCH=" + batch_id + "\n" + MESSAGE,
+                                    runAtMs=int(datetime.datetime.now(datetime.timezone.utc).timestamp() * 1000),
+                                    durationMs=0)
+        N.update_state(self.state_path, lambda state: D.reconcile_state(state, [receipt], JOB))
+        self.assertIn(batch_id, N.load_state(self.state_path)["acknowledgments"])
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(D.main(argv), 0)
+        self.assertEqual(N.load_state(self.state_path)["pending_batches"], {})
+
+    def test_review_closure_compaction_and_replay_floor(self):
+        state = self.new_state()
+        later = CREATED + datetime.timedelta(days=65)
+        cutoff = CREATED + datetime.timedelta(days=32)
+        N.record_decision(state, "old-suppressed", "suppressed", CREATED)
+        N.record_decision(state, "recent", "silent", later)
+        D.reconcile_state(state, [], JOB, later.timestamp())
+        N.compact_state(state, cutoff.isoformat(), later)
+        self.assertIn(BATCH_ID, state["pending_batches"])
+        self.assertNotIn("old-suppressed", state["decisions"])
+        resolved = N.resolve_batch(state, BATCH_ID, later)
+        self.assertEqual(resolved["delivery"], "unknown")
+        self.assertEqual(state["acknowledgments"], {})
+        N.compact_state(state, cutoff.isoformat(), later)
+        self.assertIn("event-1", state["decisions"])
+        much_later = later + datetime.timedelta(days=65)
+        N.compact_state(state, (later + datetime.timedelta(days=32)).isoformat(), much_later)
+        self.assertEqual(state["decisions"], {})
+        with self.assertRaises(N.StateError):
+            N.record_decision(state, "event-1", "deliver", CREATED)
+        with self.assertRaises(N.StateError):
+            N.compact_state(state, (later - datetime.timedelta(days=1)).isoformat(), later)
+        N._validate(state)
+
+    def test_acknowledged_retention_releases_capacity_without_historical_replay(self):
+        state = self.new_state()
+        D.reconcile_state(state, [self.receipt], JOB, NOW)
+        later = CREATED + datetime.timedelta(days=65)
+        N.compact_state(state, (CREATED + datetime.timedelta(days=32)).isoformat(), later)
+        self.assertEqual(state["decisions"], {})
+        self.assertEqual(state["acknowledgments"], {})
+        with self.assertRaises(N.StateError):
+            N.record_decision(state, "event-1", "deliver", CREATED)
+        N.record_decision(state, "fresh-decision", "silent", later)
+        N._validate(state)
 
     def test_dry_run_with_fixture_leaves_state_fixture_locks_and_diagnostics_unchanged(self):
         N.update_state(self.state_path, lambda state: (

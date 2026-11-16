@@ -68,12 +68,6 @@ def _native_identity(row, job_id):
         if isinstance(value, str) and value.strip() and len(value) <= 256:
             digest = hashlib.sha256(value.strip().encode("utf-8")).hexdigest()
             return field + ":" + digest
-    stamp = _row_time(row)
-    duration = row.get("durationMs")
-    if (stamp is not None and isinstance(duration, int) and not isinstance(duration, bool)
-            and 0 <= duration <= MAX_RUN_DURATION_MS):
-        token = job_id + ":" + str(stamp) + ":" + str(duration)
-        return "execution:" + hashlib.sha256(token.encode("utf-8")).hexdigest()
     return None
 
 
@@ -92,7 +86,7 @@ def fetch_history(job_id=None, executable=None, runner=subprocess.run,
     first_page = None
 
     def read_page(page_offset):
-        argv = [executable, "automations", "runs", job_id, "--limit",
+        argv = [executable, "cron", "runs", job_id, "--limit",
                 str(page_size), "--offset", str(page_offset), "--json"]
         try:
             result = runner(argv, capture_output=True, text=True, timeout=15)
@@ -157,8 +151,11 @@ def _receipt_match(batch_id, batch, receipt, job_id, now, max_age_seconds):
     if marker_lines != ["NOTIFY_BATCH=" + batch_id] or markers != [batch_id]:
         return None
     message = batch.get("message")
-    if (not isinstance(message, str) or not message.strip()
-            or ("NOTIFY_BATCH=" + batch_id + "\n" + message) not in summary):
+    expected = "NOTIFY_BATCH=" + batch_id + "\n" + str(message)
+    if not isinstance(message, str) or not message.strip():
+        return None
+    wire_message = expected + ("" if message.endswith("\n") else "\n")
+    if summary not in (expected, wire_message):
         return None
     created = _batch_time(batch)
     started = _row_time(receipt)
@@ -175,6 +172,8 @@ def _receipt_match(batch_id, batch, receipt, job_id, now, max_age_seconds):
         return None
     begin = started / 1000.0
     end = (started + duration) / 1000.0
+    if end > current + TIME_TOLERANCE_SECONDS:
+        return None
     if not begin - TIME_TOLERANCE_SECONDS <= created <= end + TIME_TOLERANCE_SECONDS:
         return None
     if current - created > max_age_seconds:
@@ -257,6 +256,12 @@ def reconcile_state(state, receipts, job_id=None, now=None,
             review.append(batch_id)
             continue
         batch["native_run_id"] = identity
+        if (receipt.get("status") != "ok"
+                or receipt.get("completionStatus") not in (None, "succeeded")
+                or receipt.get("error")):
+            batch["review_reason"] = "run_not_successful"
+            review.append(batch_id)
+            continue
         delivered = receipt.get("delivered")
         delivery_status = receipt.get("deliveryStatus")
         if delivered is True and delivery_status == "delivered":
@@ -268,6 +273,10 @@ def reconcile_state(state, receipts, job_id=None, now=None,
                 "native_run_id": identity,
                 "message_sha256": hashlib.sha256(batch["message"].encode("utf-8")).hexdigest(),
             }
+            state["decisions"][batch["decision_id"]]["resolution"] = "delivered"
+            state["decisions"][batch["decision_id"]]["resolved_at"] = state[
+                "acknowledgments"][batch_id]["acknowledged_at"]
+            state["decisions"][batch["decision_id"]]["resolution_reason"] = "native_delivered"
             del state["pending_batches"][batch_id]
             acknowledged.append(batch_id)
             continue
@@ -304,7 +313,10 @@ def _parser():
     modes.add_argument("--reconcile", action="store_true", help="reconcile pending batches against native history")
     modes.add_argument("--record-decision", action="store_true",
                        help="record a suppressed or silent upstream gate outcome")
+    modes.add_argument("--resolve-batch", help="dismiss a reviewed notice without claiming delivery")
+    modes.add_argument("--compact-before", help="discard terminal details before this UTC time; retain at least 30 days")
     parser.add_argument("--decision-id", help="stable, non-sensitive upstream decision id")
+    parser.add_argument("--decision-at", help="immutable upstream event timestamp, with UTC offset")
     parser.add_argument("--decision", choices=("deliver", "suppressed", "silent"),
                         help="upstream gate outcome; this command makes no model call")
     parser.add_argument("--receipts-fixture", help="complete synthetic receipt fixture; never queries native history")
@@ -320,6 +332,30 @@ def _emit_json(value):
 
 def main(argv=None):
     args = _parser().parse_args(argv)
+    if args.resolve_batch or args.compact_before:
+        if args.decision_id or args.decision or args.decision_at or args.receipts_fixture:
+            print("notify_delivery: maintenance cannot include decision or receipt options", file=sys.stderr)
+            return 2
+        def maintain(state):
+            return (N.resolve_batch(state, args.resolve_batch) if args.resolve_batch
+                    else N.compact_state(state, args.compact_before))
+        try:
+            report = maintain(N.load_state(args.state)) if args.dry_run else N.update_state(args.state, maintain)
+            _emit_json(dict(report, dry_run=args.dry_run))
+            return 0
+        except (OSError, ValueError) as exc:
+            print("notify_delivery: maintenance held (" + type(exc).__name__ + ")", file=sys.stderr)
+            return 2
+    if args.record_decision or args.stage_file:
+        try:
+            if not args.decision_at or N.parse_timestamp(args.decision_at).tzinfo is None:
+                raise ValueError("missing timestamp")
+            decision_at = N.parse_timestamp(args.decision_at)
+            if decision_at.timestamp() > _epoch() + TIME_TOLERANCE_SECONDS:
+                raise ValueError("future timestamp")
+        except ValueError:
+            print("notify_delivery: --decision-at requires the immutable upstream timestamp with UTC offset", file=sys.stderr)
+            return 2
     if args.record_decision:
         if (not args.decision_id or args.decision not in ("suppressed", "silent")
                 or args.receipts_fixture):
@@ -327,12 +363,18 @@ def main(argv=None):
                   file=sys.stderr)
             return 2
         if args.dry_run:
+            try:
+                N.record_decision(N.load_state(args.state), args.decision_id,
+                                  args.decision, decision_at)
+            except (OSError, N.StateError):
+                print("notify_delivery: decision preview held", file=sys.stderr)
+                return 2
             _emit_json({"dry_run": True, "decision": args.decision,
                         "would_record": True, "writes": False})
             return 0
         try:
             N.update_state(args.state, lambda state: N.record_decision(
-                state, args.decision_id, args.decision))
+                state, args.decision_id, args.decision, decision_at))
             _emit_json({"recorded": True, "decision": args.decision})
             return 0
         except (OSError, N.StateError) as exc:
@@ -340,7 +382,7 @@ def main(argv=None):
                   file=sys.stderr)
             return 2
     if args.stage_file:
-        if not args.decision_id or args.decision != "deliver":
+        if not args.decision_id or args.decision != "deliver" or args.receipts_fixture:
             print("notify_delivery: staging requires --decision-id and --decision deliver",
                   file=sys.stderr)
             return 2
@@ -350,22 +392,28 @@ def main(argv=None):
             if args.dry_run:
                 if args.receipts_fixture:
                     raise HistoryError("receipt fixtures apply only to --reconcile")
+                preview = N.load_state(args.state)
+                N.record_decision(preview, args.decision_id, args.decision, decision_at)
+                N.add_pending_batch(preview, args.decision_id, message)
                 _emit_json({"dry_run": True, "decision": args.decision,
                             "would_stage": args.decision == "deliver",
                             "payload_emitted": False,
                             "message_sha256": hashlib.sha256(message.encode("utf-8")).hexdigest()})
                 return 0
             batch_id = None
+            newly_staged = False
 
             def mutate(state):
-                nonlocal batch_id
-                N.record_decision(state, args.decision_id, args.decision)
+                nonlocal batch_id, newly_staged
+                N.record_decision(state, args.decision_id, args.decision, decision_at)
                 if args.decision == "deliver":
+                    newly_staged = state["decisions"][args.decision_id]["batch_id"] is None
                     batch_id = N.add_pending_batch(state, args.decision_id, message)
 
             N.update_state(args.state, mutate)
-            if batch_id is None:
-                _emit_json({"staged": False, "decision": args.decision})
+            if not newly_staged:
+                _emit_json({"staged": False, "already_recorded": True,
+                            "batch_id": batch_id, "payload_emitted": False})
                 return 0
             # update_state completed its atomic write before the marker is exposed.
             sys.stdout.write("NOTIFY_BATCH=" + batch_id + "\n" + message)
@@ -376,7 +424,7 @@ def main(argv=None):
             print("notify_delivery: staging held (" + type(exc).__name__ + ")", file=sys.stderr)
             return 2
 
-    if args.decision_id or args.decision:
+    if args.decision_id or args.decision or args.decision_at:
         print("notify_delivery: --decision options apply only to --stage-file", file=sys.stderr)
         return 2
     try:

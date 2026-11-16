@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Bounded, private runtime state for optional notification receipt handling."""
 import json
+import hashlib
 import os
 import re
 import tempfile
@@ -10,7 +11,8 @@ from contextlib import contextmanager
 from config import default_runtime_path, path_setting
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+RETENTION_DAYS = 30
 MAX_STATE_BYTES = 2 * 1024 * 1024
 MAX_PENDING_BATCHES = 100
 MAX_MESSAGE_BYTES = 8192
@@ -30,6 +32,7 @@ class StateError(ValueError):
 def empty_state():
     return {
         "schema_version": SCHEMA_VERSION,
+        "retention_floor": None,
         "discovery": {"last_scan_at": None, "latest_run_at_ms": 0,
                       "run_ids": []},
         "decisions": {},
@@ -52,8 +55,7 @@ def parse_timestamp(value):
 
 def _iso(value):
     try:
-        parse_timestamp(value)
-        return True
+        return parse_timestamp(value).tzinfo is not None
     except ValueError:
         return False
 
@@ -61,10 +63,12 @@ def _iso(value):
 def _validate(state):
     if not isinstance(state, dict) or state.get("schema_version") != SCHEMA_VERSION:
         raise StateError("unsupported notification state schema")
-    required = {"schema_version", "discovery", "decisions", "pending_batches",
+    required = {"schema_version", "retention_floor", "discovery", "decisions", "pending_batches",
                 "acknowledgments", "legacy_quarantine"}
     if set(state) != required:
         raise StateError("invalid notification state fields")
+    if state["retention_floor"] is not None and not _iso(state["retention_floor"]):
+        raise StateError("invalid notification retention floor")
     discovery = state["discovery"]
     if (not isinstance(discovery, dict)
             or set(discovery) != {"last_scan_at", "latest_run_at_ms", "run_ids"}
@@ -83,10 +87,24 @@ def _validate(state):
     for key, item in decisions.items():
         if (not isinstance(key, str) or not _DECISION_ID_RE.fullmatch(key)
                 or not isinstance(item, dict)
-                or set(item) != {"outcome", "recorded_at"}
+                or set(item) != {"outcome", "recorded_at", "batch_id",
+                                 "message_sha256", "resolution", "resolved_at", "resolution_reason"}
                 or item["outcome"] not in ("deliver", "suppressed", "silent")
                 or not _iso(item["recorded_at"])):
             raise StateError("invalid notification decision entry")
+        bound = item["batch_id"] is not None
+        if (item["resolution"] not in (None, "delivered", "dismissed")
+                or (item["resolution"] is None and item["resolution_reason"] is not None)
+                or (item["resolution"] is not None and not isinstance(item["resolution_reason"], str))
+                or (item["resolution"] is None and item["resolved_at"] is not None)
+                or (item["resolution"] is not None and not _iso(item["resolved_at"]))
+                or (bound and (not isinstance(item["batch_id"], str)
+                    or not _BATCH_ID_RE.fullmatch(item["batch_id"])))
+                or (bound and not re.fullmatch(r"[0-9a-f]{64}", str(item["message_sha256"])))
+                or (not bound and (item["message_sha256"] is not None
+                                   or item["resolution"] is not None))
+                or (item["outcome"] != "deliver" and bound)):
+            raise StateError("invalid notification decision binding")
     pending = state["pending_batches"]
     if not isinstance(pending, dict) or len(pending) > MAX_PENDING_BATCHES:
         raise StateError("invalid pending notification batches")
@@ -109,6 +127,10 @@ def _validate(state):
         decision = decisions.get(batch["decision_id"])
         if not decision or decision["outcome"] != "deliver":
             raise StateError("pending notification batch has no deliver decision")
+        if (decision["batch_id"] != key or decision["resolution"] is not None
+                or decision["message_sha256"] != hashlib.sha256(
+                    batch["message"].encode("utf-8")).hexdigest()):
+            raise StateError("pending batch does not match its decision binding")
     acknowledgments = state["acknowledgments"]
     if not isinstance(acknowledgments, dict) or len(acknowledgments) > MAX_ACKNOWLEDGMENTS:
         raise StateError("invalid notification acknowledgment state")
@@ -122,6 +144,19 @@ def _validate(state):
                 or not re.fullmatch(r"[0-9a-f]{64}", str(item["message_sha256"]))):
             raise StateError("invalid notification acknowledgment entry")
     quarantine = state["legacy_quarantine"]
+    bindings = [d["batch_id"] for d in decisions.values() if d["batch_id"]]
+    if len(bindings) != len(set(bindings)):
+        raise StateError("multiple decisions bind the same batch")
+    for decision in decisions.values():
+        bound = decision["batch_id"]
+        if bound is None:
+            continue
+        if (decision["resolution"] == "delivered" and bound not in acknowledgments
+                or decision["resolution"] == "dismissed" and bound in acknowledgments
+                or decision["resolution"] is None and bound not in pending):
+            raise StateError("decision resolution does not match batch state")
+    if set(acknowledgments) - set(bindings):
+        raise StateError("acknowledgment has no decision binding")
     if not isinstance(quarantine, list) or len(quarantine) > 16:
         raise StateError("invalid legacy notification quarantine")
     for item in quarantine:
@@ -171,7 +206,10 @@ def _legacy_state(raw):
             raise StateError("legacy pending batch cannot be migrated safely")
         decision_id = "legacy:" + batch_id
         state["decisions"][decision_id] = {
-            "outcome": "deliver", "recorded_at": old["created_at"]}
+            "outcome": "deliver", "recorded_at": old["created_at"],
+            "batch_id": batch_id,
+            "message_sha256": hashlib.sha256(old["text"].encode("utf-8")).hexdigest(),
+            "resolution": None, "resolved_at": None, "resolution_reason": None}
         state["pending_batches"][batch_id] = {
             "message": old["text"],
             "created_at": old["created_at"],
@@ -315,11 +353,18 @@ def record_decision(state, decision_id, outcome, recorded_at=None):
     decision_id = _decision_id(decision_id)
     if outcome not in ("deliver", "suppressed", "silent"):
         raise StateError("decision outcome must be deliver, suppressed, or silent")
-    item = {"outcome": outcome, "recorded_at": _timestamp(recorded_at)}
+    stamp = _timestamp(recorded_at)
+    floor = state["retention_floor"]
+    if floor is not None and parse_timestamp(stamp) <= parse_timestamp(floor):
+        raise StateError("decision predates the retained replay boundary")
+    item = {"outcome": outcome, "recorded_at": stamp, "batch_id": None,
+            "message_sha256": None, "resolution": None, "resolved_at": None,
+            "resolution_reason": None}
     previous = state["decisions"].get(decision_id)
     if previous is not None:
-        if previous["outcome"] != outcome:
-            raise StateError("decision id already has a different outcome")
+        if (previous["outcome"] != outcome
+                or (recorded_at is not None and previous["recorded_at"] != stamp)):
+            raise StateError("decision id already has a different outcome or timestamp")
         return False
     if len(state["decisions"]) >= MAX_DECISIONS:
         raise StateError("notification decision history reached its bound")
@@ -337,6 +382,11 @@ def add_pending_batch(state, decision_id, message, created_at=None, batch_id=Non
         raise StateError("notification message must not be empty")
     if len(message.encode("utf-8")) > MAX_MESSAGE_BYTES:
         raise StateError("notification message exceeds its size bound")
+    message_hash = hashlib.sha256(message.encode("utf-8")).hexdigest()
+    if decision["batch_id"] is not None:
+        if decision["message_sha256"] != message_hash:
+            raise StateError("decision id already has a different message")
+        return decision["batch_id"]
     if len(state["pending_batches"]) >= MAX_PENDING_BATCHES:
         raise StateError("pending notification batch limit reached")
     if batch_id is None:
@@ -353,4 +403,46 @@ def add_pending_batch(state, decision_id, message, created_at=None, batch_id=Non
         "native_run_id": None,
         "review_reason": None,
     }
+    decision.update(batch_id=batch_id, message_sha256=message_hash)
     return batch_id
+
+
+def resolve_batch(state, batch_id, now=None):
+    """Close a reviewed notice without claiming that it was delivered."""
+    batch = state["pending_batches"].get(batch_id)
+    if batch is None or not batch["review_reason"]:
+        raise StateError("only a pending notice with a review reason can be dismissed")
+    state["decisions"][batch["decision_id"]]["resolution"] = "dismissed"
+    state["decisions"][batch["decision_id"]]["resolved_at"] = _timestamp(now)
+    state["decisions"][batch["decision_id"]]["resolution_reason"] = batch["review_reason"]
+    del state["pending_batches"][batch_id]
+    return {"resolved": batch_id, "resolution": "dismissed", "delivery": "unknown"}
+
+
+def compact_state(state, before, now=None):
+    """Remove old terminal detail, retaining a replay boundary for older decisions."""
+    cutoff = parse_timestamp(before)
+    current = parse_timestamp(_timestamp(now))
+    if cutoff.tzinfo is None or cutoff.timestamp() > current.timestamp() - RETENTION_DAYS * 86400:
+        raise StateError("compaction must retain at least 30 days")
+    floor = state["retention_floor"]
+    if floor is not None and cutoff < parse_timestamp(floor):
+        raise StateError("retention boundary cannot move backwards")
+    removed = 0
+    for decision_id, decision in list(state["decisions"].items()):
+        if parse_timestamp(decision["recorded_at"]) > cutoff:
+            continue
+        if decision["resolved_at"] and parse_timestamp(decision["resolved_at"]) > cutoff:
+            continue
+        batch_id = decision["batch_id"]
+        if batch_id in state["pending_batches"]:
+            continue
+        if decision["outcome"] == "deliver" and decision["resolution"] is None:
+            continue
+        if batch_id:
+            state["acknowledgments"].pop(batch_id, None)
+        del state["decisions"][decision_id]
+        removed += 1
+    state["retention_floor"] = cutoff.isoformat(timespec="seconds")
+    return {"compacted": removed, "retention_floor": state["retention_floor"],
+            "pending": len(state["pending_batches"])}
