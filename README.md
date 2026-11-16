@@ -66,6 +66,8 @@ an active queue item, a submitted application, or an active application cap
 blocks readiness. The helper does not merge, enqueue, or make a model call. Only
 the owner's GitHub merge authorizes `queue.py enqueue`, which records the merge
 actor and time. Narrative approval remains an owner decision during the drain.
+The merger must match the configured resume repository owner. Offline `--prs`
+and `--tracker` inputs require `--dry-run` and cannot persist queue approval.
 
 ## What this does not do
 
