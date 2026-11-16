@@ -27,6 +27,7 @@ Usage:
             [--repo DIR] [--work DIR]
 """
 import argparse
+import hashlib
 import html as html_mod
 import json
 import os
@@ -41,6 +42,7 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from config import (default_repo_dir, default_runtime_path, float_setting,
                     github_repo_setting, path_setting, value_setting)
+import eligibility as eligibility_mod
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO_DIR = path_setting("JOBSEARCH_REPO", default_repo_dir())
@@ -84,6 +86,16 @@ APPLY_HOST_SKIP_RE = re.compile(
 # Signals that an external link is the company's own application route.
 APPLY_HINT_RE = re.compile(r"(career|apply|job|recruit|join|hiring|greenhouse|lever|workday|smartrecruiters|ashby)", re.I)
 COVER_LETTER_RE = re.compile(r"\bcover(?:ing)?\s+letter\b", re.I)
+CLOSED_POSTING_RES = (
+    re.compile(r"\bno longer accepting (?:job )?applications\b", re.I),
+    re.compile(r"\b(?:this|the) (?:job|position|role|posting|vacancy) "
+               r"is no longer accepting applications\b", re.I),
+    re.compile(r"\bapplications? (?:are|is) no longer being accepted\b", re.I),
+    re.compile(r"\b(?:this|the) (?:job|position|role|posting|vacancy) "
+               r"(?:is|has been|was|has now been) (?:closed|filled|cancelled|canceled)\b", re.I),
+    re.compile(r"\b(?:this|the) (?:job|position|role|posting|vacancy) is no longer available\b", re.I),
+    re.compile(r"\bapplications? for (?:this|the) (?:job|position|role) are closed\b", re.I),
+)
 
 
 # ---------------------------------------------------------------- yaml subset
@@ -164,6 +176,36 @@ def slugify(text, maxlen=60):
 
 def norm_text(s):
     return re.sub(r"\s+", " ", html_mod.unescape(s or "")).strip()
+
+
+def is_explicitly_closed(text):
+    """Only guarded, direct closure wording establishes a closed posting."""
+    return bool(closed_posting_evidence(text))
+
+
+def closed_posting_evidence(text):
+    """Return the guarded closure phrase, or an empty string when unknown."""
+    clean = guard_text(str(text or ""))["clean_text"]
+    for pattern in CLOSED_POSTING_RES:
+        match = pattern.search(clean)
+        if match:
+            return match.group(0)
+    return ""
+
+
+def guard_posting_metadata(posting):
+    """Guard displayed posting metadata before it reaches a work item."""
+    clean = {}
+    findings = []
+    verdicts = []
+    for field in ("company", "role", "title", "location", "source"):
+        result = guard_text(str(posting.get(field) or ""))
+        clean[field] = result["clean_text"]
+        findings.extend(result["findings"])
+        verdicts.append(result["verdict"])
+    verdict = "hostile" if "hostile" in verdicts else (
+        "flagged" if "flagged" in verdicts else "clean")
+    return clean, verdict, findings
 
 
 def normalize_url(url):
@@ -356,16 +398,16 @@ def _extract_jd(html_text, source, link=""):
         got = _linkedin_jd(html_text)
     else:
         got = None
-    if got and got[0] and len(got[0]) >= MIN_JD_LEN:
+    if got and got[0] and (len(got[0]) >= MIN_JD_LEN or is_explicitly_closed(got[0])):
         return got
     if got is None and link:
         # Workday/other JS-shell posting pages: ask the ATS API instead of
         # accepting the empty shell the generic extractor would return.
         wd = _workday_jd(link)
-        if wd and len(wd[0]) >= MIN_JD_LEN:
+        if wd and (len(wd[0]) >= MIN_JD_LEN or is_explicitly_closed(wd[0])):
             return wd
     generic = _generic_jd(html_text)
-    if generic and generic[0] and len(generic[0]) >= MIN_JD_LEN:
+    if generic and generic[0] and (len(generic[0]) >= MIN_JD_LEN or is_explicitly_closed(generic[0])):
         return generic
     return got  # may be (short text, block) or None
 
@@ -381,7 +423,7 @@ def fetch_jd(posting):
     if not got:
         return None
     jd, scope_html = got
-    if not jd or len(jd) < MIN_JD_LEN:
+    if not jd or (len(jd) < MIN_JD_LEN and not is_explicitly_closed(jd)):
         return None
     # Resolve the company apply URL from the description block only, so page
     # chrome (share buttons, footer, Discord invites) is not mistaken for it.
@@ -405,6 +447,47 @@ def load_repo(repo_dir):
         with open(tracker_path, encoding="utf-8") as fh:
             apps = parse_yaml_list(fh.read())
     return postings, profile, apps
+
+
+def load_repo_inputs(repo_dir):
+    """Load tailoring data with the exact profile/master source bytes."""
+    postings_path = os.path.join(repo_dir, POSTINGS_PATH)
+    profile_path = os.path.join(repo_dir, PROFILE_PATH)
+    tracker_path = os.path.join(repo_dir, TRACKER_PATH)
+    with open(postings_path, encoding="utf-8") as fh:
+        postings = json.load(fh)
+    profile = {}
+    profile_source = None
+    master_path = os.path.join(repo_dir, MASTER_PATH)
+    master_source = None
+    errors = {}
+    try:
+        with open(profile_path, "rb") as fh:
+            profile_source = fh.read()
+        profile = parse_yaml_map(profile_source.decode("utf-8"))
+    except FileNotFoundError:
+        errors["profile"] = "profile_unavailable"
+    except (OSError, UnicodeDecodeError) as exc:
+        errors["profile"] = "profile_read_failed"
+    try:
+        with open(master_path, "rb") as fh:
+            master_source = fh.read()
+    except FileNotFoundError:
+        errors["master"] = "master_unavailable"
+    except OSError:
+        errors["master"] = "master_read_failed"
+    if master_source is not None and not master_source.strip():
+        errors["master"] = "master_empty"
+    elif master_source is not None:
+        try:
+            master_source.decode("utf-8")
+        except UnicodeDecodeError:
+            errors["master"] = "master_decode_failed"
+    apps = []
+    if os.path.isfile(tracker_path):
+        with open(tracker_path, encoding="utf-8") as fh:
+            apps = parse_yaml_list(fh.read())
+    return postings, profile, apps, profile_source, master_source, errors
 
 
 def tracker_keys(apps):
@@ -853,14 +936,21 @@ def assign_slugs(selected):
 
 
 # ---------------------------------------------------------------- work items
-def build_work_item(posting, slug, jd, profile):
+def _digest_bytes(value):
+    return hashlib.sha256(value).hexdigest()
+
+
+def build_work_item(posting, slug, jd, profile, profile_source,
+                    master_source, eligibility_result, guarded_posting):
+    eligibility_provenance = eligibility_result.get("provenance", {})
     return {
         "slug": slug,
-        "company": posting.get("company", ""),
-        "role": posting.get("role", ""),
+        "company": guarded_posting.get("company", posting.get("company", "")),
+        "role": guarded_posting.get("role", posting.get("role", "")),
+        "title": guarded_posting.get("title", posting.get("title", "")),
         "link": posting.get("link", ""),
-        "source": posting.get("source", ""),
-        "location": posting.get("location", ""),
+        "source": guarded_posting.get("source", posting.get("source", "")),
+        "location": guarded_posting.get("location", posting.get("location", "")),
         "posted": posting.get("posted", ""),
         "status": "ready",
         "jd_text": jd["jd_text"],
@@ -870,6 +960,18 @@ def build_work_item(posting, slug, jd, profile):
         "profile": profile,
         "doctrine_repo": DOCTRINE_REPO,
         "master": MASTER_PATH,
+        "eligibility_posting": {
+            "role": guarded_posting.get("role", ""),
+            "title": guarded_posting.get("title", ""),
+        },
+        "eligibility": eligibility_result,
+        "input_provenance": {
+            "profile_sha256": _digest_bytes(profile_source),
+            "master_sha256": _digest_bytes(master_source),
+            "jd_sha256": eligibility_provenance.get("jd_sha256"),
+            "role_title_sha256": eligibility_provenance.get("posting_metadata_sha256"),
+            "combined_text_sha256": eligibility_provenance.get("evaluated_text_sha256"),
+        },
         "generated_at": datetime.now(SGT).isoformat(timespec="seconds"),
     }
 
@@ -877,17 +979,20 @@ def build_work_item(posting, slug, jd, profile):
 def write_work_item(work_dir, slug, item):
     os.makedirs(work_dir, exist_ok=True)
     path = os.path.join(work_dir, slug + ".json")
-    with open(path, "w", encoding="utf-8") as fh:
+    with open(path + ".tmp", "w", encoding="utf-8") as fh:
         json.dump(item, fh, indent=2, ensure_ascii=False)
         fh.write("\n")
+    os.replace(path + ".tmp", path)
     return path
 
 
 def write_needs_jd(work_dir, pending):
+    """Write the legacy hold-list path with explicit review-required status."""
     os.makedirs(work_dir, exist_ok=True)
     path = os.path.join(work_dir, "_needs_jd.json")
     with open(path, "w", encoding="utf-8") as fh:
-        json.dump({"generated_at": datetime.now(SGT).isoformat(timespec="seconds"),
+        json.dump({"status": "review_required",
+                   "generated_at": datetime.now(SGT).isoformat(timespec="seconds"),
                    "count": len(pending), "postings": pending}, fh, indent=2,
                   ensure_ascii=False)
         fh.write("\n")
@@ -923,7 +1028,8 @@ def main(argv=None):
     args = build_parser().parse_args(argv)
     log = lambda *a: print(*a, file=sys.stderr)
 
-    postings, profile, apps = load_repo(args.repo)
+    postings, profile, apps, profile_source, master_source, input_errors = \
+        load_repo_inputs(args.repo)
     skipped_entries = load_skipped(args.skipped)
     queue_entries = load_queue_entries(args.queue)
     selected = assign_slugs(
@@ -1000,17 +1106,60 @@ def main(argv=None):
         return 0
 
     created, pending, items = [], [], []
-    pending.extend({"company": p.get("company"), "role": p.get("role"),
-                    "link": p.get("link"), "slug": slug,
-                    "reason": "generic-link"}
-                   for p, slug in generic)
+    for p, slug in generic:
+        safe_metadata, metadata_verdict, metadata_findings = guard_posting_metadata(p)
+        pending.append({"company": safe_metadata.get("company", ""),
+                        "role": safe_metadata.get("role", ""),
+                        "link": p.get("link"), "slug": slug,
+                        "status": "hold",
+                        "category": "content" if metadata_verdict == "hostile"
+                        else "infrastructure",
+                        "reason": "guard_hostile" if metadata_verdict == "hostile"
+                        else "generic-link",
+                        "code": "guard_hostile" if metadata_verdict == "hostile"
+                        else "generic_link",
+                        "eligibility_status": "unknown",
+                        "findings": [{key: finding.get(key) for key in ("kind", "line")}
+                                     for finding in metadata_findings]
+                        if metadata_verdict == "hostile" else []})
     for i, (p, slug) in enumerate(selected):
-        jd = fetch_jd(p)
-        if jd is None:
+        guarded_posting, metadata_verdict, metadata_findings = guard_posting_metadata(p)
+        if metadata_verdict == "hostile":
+            safe_findings = [{key: finding.get(key) for key in ("kind", "line")}
+                             for finding in metadata_findings]
+            pending.append({"company": guarded_posting.get("company", ""),
+                            "role": guarded_posting.get("role", ""),
+                            "link": p.get("link"), "slug": slug,
+                            "status": "hold", "category": "content",
+                            "reason": "guard_hostile", "code": "guard_hostile",
+                            "verdict": "hostile", "findings": safe_findings})
+            log(f"tailor: hold      {guarded_posting.get('company')} · "
+                f"{guarded_posting.get('role')} (guard_hostile metadata)")
+            continue
+        if input_errors:
+            error_codes = sorted(input_errors.values())
             pending.append({"company": p.get("company"), "role": p.get("role"),
                             "link": p.get("link"), "slug": slug,
-                            "reason": "jd-unavailable"})
-            log(f"tailor: needs_jd  {p.get('company')} · {p.get('role')}")
+                            "status": "hold", "category": "infrastructure",
+                            "reason": "required-input-unavailable",
+                            "code": "tailoring_input_unavailable",
+                            "causes": error_codes,
+                            "eligibility_status": "unknown" if "profile" in input_errors
+                            else "not_checked"})
+            log(f"tailor: hold      {guarded_posting.get('company')} · "
+                f"{guarded_posting.get('role')} "
+                "(required input unavailable)")
+            continue
+        jd = fetch_jd(p)
+        if jd is None:
+            pending.append({"company": guarded_posting.get("company", ""),
+                            "role": guarded_posting.get("role", ""),
+                            "link": p.get("link"), "slug": slug,
+                            "status": "hold", "category": "infrastructure",
+                            "reason": "jd-unavailable", "code": "jd_unavailable",
+                            "eligibility_status": "unknown"})
+            log(f"tailor: needs_jd  {guarded_posting.get('company')} · "
+                f"{guarded_posting.get('role')}")
             continue
         # Posting-integrity gate: JD text is stranger-written and flows into
         # agent contexts, so the work item carries only the sanitized text
@@ -1020,18 +1169,61 @@ def main(argv=None):
         jd_guard = {"verdict": guard["verdict"],
                     "n_findings": len(guard["findings"]),
                     "kinds": sorted({f["kind"] for f in guard["findings"]})}
+        jd_guard["metadata_verdict"] = metadata_verdict
+        jd_guard["metadata_n_findings"] = len(metadata_findings)
+        jd_guard["metadata_kinds"] = sorted({f["kind"] for f in metadata_findings})
         log(f"tailor: guard {guard['verdict']} {slug} "
-            f"({len(guard['findings'])} findings)")
+            f"({len(guard['findings'])} findings; metadata {metadata_verdict})")
         if guard["verdict"] == "hostile":
-            pending.append({"company": p.get("company"), "role": p.get("role"),
+            hostile_findings = [{key: finding.get(key) for key in ("kind", "line")}
+                                for finding in list(guard["findings"]) + metadata_findings]
+            pending.append({"company": guarded_posting.get("company", ""),
+                            "role": guarded_posting.get("role", ""),
                             "link": p.get("link"), "slug": slug,
-                            "reason": "guard_hostile",
-                            "verdict": guard["verdict"],
-                            "findings": guard["findings"]})
-            log(f"tailor: needs_jd  {p.get('company')} · {p.get('role')} "
+                            "status": "hold", "category": "content",
+                            "reason": "guard_hostile", "code": "guard_hostile",
+                            "verdict": "hostile", "findings": hostile_findings})
+            log(f"tailor: needs_jd  {guarded_posting.get('company')} · "
+                f"{guarded_posting.get('role')} "
                 "(guard_hostile)")
             continue
-        item = build_work_item(p, slug, jd, profile)
+
+        closure_text = "\n".join((guarded_posting.get("role", ""),
+                                   guarded_posting.get("title", ""), jd["jd_text"]))
+        closure_evidence = closed_posting_evidence(closure_text)
+        if closure_evidence:
+            pending.append({"company": guarded_posting.get("company", ""),
+                            "role": guarded_posting.get("role", ""),
+                            "link": p.get("link"), "slug": slug,
+                            "status": "hold", "category": "closure",
+                            "reason": "posting-closed", "code": "posting_closed",
+                            "closure_evidence": closure_evidence})
+            log(f"tailor: hold      {guarded_posting.get('company')} · "
+                f"{guarded_posting.get('role')} "
+                "(posting_closed)")
+            continue
+
+        eligibility_result = eligibility_mod.evaluate(
+            guarded_posting, profile, jd["jd_text"], profile_source)
+        if eligibility_result.get("status") != "eligible":
+            eligibility_status = eligibility_result.get("status", "unknown")
+            eligibility_conflict = eligibility_status == "ineligible"
+            code = ("eligibility_conflict" if eligibility_conflict
+                    else "eligibility_unknown")
+            pending.append({"company": guarded_posting.get("company", ""),
+                            "role": guarded_posting.get("role", ""),
+                            "link": p.get("link"), "slug": slug,
+                            "status": "hold", "category": "eligibility",
+                            "reason": code, "code": code,
+                            "eligibility_status": eligibility_status,
+                            "eligibility": eligibility_result})
+            log(f"tailor: hold      {guarded_posting.get('company')} · "
+                f"{guarded_posting.get('role')} "
+                f"({code})")
+            continue
+
+        item = build_work_item(p, slug, jd, profile, profile_source,
+                               master_source, eligibility_result, guarded_posting)
         item["jd_guard"] = jd_guard
         items.append(item)
         if not args.dry_run:
@@ -1042,7 +1234,10 @@ def main(argv=None):
             import time
             time.sleep(FETCH_SLEEP)
 
-    if not args.dry_run and pending:
+    if not args.dry_run:
+        # A hold replaces an earlier ready item at the same routing path.
+        for hold in pending:
+            write_work_item(args.work, hold["slug"], hold)
         write_needs_jd(args.work, pending)
 
     if args.json:
@@ -1052,7 +1247,7 @@ def main(argv=None):
             print(f"{item['company']} · {item['role']} · {item['link']} · "
                   f"work/{item['slug']}.json")
     log(f"tailor: {'would create' if args.dry_run else 'created'} {len(items)} work item(s), "
-        f"{len(pending)} needs_jd, {len(skipped_inflight)} already with an open PR")
+        f"{len(pending)} hold(s) for review, {len(skipped_inflight)} already with an open PR")
     return 0
 
 

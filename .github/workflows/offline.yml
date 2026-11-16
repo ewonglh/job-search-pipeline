@@ -28,6 +28,8 @@ jobs:
         run: |
           python test_queue.py
           python test_tailor.py
+          python test_cv_checks.py
+          python test_tailor_preflight.py
           python test_stages.py
           python test_dashboard.py
           python test_eligibility.py
