@@ -37,7 +37,7 @@ TEXT_FIELDS = {
     "attempt_state": 80, "blocker_code": 80, "attempt_id": 120,
 }
 TRACKER_FIELDS = ("company", "role", "link", "pr", "pr_number", "source",
-                  "status", "stage", "applied_date", "submitted_at")
+                  "status", "stage", "stage_since", "applied_date", "submitted_at")
 QUEUE_FIELDS = ("company", "role", "link", "pr", "pr_number", "source",
                 "status", "submitted_at", "claimed_at", "attempt_id",
                 "tracker_sync", "snapshot_id", "prepared_snapshot_id",
@@ -190,7 +190,7 @@ def _strict_rows(rows, fields, *, queue_statuses=None, tracker_statuses=None):
                         value = _safe_url(value)
                     elif value and not value.isdigit():
                         raise _InvalidSource()
-            elif key in ("applied_date",):
+            elif key in ("applied_date", "stage_since"):
                 if not isinstance(value, str) or not _day(value):
                     raise _InvalidSource()
                 value = _day(value)

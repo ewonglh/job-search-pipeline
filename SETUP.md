@@ -458,6 +458,95 @@ is identical to Track 2, so a wrong flag is a rename, not a redesign.
 
 ---
 
+## Private dashboard
+
+The dashboard reads only the last committed, sanitized projection. Opening the
+HTML or HTTP page does not run GitHub, mailbox, model, tracker, or queue
+collectors. Collection remains an explicit operator action.
+
+```sh
+# Optional first-time or scheduled refresh, run separately from page reads.
+python3 scripts/projection.py collect
+
+# Write the self-contained HTML file or print its JSON view model.
+python3 scripts/dashboard.py --out "$JOBSEARCH_DASHBOARD_OUT"
+python3 scripts/dashboard.py --json
+
+# Start the read-only HTTP process on IPv4 loopback only.
+python3 scripts/dashboard_server.py --port 8765
+```
+
+The page is at `http://127.0.0.1:8765/`. The exact routes are `/`,
+`/index.html`, `/api/snapshot.json`, and `/healthz`; the same routes are
+available under the `/jobs` prefix for a Tailscale Serve mount. The API returns
+only the projection's versioned allowlist. Missing caches return an unavailable
+page and a non-healthy health/API response. Stale sources keep their last-good
+facts visible with their error and age.
+
+For a supervised Linux user service, create
+`~/.config/systemd/user/job-search-dashboard.service` and substitute the
+checkout path if it differs:
+
+```ini
+[Unit]
+Description=Private cached job-search dashboard
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/job-search-pipeline
+Environment=JOBSEARCH_PROJECTION_DB=%h/.local/state/job-search-pipeline/projection/index.sqlite3
+Environment=JOBSEARCH_TIMEZONE=Asia/Singapore
+ExecStart=/usr/bin/python3 %h/job-search-pipeline/scripts/dashboard_server.py --port 8765
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+UMask=0077
+
+[Install]
+WantedBy=default.target
+```
+
+```sh
+systemctl --user daemon-reload
+systemctl --user enable --now job-search-dashboard.service
+systemctl --user status job-search-dashboard.service
+```
+
+Optional private HTTPS access through Tailscale Serve:
+
+1. Check `tailscale serve status` and use a path that has no existing handler.
+2. Add the dashboard at the dedicated `/jobs` path. This leaves the existing
+   root handler and other paths in place:
+
+   ```sh
+   tailscale serve --bg --https=443 --set-path=/jobs http://127.0.0.1:8765
+   tailscale serve status
+   ```
+
+3. Restrict access to the serving node/port to the intended tailnet users and
+   devices through your Tailscale access-control policy. A URL path is not an
+   access-control boundary. Serve is tailnet-only when Funnel is off. Do not
+   configure Funnel or a public bind. Review the active Serve map after adding
+   the route and confirm every pre-existing route remains.
+
+The command syntax is documented in the
+[Tailscale Serve reference](https://tailscale.com/kb/1242/tailscale-serve).
+If the installed CLI cannot add `/jobs` without replacing existing Serve
+routes, stop and use that installation's route-management interface to add the
+dedicated path. The dashboard server itself accepts only the exact routes
+listed above and never serves files from the checkout or runtime directories.
+
+Before quiet-routing changes, the owner must complete human acceptance on the
+commit reported for this issue. Acceptance remains pending until the owner
+checks the 375px phone and 1440px desktop scenarios listed in the I13 result
+report, including stale/unavailable sources, unknown status, date-basis labels,
+keyboard navigation, and the source-to-current-status wording. Automated
+browser checks do not satisfy human acceptance.
+
 ## Check it works
 
 Create an isolated synthetic resume repo outside the checkout. `demo/` mirrors
@@ -488,6 +577,8 @@ python3 test_cv_checks.py
 python3 test_tailor_preflight.py
 python3 test_stages.py
 python3 test_dashboard.py
+python3 test_dashboard_views.py
+python3 test_dashboard_server.py
 python3 test_config.py
 python3 queue.py list
 python3 stages.py list
@@ -513,9 +604,9 @@ That placeholder is for offline examples only. In live use, set a real private
 repository. A temporary `gh` failure is reported by the relevant lane; do not
 interpret missing PR data as proof that no PR exists.
 
-`test_dashboard.py` includes an assertion that no profile value reaches the
-rendered HTML. If you add a field to `profile.yaml`, that test starts guarding it
-automatically. Do not weaken it.
+`test_dashboard.py` uses synthetic-only inputs. Dashboard view and server
+checks are `test_dashboard_views.py` and `test_dashboard_server.py`; they do not
+read private profile, mailbox, tracker, or runtime files.
 
 ## What a stranger still has to supply
 

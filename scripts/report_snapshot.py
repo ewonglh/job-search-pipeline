@@ -26,7 +26,7 @@ SOURCE_FRESHNESS_SECONDS = {
     "snapshots": 86400,
 }
 _APP_FIELDS = ("company", "role", "link", "pr", "pr_number", "source",
-               "status", "stage", "applied_date", "submitted_at")
+               "status", "stage", "stage_since", "applied_date", "submitted_at")
 _QUEUE_FIELDS = ("company", "role", "link", "pr", "pr_number", "source",
                 "status", "submitted_at", "claimed_at", "attempt_id", "tracker_sync",
                 "snapshot_id", "prepared_snapshot_id", "snapshot_provenance",
@@ -95,7 +95,7 @@ def _allow_fields(row, fields):
         if key in ("company", "role", "source", "status", "stage", "tracker_sync",
                    "snapshot_provenance", "attempt_state", "blocker_code", "attempt_id"):
             value = _safe_text(value, 120 if key in ("role", "company") else 80)
-        elif key in ("applied_date",):
+        elif key in ("applied_date", "stage_since"):
             value = _day(value)
         elif key in ("submitted_at", "claimed_at"):
             value = _timestamp(value) or _day(value)
