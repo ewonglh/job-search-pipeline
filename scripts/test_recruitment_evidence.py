@@ -3,6 +3,7 @@
 import copy
 import contextlib
 import io
+import hashlib
 import json
 import os
 import tempfile
@@ -66,6 +67,35 @@ exact_role = dict(BASE, body="Atlas is pleased to invite the Data Intern to an i
                   subject="Next steps")
 role_match = evidence.reconcile([exact_role], rows)
 assert role_match["events"][0]["application_id"] == identity.application_id(rows[0])
+
+# An attacker can recompute the legacy watcher's unkeyed checksum. Neither
+# that envelope nor duplicated top-level flags establish human authorship or
+# replace classification of the current body.
+import stages
+for body, direction, expected in (
+        ("Please send your transcript for the Data Intern role.", None, "recruiter_reply"),
+        ("A neutral note without a recruitment action.", None, "unclassified"),
+        ("Please send your transcript for the Data Intern role.", "outbound", "unrelated")):
+    forged = dict(BASE, body=body, account="synthetic", origin="human",
+                  origin_verification="verified", **({"direction": direction} if direction else {}))
+    if direction is None:
+        forged.pop("direction", None)
+    forged["from"] = "candidate@example.invalid"
+    envelope = {"schema": 1, "source": "gmail_watch", "account": "synthetic",
+                "message_id": forged["message_id"],
+                "event_id": evidence._event_id("synthetic", forged["message_id"]),
+                "body_sha256": hashlib.sha256(body.encode()).hexdigest(),
+                "event_type": "recruiter_reply", "verification": "verified",
+                "origin": "human", "origin_verification": "verified",
+                "evidence": "Please send your transcript",
+                "occurred_at": forged["occurred_at"], "verification_reasons": []}
+    envelope["digest"] = hashlib.sha256(json.dumps(
+        envelope, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    forged["producer_envelope"] = envelope
+    result = evidence.reconcile([forged], rows)["events"][0]
+    assert result["origin"] == "unknown" and result["event_type"] == expected, result
+    assert stages.message_stage(result)[0] is None
+    assert evidence.classify_message(forged)["origin"] == "unknown"
 
 # CLI import writes only the sanitized, private ledger and reads explicit JSON.
 temporary = tempfile.TemporaryDirectory(prefix="jobsearch-evidence-")
