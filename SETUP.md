@@ -236,6 +236,48 @@ kinds, `--cron`, `--tz`).
 - Per-job model and fallbacks: `--model`, `--fallbacks`.
 - Run history: `openclaw automations runs <job-id>`.
 
+### Cached native run traces
+
+Trace collection is an explicit command. From `scripts/`, run
+`python3 openclaw_traces.py collect --db "$JOBSEARCH_PROJECTION_DB"` to page
+native cron history and publish its allowlisted fields through the shared
+projection. The adapter supports OpenClaw 2026.10.1 (`e178c39`) and stops with
+a source error for other versions or response shapes. It uses the canonical
+`openclaw cron runs --all --json --limit N --offset N` interface; unstable
+offset pages are read twice and compared before publication. The installed
+`projectCronRunHistoryPage` returns `entries`, `total`, `offset`, `limit`,
+`hasMore`, and `nextOffset`, without a revision token
+(`dist/jobs-DVAwDb84.mjs:181-212`). The CLI sends `cron.runs` and prints that
+gateway result (`dist/cron-cli-B4xdjOLS.mjs:931-945`).
+Collection is capped at 1,000 pages of 200 runs, 64 MiB of CLI JSON, and 180
+seconds. Detailed retention defaults to 500 runs and is configurable up to
+10,000. Trajectory imports cap the root at 100 bundles and 64 MiB, with 20,000
+events per bundle and 100,000 events total.
+
+For tool details, export a session with OpenClaw's supported
+`sessions export-trajectory` command into a private directory outside this
+checkout, then set `JOBSEARCH_OPENCLAW_TRAJECTORY_ROOT` to that directory when
+collecting. The importer reads `manifest.json` and `events.jsonl` from
+`openclaw-trajectory` schema version 1. It processes each event in place and
+persists only native run/session/tool IDs, tool names, available timing, result
+categories, retry context when known, and separate provider/run usage
+counters. It never stores prompts, raw arguments, tool output, run summaries,
+mail content, or the export bundle. Keep the original export directory private;
+the bundle may contain sensitive data even though the projection does not. The
+installed exporter declares the schema and event count and writes the JSONL
+event stream (`dist/export-trajectory-5iSfWdO7.mjs:759-773,805`); the built-in
+recorder emits `tool.call` and `tool.result` events with native call IDs,
+names, and success categories (`dist/builtin-openclaw-BOwqFGmw.mjs:11010-22`).
+
+Use `python3 projection.py report traces` for the cached drilldown. A missing
+business result or tool trace remains visible as unknown/attention. Application
+and artifact joins also stay unknown unless a native ID proves the link.
+Delivery, execution, business result, and freshness are separate. Cost remains
+unavailable, and session/call usage is not combined with cron-run counters.
+The native history API supplies no separate observed-at timestamp, so trace
+source freshness remains unknown after collection. The `projection.py report`
+command is read-only and does not invoke OpenClaw.
+
 ### Optional notification receipt adapter
 
 `scripts/notify_delivery.py` can correlate an already staged notification with
