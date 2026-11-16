@@ -38,6 +38,7 @@ Usage:
   summary.py [digest] [--repo DIR] [--days N] [--dry-run] [--json]
   summary.py nudges [--repo DIR] [--dry-run] [--json]
   summary.py newpost [--repo DIR] [--skipped PATH] [--rankings PATH] [--dry-run] [--json]
+  summary.py health|funnel [report source options] [--json]
 
   Bare invocation = digest mode. ``--mode {digest,nudges,newpost}`` is also
   accepted and wins over the positional subcommand.
@@ -1475,7 +1476,7 @@ SKIPPED_DEFAULT = path_setting("JOBSEARCH_SKIPPED",
                                default_runtime_path("skipped.yaml"))
 RANKINGS_DEFAULT = path_setting("JOBSEARCH_RANKINGS",
                                 default_runtime_path("rankings.json"))
-MODES = ("digest", "nudges", "newpost")
+MODES = ("digest", "nudges", "newpost", "health", "funnel")
 
 
 def build_parser():
@@ -1501,6 +1502,17 @@ def build_parser():
                     help="owner-skip list (env JOBSEARCH_SKIPPED)")
     ap.add_argument("--rankings", default=RANKINGS_DEFAULT,
                     help="rankings join file (env JOBSEARCH_RANKINGS)")
+    ap.add_argument("--tracker", default=None, help="tracker path for health/funnel reports")
+    ap.add_argument("--queue", default=None, help="queue path for health/funnel reports")
+    ap.add_argument("--ledger", default=None, help="outcome ledger path for health/funnel reports")
+    ap.add_argument("--ingest-state", default=None, help="ingestion state path for health/funnel reports")
+    ap.add_argument("--snapshot-root", default=None, help="private submission snapshot root")
+    ap.add_argument("--as-of", default=None, help="fixed local report date (YYYY-MM-DD)")
+    ap.add_argument("--timezone", default=os.environ.get("JOBSEARCH_TIMEZONE", "Asia/Singapore"),
+                    help="IANA local timezone for report dates")
+    ap.add_argument("--weekday-goal", type=int, default=1)
+    ap.add_argument("--weekend-goal", type=int, default=0)
+    ap.add_argument("--ready-buffer", type=int, default=1)
     return ap
 
 
@@ -1587,6 +1599,27 @@ def run_newpost(args, log):
     return 0  # read-only: never touches the state file
 
 
+def run_report(args):
+    """Explicit local health/funnel reports; bypass digest state and Jev gate."""
+    import funnel_report
+    import pipeline_health
+
+    module = pipeline_health if resolve_mode(args) == "health" else funnel_report
+    argv = ["--repo", args.repo, "--timezone", args.timezone]
+    for option, value in (("--tracker", args.tracker), ("--queue", args.queue),
+                          ("--ledger", args.ledger), ("--ingest-state", args.ingest_state),
+                          ("--snapshot-root", args.snapshot_root), ("--as-of", args.as_of)):
+        if value is not None:
+            argv.extend([option, value])
+    if args.json:
+        argv.append("--json")
+    if module is pipeline_health:
+        argv.extend(["--weekday-goal", str(args.weekday_goal),
+                     "--weekend-goal", str(args.weekend_goal),
+                     "--ready-buffer", str(args.ready_buffer)])
+    return module.main(argv)
+
+
 def main(argv=None):
     args = build_parser().parse_args(argv)
     log = lambda *a: print(*a, file=sys.stderr)
@@ -1598,6 +1631,8 @@ def main(argv=None):
         return run_nudges(args, log)
     if mode == "newpost":
         return run_newpost(args, log)
+    if mode in ("health", "funnel"):
+        return run_report(args)
     return run_digest(args, log)
 
 

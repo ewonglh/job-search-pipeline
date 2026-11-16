@@ -134,6 +134,19 @@ that lock.
 `SANITIZATION.md` explains why the identity rule is absolute rather than a
 default.
 
+## Local health and funnel reports
+
+From `scripts/`, run `python3 summary.py health --as-of YYYY-MM-DD` for daily
+submission and queue health, or `python3 summary.py funnel --as-of YYYY-MM-DD`
+for mature 14/28-day outcome cohorts. Add `--json` for the same report data as
+JSON. Health goals and the ready buffer accept `--weekday-goal`,
+`--weekend-goal`, and `--ready-buffer` (defaults: 1 weekday, 0 weekend, and
+1 queued item); `--timezone` sets the local calendar.
+The reports read tracker, queue, outcome ledger, ingestion state, and snapshot
+metadata only at the collection boundary. Missing or malformed sources remain
+unavailable in the report. Rendering makes no model or mailbox calls and does
+not update state. A missing reply is not treated as a confirmed non-response.
+
 ## Review readiness
 
 From `scripts/`, `python3 automerge.py` reports whether a reviewed tailoring PR
@@ -224,6 +237,7 @@ or a repository inside this checkout. Empty path overrides fail immediately.
 | `JOBSEARCH_RANKINGS` | Ranking output used by reports | `~/.local/state/job-search-pipeline/rankings.json` |
 | `JOBSEARCH_DASHBOARD_OUT` | Dashboard output | `~/.local/state/job-search-pipeline/dashboard/index.html` |
 | `JOBSEARCH_INGEST_STATE` | Private email-ingestion cursors | `~/.local/state/job-search-pipeline/email_ingest_state.json` |
+| `JOBSEARCH_TIMEZONE` | Local day used by health and funnel reports | `Asia/Singapore` |
 | `JOBSEARCH_EMAIL_ADDRESS` | Mailbox's own address for outbound detection | unset |
 | `JOBSEARCH_EMAIL_FOLDERS` | Comma-separated managed IMAP folders | `INBOX` |
 

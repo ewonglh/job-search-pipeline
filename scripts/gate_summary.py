@@ -71,6 +71,8 @@ def main(argv=None):
         return S.run_nudges(args, log)
     if mode == "newpost":
         return S.run_newpost(args, log)
+    if mode in ("health", "funnel"):
+        return S.run_report(args)
 
     apps, postings = S.load_inputs(args.repo, log=log)
     today = S.sgt_today()
