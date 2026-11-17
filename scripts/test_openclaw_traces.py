@@ -208,6 +208,9 @@ with tempfile.TemporaryDirectory(prefix="synthetic-openclaw-traces-") as temp:
     warned_run = next(row for row in warned["records"] if row["kind"] == "run")
     assert warned_run["tool_trace_status"] == "partial"
     assert "tool_trace_export_warning" in warned_run["attention_codes"]
+    assert warned["coverage_status"] == "partial"
+    assert warned["trajectory_warning_count"] == 1
+    assert "trajectory_export_warning" in warned["coverage_reasons"]
     assert CANARIES[0] not in json.dumps(warned)
 
     # Exact unique session keys join runs missing sessionId. Reused keys and
@@ -341,14 +344,42 @@ with tempfile.TemporaryDirectory(prefix="synthetic-openclaw-traces-") as temp:
     changing = openclaw_traces.collect_native(
         FakeRunner(entries, change_second_pass=True), page_size=2)
     assert changing["records"] is None and changing["error_code"] == "snapshot_changed"
-    malformed_runner = FakeRunner([dict(success, unexpected=CANARIES[4])])
+    malformed_runner = FakeRunner([
+        dict(success, unexpected=CANARIES[4]),
+        _run("run-peer", "job-peer", "ok", ts=1794815949000),
+    ])
     malformed = openclaw_traces.collect_native(malformed_runner, page_size=2)
-    assert malformed["records"] is None and malformed["error_code"] == "unsupported_schema"
+    assert malformed["records"] is not None and malformed["error_code"] == "partial_coverage"
+    assert malformed["coverage_status"] == "partial"
+    assert malformed["quarantined_count"] == 1
+    assert [row["job_id"] for row in malformed["records"] if row["kind"] == "run"] == ["job-peer"]
+    assert CANARIES[4] not in json.dumps(malformed)
+    sanitized_partial = openclaw_traces.sanitize_collection(malformed)
+    assert sanitized_partial["coverage_status"] == "partial"
+
+    optional_canary = "password=TRACE-SECRET-CANARY"
+    redacted_native = openclaw_traces.collect_native(FakeRunner([
+        _run("run-redacted", "job-redacted", "ok", ts=1794815950000,
+             session_id="owner@example.invalid", model=optional_canary,
+             durationMs="not-a-duration",
+             usage={"input_tokens": optional_canary, "output_tokens": 9}),
+        success,
+    ]), page_size=2)
+    redacted_row = next(row for row in redacted_native["records"]
+                        if row.get("job_id") == "job-redacted")
+    assert redacted_native["coverage_status"] == "partial"
+    assert redacted_native["redacted_count"] >= 4
+    assert redacted_row["session_id"] is None and redacted_row["model"] is None
+    assert redacted_row["duration_ms"] is None
+    assert redacted_row["usage"]["input_tokens"] is None
+    assert redacted_row["usage"]["output_tokens"] == 9
+    assert optional_canary not in json.dumps(redacted_native)
     limited = openclaw_traces.collect_native(FakeRunner(entries), page_size=2, max_pages=1)
     assert limited["records"] is None and limited["error_code"] == "page_limit"
     retained = openclaw_traces.collect_native(
         FakeRunner(entries), page_size=2, retention_records=2)
-    assert retained["error_code"] is None
+    assert retained["error_code"] == "partial_coverage"
+    assert retained["coverage_status"] == "partial"
     assert retained["records"][0]["dropped_run_count"] == 3
     assert len([row for row in retained["records"] if row["kind"] == "run"]) == 2
     assert all("retention_truncated" in row["attention_codes"]
@@ -391,8 +422,27 @@ with tempfile.TemporaryDirectory(prefix="synthetic-openclaw-traces-") as temp:
     _write_export(unknown_field_exports, "bad", [unknown_event])
     unknown_field = openclaw_traces.collect_native(
         FakeRunner(entries), trajectory_root=unknown_field_exports)
-    assert unknown_field["records"] is None
-    assert unknown_field["error_code"] == "trajectory_export_invalid"
+    assert unknown_field["records"] is not None
+    assert unknown_field["coverage_status"] == "partial"
+    assert unknown_field["quarantined_count"] == 1
+    assert CANARIES[0] not in json.dumps(unknown_field)
+
+    # A corrupt or incomplete export cannot erase valid native runs or tools.
+    mixed_exports = root / "mixed-exports"
+    mixed_exports.mkdir()
+    _write_export(mixed_exports, "good", trajectory_events)
+    corrupt = _write_export(mixed_exports, "corrupt", [])
+    (corrupt / "manifest.json").write_text("{malformed", encoding="utf-8")
+    incomplete = _write_export(mixed_exports, "incomplete", [])
+    (incomplete / "events.jsonl").unlink()
+    mixed = openclaw_traces.collect_native(
+        FakeRunner(entries), trajectory_root=mixed_exports)
+    assert mixed["coverage_status"] == "partial"
+    assert mixed["quarantined_count"] == 2
+    assert len([row for row in mixed["records"] if row["kind"] == "run"]) == len(entries)
+    mixed_run = next(row for row in mixed["records"] if row.get("run_id") == "run-1")
+    assert mixed_run["tool_events"]
+    assert openclaw_traces.sanitize_collection(mixed)["coverage_status"] == "partial"
     in_repo = openclaw_traces.collect_native(
         FakeRunner(entries), trajectory_root=Path(__file__).resolve().parents[1])
     assert in_repo["records"] is None and in_repo["error_code"] == "trajectory_root_invalid"
@@ -416,6 +466,7 @@ with tempfile.TemporaryDirectory(prefix="synthetic-openclaw-traces-") as temp:
         db_path=str(root / "warned-index.sqlite3"), as_of="2026-11-16", now=NOW,
         trace_data=warned, **paths)
     assert warned_snapshot["published"] is True
+    assert warned_snapshot["sources"]["traces"]["coverage_status"] == "partial"
     assert CANARIES[0].encode() not in (root / "warned-index.sqlite3").read_bytes()
     assert all(canary not in b"".join(path.read_bytes() for path in db_path.parent.glob("index.sqlite3*"))
                for canary in (value.encode() for value in CANARIES))

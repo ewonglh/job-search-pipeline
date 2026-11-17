@@ -289,6 +289,7 @@ with tempfile.TemporaryDirectory(prefix="synthetic-projection-i11-") as temp:
     # Per-source failure keeps last-good event facts while other successful
     # replacement sources update; recovery clears only its own error.
     events_path = Path(paths["ledger"])
+    before_event_failure = projection.read_snapshot(str(db))
     events_path.write_text("{malformed", encoding="utf-8")
     Path(paths["tracker"]).write_text(_yaml([
         {"company": "Example Co", "role": "Recovered Tracker", "status": "Applied"}]),
@@ -301,6 +302,8 @@ with tempfile.TemporaryDirectory(prefix="synthetic-projection-i11-") as temp:
     assert failed_snapshot["sources"]["events"]["status"] == "stale"
     assert failed_snapshot["sources"]["events"]["error_code"] == "source_invalid"
     assert failed_snapshot["sources"]["events"]["error_quarantined_count"] == 1
+    assert failed_snapshot["sources"]["events"]["observed_at"] == before_event_failure["sources"]["events"]["observed_at"]
+    assert failed_snapshot["sources"]["events"]["last_success_at"] == before_event_failure["sources"]["events"]["last_success_at"]
     assert failed_snapshot["facts"]["events"][0]["event_type"] == "offer"
     assert failed_snapshot["facts"]["applications"][0]["row"]["role"] == "Recovered Tracker"
     assert failed_snapshot["sources"]["queue"]["record_count"] == 1
@@ -383,9 +386,145 @@ with tempfile.TemporaryDirectory(prefix="synthetic-projection-i11-") as temp:
     url_db = root / "url-db" / "index.sqlite3"
     _collect(url_db, url_paths)
     sanitized = projection.read_snapshot(str(url_db))
-    assert sanitized["sources"]["tracker"]["error_code"] == "source_invalid"
+    assert sanitized["sources"]["tracker"]["coverage_status"] == "partial"
+    assert sanitized["sources"]["tracker"]["quarantined_count"] == 1
+    assert sanitized["sources"]["tracker"]["error_code"] == "partial_coverage"
     assert CANARY not in json.dumps(sanitized)
     assert CANARY.encode() not in b"".join(_db_bytes(url_db).values())
+
+    # Explicit malformed PR references cannot fall back to a company/role join.
+    invalid_prs = [-1, 0, "0", "001", "https://github.com/example/resume/issues/42"]
+    invalid_paths = _fixture(root / "invalid-prs", tracker=[
+        {"company": "PR Co", "role": "Intern", "pr": value, "status": "Interview"}
+        for value in invalid_prs], queue=[
+            {"company": "PR Co", "role": "Intern", "pr_number": 42, "status": "queued"}])
+    invalid_db = root / "invalid-pr-db" / "index.sqlite3"
+    _collect(invalid_db, invalid_paths)
+    invalid_snapshot = projection.read_snapshot(str(invalid_db))
+    assert invalid_snapshot["sources"]["tracker"]["quarantined_count"] == len(invalid_prs)
+    assert len(invalid_snapshot["facts"]["applications"]) == 1
+    assert invalid_snapshot["facts"]["applications"][0]["row"].get("status") != "Interview"
+
+    # Credential labels in identity fields are quarantined; optional text is
+    # redacted. Neither exported facts nor SQLite bytes retain their values.
+    labels = ["access_token", "api_key", "refreshToken", "client-secret"]
+    credential_paths = _fixture(root / "credentials", tracker=[
+        {"company": label + "=" + CANARY, "role": "Intern", "pr_number": 70 + i}
+        for i, label in enumerate(labels)] + [
+            {"company": "Safe Peer", "role": "Intern", "pr_number": 80,
+             "source": '"access_token":' + CANARY}])
+    credential_db = root / "credential-db" / "index.sqlite3"
+    _collect(credential_db, credential_paths)
+    credential_snapshot = projection.read_snapshot(str(credential_db))
+    assert credential_snapshot["sources"]["tracker"]["quarantined_count"] == len(labels)
+    assert credential_snapshot["sources"]["tracker"]["redacted_count"] == 1
+    assert len(credential_snapshot["facts"]["applications"]) == 1
+    assert CANARY not in json.dumps(credential_snapshot)
+    assert CANARY.encode() not in b"".join(_db_bytes(credential_db).values())
+
+    # Legacy tracker PR/status forms, schema-1 evidence without coverage, and
+    # the legacy folders map retain safe facts while exposing partial coverage.
+    compat_paths = _fixture(root / "compatibility", tracker_text=_yaml([
+        {"company": "Legacy Co", "role": "Platform Intern",
+         "pr": "https://github.com/example/resume/pull/41",
+         "status": "interviewing", "applied_date": "not-a-date"},
+        {"company": "Unsafe Co", "role": "Unsafe Role",
+         "link": "https://jobs.example/role?private=" + CANARY,
+         "status": "Applied"},
+        {"company": "Ambiguous Co", "role": "Ambiguous Role",
+         "pr": 98, "pr_number": 99, "status": "Applied"},
+        {"company": "Current Co", "role": "Current Intern",
+         "pr_number": 42, "stage": "Applied", "source": "token=" + CANARY},
+    ]))
+    legacy_event = {"event_id": "legacy-event-1", "event_type": "interview_invitation",
+                    "application_id": "pr:41", "occurred_at": "bad-time",
+                    "verification": "unrecognized", "origin": "candidate@example.invalid"}
+    Path(compat_paths["ledger"]).write_text(
+        json.dumps({"schema": 1, "events": [legacy_event,
+                  {"event_id": "legacy-event-2", "event_type": "offer",
+                   "application_id": "pr:42", "occurred_at": "2026-11-16T05:00:00Z",
+                   "verification": "verified", "origin": "unknown"}]}),
+        encoding="utf-8")
+    Path(compat_paths["ingestion"]).write_text(json.dumps({"schema": 1, "folders": {
+        "INBOX": {"last_scan_at": "2026-11-16T05:30:00Z", "account": CANARY},
+        "ARCHIVE": {"last_scan_at": "not-a-time"},
+        "BROKEN": "not-a-folder-record"}}), encoding="utf-8")
+    compat_db = root / "compatibility-db" / "index.sqlite3"
+    _collect(compat_db, compat_paths)
+    compat_snapshot = projection.read_snapshot(str(compat_db))
+    assert {row["row"].get("role") for row in compat_snapshot["facts"]["applications"]} == {
+        "Platform Intern", "Current Intern"}
+    assert compat_snapshot["sources"]["tracker"]["coverage_status"] == "partial"
+    assert compat_snapshot["sources"]["tracker"]["quarantined_count"] == 2
+    assert compat_snapshot["sources"]["tracker"]["redacted_count"] == 2
+    assert compat_snapshot["sources"]["tracker"]["coverage_reasons"] == [
+        "optional_metadata_redacted", "records_quarantined"]
+    assert compat_snapshot["sources"]["events"]["coverage_status"] == "partial"
+    assert "legacy_coverage_missing" in compat_snapshot["sources"]["events"]["coverage_reasons"]
+    assert compat_snapshot["facts"]["event_coverage"]["complete"] is False
+    compat_events = compat_snapshot["facts"]["events"]
+    assert {item["event_type"] for item in compat_events} == {
+        "interview_invitation", "offer"}
+    redacted_event = next(item for item in compat_events
+                          if item["event_type"] == "interview_invitation")
+    assert "occurred_at" not in redacted_event
+    assert redacted_event["verification"] == "unknown"
+    assert redacted_event["origin"] == "unknown"
+    assert compat_snapshot["sources"]["ingestion"]["coverage_status"] == "partial"
+    assert compat_snapshot["sources"]["ingestion"]["quarantined_count"] == 1
+    assert compat_snapshot["sources"]["ingestion"]["redacted_count"] == 1
+    assert compat_snapshot["sources"]["ingestion"]["coverage_reasons"] == [
+        "optional_metadata_redacted", "records_quarantined"]
+    assert compat_snapshot["facts"]["ingestion"]["scope_count"] == 2
+    assert compat_snapshot["facts"]["ingestion"]["last_scan_at"] == "2026-11-16T05:30:00Z"
+    assert CANARY not in json.dumps(compat_snapshot)
+    assert CANARY.encode() not in b"".join(_db_bytes(compat_db).values())
+    legacy_form_path = root / "legacy-tracker.yaml"
+    current_form_path = root / "current-tracker.yaml"
+    legacy_form_path.write_text(_yaml([{
+        "company": "Same Co", "role": "Platform Intern",
+        "pr": "https://github.com/example/resume/pull/43",
+        "status": "interviewing"}]), encoding="utf-8")
+    current_form_path.write_text(_yaml([{
+        "company": "Same Co", "role": "Platform Intern",
+        "pr_number": 43, "stage": "Interview"}]), encoding="utf-8")
+    legacy_form = projection._read_tracker(str(legacy_form_path))["records"]
+    current_form = projection._read_tracker(str(current_form_path))["records"]
+    import application_identity
+    import summary
+    assert application_identity.application_id(legacy_form[0]) == \
+        application_identity.application_id(current_form[0]) == "pr:43"
+    assert summary.row_stage(legacy_form[0]) == summary.row_stage(current_form[0]) == "Interview"
+
+    # Existing schema-1 caches gain the new aggregate coverage columns without
+    # replacing their last-good source timestamps.
+    migration_db = root / "migration.sqlite3"
+    old_db = sqlite3.connect(str(migration_db))
+    old_db.executescript("""
+        CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        INSERT INTO meta(key,value) VALUES('schema_version','1');
+        CREATE TABLE source_state (
+            source TEXT PRIMARY KEY, active_generation TEXT, status TEXT NOT NULL,
+            observed_at TEXT, collected_at TEXT, last_success_at TEXT,
+            freshness_seconds INTEGER NOT NULL, error_code TEXT,
+            record_count INTEGER NOT NULL DEFAULT 0,
+            quarantined_count INTEGER NOT NULL DEFAULT 0,
+            error_quarantined_count INTEGER NOT NULL DEFAULT 0,
+            empty INTEGER NOT NULL DEFAULT 0
+        );
+        INSERT INTO source_state(source,status,observed_at,last_success_at,freshness_seconds)
+        VALUES('events','stale','2026-11-15T05:00:00Z','2026-11-16T06:00:00Z',604800);
+    """)
+    old_db.close()
+    migrated = projection._connect_writer(str(migration_db))
+    try:
+        migrated_columns = {row[1] for row in migrated.execute("PRAGMA table_info(source_state)")}
+        assert {"coverage_status", "coverage_reasons", "redacted_count"}.issubset(migrated_columns)
+        preserved = migrated.execute(
+            "SELECT observed_at,last_success_at FROM source_state WHERE source='events'").fetchone()
+        assert tuple(preserved) == ("2026-11-15T05:00:00Z", "2026-11-16T06:00:00Z")
+    finally:
+        migrated.close()
 
     # Publish between the reader's payload and progress queries. The reader
     # must return both from its original SQLite transaction.

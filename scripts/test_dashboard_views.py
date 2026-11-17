@@ -242,15 +242,15 @@ def test_render_escapes_html_svg_attributes_and_embedded_json():
 def test_stage_since_projection_allowlist_is_typed():
     row = {"company": "Synthetic", "role": "Engineer", "status": "interview",
            "stage_since": "2026-11-10"}
-    cleaned = projection._strict_rows([row], projection.TRACKER_FIELDS)
+    cleaned, quarantined, redacted = projection._compatible_rows(
+        [row], projection.TRACKER_FIELDS)
     assert cleaned[0]["stage_since"] == "2026-11-10"
-    try:
-        projection._strict_rows([dict(row, stage_since="not-a-date")],
-                                projection.TRACKER_FIELDS)
-    except projection._InvalidSource:
-        pass
-    else:
-        raise AssertionError("invalid stage_since was accepted")
+    assert quarantined == redacted == 0
+    cleaned, quarantined, redacted = projection._compatible_rows(
+        [dict(row, stage_since="not-a-date")], projection.TRACKER_FIELDS)
+    assert len(cleaned) == 1 and cleaned[0]["company"] == "Synthetic"
+    assert "stage_since" not in cleaned[0]
+    assert quarantined == 0 and redacted == 1
     assert d.card_age({"stage_since": "2026-11-10", "applied_date": "2026-10-01"},
                       dt.date(2026, 11, 16)) == (6, "stage_since")
 
