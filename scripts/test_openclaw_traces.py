@@ -426,6 +426,23 @@ with tempfile.TemporaryDirectory(prefix="synthetic-openclaw-traces-") as temp:
     assert unknown_field["coverage_status"] == "partial"
     assert unknown_field["quarantined_count"] == 1
     assert CANARIES[0] not in json.dumps(unknown_field)
+
+    # A corrupt or incomplete export cannot erase valid native runs or tools.
+    mixed_exports = root / "mixed-exports"
+    mixed_exports.mkdir()
+    _write_export(mixed_exports, "good", trajectory_events)
+    corrupt = _write_export(mixed_exports, "corrupt", [])
+    (corrupt / "manifest.json").write_text("{malformed", encoding="utf-8")
+    incomplete = _write_export(mixed_exports, "incomplete", [])
+    (incomplete / "events.jsonl").unlink()
+    mixed = openclaw_traces.collect_native(
+        FakeRunner(entries), trajectory_root=mixed_exports)
+    assert mixed["coverage_status"] == "partial"
+    assert mixed["quarantined_count"] == 2
+    assert len([row for row in mixed["records"] if row["kind"] == "run"]) == len(entries)
+    mixed_run = next(row for row in mixed["records"] if row.get("run_id") == "run-1")
+    assert mixed_run["tool_events"]
+    assert openclaw_traces.sanitize_collection(mixed)["coverage_status"] == "partial"
     in_repo = openclaw_traces.collect_native(
         FakeRunner(entries), trajectory_root=Path(__file__).resolve().parents[1])
     assert in_repo["records"] is None and in_repo["error_code"] == "trajectory_root_invalid"

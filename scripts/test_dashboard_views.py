@@ -250,11 +250,12 @@ def test_stage_since_projection_allowlist_is_typed():
     cleaned, quarantined, redacted = projection._compatible_rows(
         [row], projection.TRACKER_FIELDS)
     assert cleaned[0]["stage_since"] == "2026-11-10"
-    assert quarantined == 0 and redacted == 0
-    invalid, quarantined, redacted = projection._compatible_rows(
+    assert quarantined == redacted == 0
+    cleaned, quarantined, redacted = projection._compatible_rows(
         [dict(row, stage_since="not-a-date")], projection.TRACKER_FIELDS)
+    assert len(cleaned) == 1 and cleaned[0]["company"] == "Synthetic"
+    assert "stage_since" not in cleaned[0]
     assert quarantined == 0 and redacted == 1
-    assert "stage_since" not in invalid[0]
     assert d.card_age({"stage_since": "2026-11-10", "applied_date": "2026-10-01"},
                       dt.date(2026, 11, 16)) == (6, "stage_since")
 

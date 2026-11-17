@@ -392,6 +392,36 @@ with tempfile.TemporaryDirectory(prefix="synthetic-projection-i11-") as temp:
     assert CANARY not in json.dumps(sanitized)
     assert CANARY.encode() not in b"".join(_db_bytes(url_db).values())
 
+    # Explicit malformed PR references cannot fall back to a company/role join.
+    invalid_prs = [-1, 0, "0", "001", "https://github.com/example/resume/issues/42"]
+    invalid_paths = _fixture(root / "invalid-prs", tracker=[
+        {"company": "PR Co", "role": "Intern", "pr": value, "status": "Interview"}
+        for value in invalid_prs], queue=[
+            {"company": "PR Co", "role": "Intern", "pr_number": 42, "status": "queued"}])
+    invalid_db = root / "invalid-pr-db" / "index.sqlite3"
+    _collect(invalid_db, invalid_paths)
+    invalid_snapshot = projection.read_snapshot(str(invalid_db))
+    assert invalid_snapshot["sources"]["tracker"]["quarantined_count"] == len(invalid_prs)
+    assert len(invalid_snapshot["facts"]["applications"]) == 1
+    assert invalid_snapshot["facts"]["applications"][0]["row"].get("status") != "Interview"
+
+    # Credential labels in identity fields are quarantined; optional text is
+    # redacted. Neither exported facts nor SQLite bytes retain their values.
+    labels = ["access_token", "api_key", "refreshToken", "client-secret"]
+    credential_paths = _fixture(root / "credentials", tracker=[
+        {"company": label + "=" + CANARY, "role": "Intern", "pr_number": 70 + i}
+        for i, label in enumerate(labels)] + [
+            {"company": "Safe Peer", "role": "Intern", "pr_number": 80,
+             "source": '"access_token":' + CANARY}])
+    credential_db = root / "credential-db" / "index.sqlite3"
+    _collect(credential_db, credential_paths)
+    credential_snapshot = projection.read_snapshot(str(credential_db))
+    assert credential_snapshot["sources"]["tracker"]["quarantined_count"] == len(labels)
+    assert credential_snapshot["sources"]["tracker"]["redacted_count"] == 1
+    assert len(credential_snapshot["facts"]["applications"]) == 1
+    assert CANARY not in json.dumps(credential_snapshot)
+    assert CANARY.encode() not in b"".join(_db_bytes(credential_db).values())
+
     # Legacy tracker PR/status forms, schema-1 evidence without coverage, and
     # the legacy folders map retain safe facts while exposing partial coverage.
     compat_paths = _fixture(root / "compatibility", tracker_text=_yaml([
