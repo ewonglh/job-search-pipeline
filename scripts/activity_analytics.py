@@ -215,7 +215,7 @@ def build_report(snapshot, period="last12weeks", *, start=None, end=None,
         elif len(dated) == 1:
             observations["recorded_claims"][app_id] = next(iter(dated))
             all_days.extend(dated)
-        elif claims or missing_for_app:
+        if missing_for_app or (claims and not dated):
             claims_missing += 1
     diagnostics["claims_missing_or_invalid_time"] += claims_missing
 
@@ -291,6 +291,8 @@ def build_report(snapshot, period="last12weeks", *, start=None, end=None,
         stage = row.get("stage") or row.get("status") or "unknown"
         stage_counts[str(stage)] += 1
 
+    if catalog is None:
+        catalog = facts.get("company_catalog")
     catalog = catalog or {"schema_version": 1, "records": []}
     company = {"application_count": len(selected), "known_company_count": 0,
                "unresolved_application_count": 0,

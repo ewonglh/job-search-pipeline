@@ -27,7 +27,7 @@ MAX_BATCH_SIZE = 1000
 MAX_SOURCE_RECORDS = 200000
 SNAPSHOT_HISTORY = 8
 SOURCES = ("tracker", "queue", "events", "ingestion", "snapshots",
-           "reviews", "preflight", "activities", "traces")
+           "reviews", "preflight", "activities", "companies", "traces")
 HASH40_RE = re.compile(r"^[0-9a-f]{40}$")
 HASH64_RE = re.compile(r"^[0-9a-f]{64}$")
 CODE_RE = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,63}$")
@@ -66,7 +66,8 @@ QUEUE_ENUMS = {
 }
 SOURCE_FRESHNESS = dict(report_snapshot.SOURCE_FRESHNESS_SECONDS)
 SOURCE_FRESHNESS.update({"reviews": 86400, "preflight": 86400,
-                         "activities": 14 * 86400, "traces": 3600})
+                         "activities": 14 * 86400, "companies": 30 * 86400,
+                         "traces": 3600})
 
 
 class ProjectionError(Exception):
@@ -480,6 +481,26 @@ def _read_events(path):
                 "redacted_count": redacted,
                 "coverage_status": "partial" if partial else "complete",
                 "coverage_reasons": reasons}
+    except (OSError, UnicodeError, ValueError, TypeError, _InvalidSource) as exc:
+        return _source_error(path, exc)
+
+
+def _read_companies(path):
+    """Import validated catalog facts once per source collection generation."""
+    import company_catalog
+    try:
+        catalog = company_catalog.load(path)
+        records = []
+        for row in catalog["records"]:
+            clean = dict(row)
+            clean["aliases"] = [_safe_text(alias, 120) for alias in row["aliases"]]
+            clean["primary_industry"] = _safe_text(row["primary_industry"], 100)
+            if row.get("source_url") is not None:
+                clean["source_url"] = _safe_url(row["source_url"])
+            records.append(clean)
+        return {"records": records, "record_count": len(records),
+                "observed_at": None, "error_code": None,
+                "coverage_status": "complete", "quarantined_count": 0}
     except (OSError, UnicodeError, ValueError, TypeError, _InvalidSource) as exc:
         return _source_error(path, exc)
 
@@ -1174,6 +1195,8 @@ def _make_snapshot(connection, *, as_of, generated_at, snapshot_root):
         event["quarantined"] = event.get("event_id") in quarantined_ids
     snapshot["facts"]["event_diagnostics"] = event_diagnostics
     snapshot["facts"]["quarantined_event_count"] = quarantined_count
+    snapshot["facts"]["company_catalog"] = {
+        "schema_version": 1, "records": _read_active_records(connection, "companies")}
     activity_source = sources.get("activities", {})
     activities, activity_unmatched = [], 0
     app_aliases = snapshot["facts"].get("application_aliases", {})
@@ -1257,6 +1280,7 @@ def _input_paths(repo=None, tracker=None, queue=None, ledger=None, ingestion=Non
         "reviews": review_state or path_setting("JOBSEARCH_REVIEW_STATE", default_runtime_path("review_state.json")),
         "preflight": preflight_state or path_setting("JOBSEARCH_PREFLIGHT_STATE", default_runtime_path("preflight_records.json")),
         "activities": path_setting("JOBSEARCH_ACTIVITY_STATE", default_runtime_path("tailoring_activities.json")),
+        "companies": path_setting("JOBSEARCH_COMPANY_CATALOG", default_runtime_path("company_catalog.json")),
     }
     return paths
 
@@ -1271,6 +1295,7 @@ def _collect_inputs(paths, trace_data=None):
         "reviews": _read_reviews(paths["reviews"]),
         "preflight": _read_preflight(paths["preflight"]),
         "activities": _read_activities(paths["activities"]),
+        "companies": _read_companies(paths["companies"]),
     }
     if trace_data is not None:
         import openclaw_traces
@@ -1574,10 +1599,8 @@ def main(argv=None):
             return 0
         if args.kind == "analytics":
             import activity_analytics
-            import company_catalog
             report = activity_analytics.build_report(
-                snapshot, args.period, start=args.start, end=args.end,
-                catalog=company_catalog.load())
+                snapshot, args.period, start=args.start, end=args.end)
             print(json.dumps(report, indent=2, ensure_ascii=False))
             return 0
         if args.kind == "health":

@@ -554,4 +554,32 @@ with tempfile.TemporaryDirectory(prefix="synthetic-projection-i11-") as temp:
     assert coherent["collection"]["status"] == "in_progress"
     assert projection.read_snapshot(str(interleave_db))["snapshot_id"] != coherent["snapshot_id"]
 
+    # Catalog facts belong to the published generation. Reports neither open
+    # the external catalog nor observe its edits before the next collection.
+    import company_catalog
+    catalog_paths = _fixture(root / "catalog-source", tracker=[{
+        "company": "Catalog Co", "role": "Intern", "pr_number": 81,
+        "status": "Applied", "applied_date": "2026-11-15"}])
+    catalog_db = root / "catalog-db" / "index.sqlite3"
+    company = company_catalog._record({
+        "key": "catalog-co", "aliases": ["Catalog Co"], "size": "SME",
+        "footprint": "multinational", "primary_industry": "software"})
+    with mock.patch.object(company_catalog, "load", return_value={
+            "schema_version": 1, "records": [company]}) as loader:
+        _collect(catalog_db, catalog_paths)
+        assert loader.call_count == 1
+    catalog_snapshot = projection.read_snapshot(str(catalog_db))
+    assert catalog_snapshot["facts"]["company_catalog"]["records"][0]["size"] == "SME"
+    output = io.StringIO()
+    with mock.patch.object(company_catalog, "load", side_effect=AssertionError("uncached read")):
+        with contextlib.redirect_stdout(output):
+            assert projection.main(["report", "analytics", "--db", str(catalog_db),
+                                    "--period", "alltime"]) == 0
+    assert json.loads(output.getvalue())["companies"]["size"]["SME"] == 1
+    with mock.patch.object(company_catalog, "load", side_effect=company_catalog.CatalogError("invalid")):
+        _collect(catalog_db, catalog_paths)
+    retained_catalog = projection.read_snapshot(str(catalog_db))
+    assert retained_catalog["facts"]["company_catalog"] == catalog_snapshot["facts"]["company_catalog"]
+    assert retained_catalog["sources"]["companies"]["error_code"] == "source_invalid"
+
 print("test_projection: incremental generations, privacy, cached reads and review facts passed")

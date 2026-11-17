@@ -171,33 +171,29 @@ unknown unless the native source exposes explicit IDs. Native counters stay
 separated by provider and cron-run scope; no cost or overlapping totals are
 calculated.
 
-`python3 projection.py report analytics --period last12weeks` prints the
-versioned cached analytics interface for charts and drilldowns. It also accepts
-`thisweek`, `thismonth`, `last3months`, `alltime`, and `custom` with inclusive
-`--start YYYY-MM-DD --end YYYY-MM-DD` dates. Dates use Asia/Singapore; weeks
-start Monday and longer views use calendar months. Each series bucket includes
-the matching canonical application IDs. Confirmed submissions come only from
-verified local submission manifests; tracker and queue dates stay separate as
-recorded claims. Current stage counts are a separate all-application snapshot.
+- `python3 projection.py report analytics --period last12weeks` reads cached
+  analytics. Presets include `thisweek`, `thismonth`, `last3months`, `alltime`,
+  and `custom --start YYYY-MM-DD --end YYYY-MM-DD` with inclusive Singapore
+  dates, Monday weeks, and calendar months. See [report builder](scripts/activity_analytics.py#L159).
+- Series include canonical application IDs. Verified submission manifests,
+  recorded date claims, and current stages have separate counts. Missing dates
+  keep coverage partial. See [metric aggregation](scripts/activity_analytics.py#L159).
+- Explicit initial-tailoring and retailoring completions come from
+  `JOBSEARCH_ACTIVITY_STATE`, defaulting to
+  `~/.local/state/job-search-pipeline/tailoring_activities.json`. The schema is
+  `{"schema":1,"coverage":{"complete":true},"activities":[{"activity_id":"stable-id","application_id":"canonical-or-supported-alias","kind":"initial_tailoring","completed_at":"2026-01-01T12:00:00Z"}]}`.
+  Use `initial_tailoring` or `retailoring`; declare complete coverage only for a
+  complete history. See [activity reader](scripts/projection.py#L508).
+- The authoritative company catalog uses `JOBSEARCH_COMPANY_CATALOG`, defaulting
+  to `~/.local/state/job-search-pipeline/company_catalog.json`, outside the
+  checkout. Collection stores sanitized copies in the cached generation;
+  reports use those copies. See [catalog reader](scripts/projection.py#L488).
+- `company_catalog.upsert(record)` atomically updates stable keys, exact aliases,
+  independent size and footprint classifications, industry, source URL, date,
+  confidence, and review state. Ambiguous aliases stay unknown. See
+  [catalog update](scripts/company_catalog.py#L133) and
+  [alias resolution](scripts/company_catalog.py#L155).
 
-Initial tailoring and retailoring counts require explicit completion records
-in the private schema-1 JSON file at `JOBSEARCH_ACTIVITY_STATE` (default
-`~/.local/state/job-search-pipeline/tailoring_activities.json`). Its shape is
-`{"schema":1,"coverage":{"complete":true},"activities":[{"activity_id":"stable-id","application_id":"canonical-or-supported-alias","kind":"initial_tailoring","completed_at":"2026-01-01T12:00:00Z"}]}`;
-`kind` is `initial_tailoring` or `retailoring`. Set `coverage.complete` only
-when the ledger covers the full activity history. Refresh imports this
-allowlisted metadata without model or network calls. Missing or partial history
-is reported as unknown; run traces and current stages do not create activity.
-
-Company metadata lives separately at `JOBSEARCH_COMPANY_CATALOG` (default
-`~/.local/state/job-search-pipeline/company_catalog.json`), outside the checkout
-and SQLite cache. `company_catalog.upsert(record)` explicitly inserts or
-corrects one record and atomically persists it. Records use stable `key`, exact
-`aliases`, independent `size` (`SME`, `large`, `unknown`) and `footprint`
-(`domestic`, `multinational`, `unknown`), `primary_industry`, `source_url`,
-`classification_date`, `confidence`, and `review`. New records default to
-unknown; ambiguous aliases remain unknown. Analytics counts each canonical
-application once and exposes unknown company and classification coverage.
 `python3 summary.py health --as-of YYYY-MM-DD` shows daily submission and queue
 health; `python3 summary.py funnel --as-of YYYY-MM-DD` shows mature 14/28-day
 outcome cohorts. Add `--json` for JSON. These read/report commands open the

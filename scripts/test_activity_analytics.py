@@ -44,6 +44,15 @@ def _snapshot():
         ], "activity_coverage": {"complete": True}, "identity_conflicts": []}}
 
 
+mixed_claims = _snapshot()
+mixed_claims["facts"]["applications"] = [mixed_claims["facts"]["applications"][0]]
+mixed_claims["facts"]["applications"][0]["submission_date_claims"].append({"missing": True})
+mixed_report = activity_analytics.build_report(mixed_claims, "alltime")
+assert mixed_report["metrics"]["recorded_claims"] == "unknown_or_partial"
+assert mixed_report["totals"]["recorded_claims"] is None
+assert mixed_report["observed_totals"]["recorded_claims"] == 1
+assert mixed_report["submission_timing"]["claims_missing_or_invalid"] == 1
+
 snapshot = _snapshot()
 report = activity_analytics.build_report(snapshot, "custom", start="2026-01-04", end="2026-01-06")
 assert report["timezone"] == "Asia/Singapore"
