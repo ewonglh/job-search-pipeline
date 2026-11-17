@@ -672,10 +672,23 @@ main { min-width: 0; padding-top: 22px; }
 .chart .flow { fill: none; stroke-linecap: round; opacity: .42; }
 .chart .node { fill: var(--surface); stroke: var(--border); stroke-width: 1.5; }
 .bar-chart { min-width: 0; overflow: hidden; }
-.chart .bar { fill: #2563eb; stroke: #1e40af; stroke-width: 1; }
-.chart .bar.partial { fill: #b45309; stroke: #7c2d12; stroke-dasharray: 5 3; }
-.chart .bar-label { font-size: 13px; }
-.chart-link:focus .bar { stroke: #111827; stroke-width: 3; }
+.chart-bars { display: grid; gap: 7px; }
+.trend-chart { display: block; width: 100%; height: auto; margin-top: 12px; color: var(--text); }
+.trend-chart text { fill: currentColor; font: 12px system-ui, sans-serif; }
+.trend-chart polyline { fill: none; stroke: #1d4ed8; stroke-width: 3; }
+.trend-chart circle { fill: #1d4ed8; stroke: var(--surface); stroke-width: 2; }
+.trend-chart a:focus circle { stroke: #111827; stroke-width: 4; }
+.chart-row { display: grid; grid-template-columns: minmax(6rem, 34%) minmax(0, 1fr); align-items: center; gap: 8px; }
+.chart-label { font-size: .88rem; line-height: 1.3; overflow-wrap: anywhere; }
+.chart-track { position: relative; display: block; min-width: 0; min-height: 32px; overflow: hidden; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-muted); text-decoration: none; }
+.chart-track:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+.chart-fill { position: absolute; inset: 0 auto 0 0; min-width: 0; background: #2563eb; }
+.chart-fill.partial { background: repeating-linear-gradient(135deg, #b45309, #b45309 6px, #fcd34d 6px, #fcd34d 10px); }
+.chart-count { position: relative; z-index: 1; display: flex; width: max-content; min-height: 26px; align-items: center; margin: 2px; padding: 2px 8px; border-radius: 4px; background: var(--surface); color: var(--text); font-weight: 700; font-variant-numeric: tabular-nums; }
+.industry-bar { display: block; height: 10px; margin-top: 4px; border-radius: 5px; background: var(--surface-muted); }
+.industry-bar span { display: block; height: 100%; border-radius: inherit; background: var(--primary); }
+.dimension-list .industry-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 4px 10px; }
+.industry-row .industry-bar { grid-column: 1 / -1; }
 .chart-data { margin-top: 12px; }
 .chart-data table { font-size: .92rem; }
 .chart-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; }
@@ -970,6 +983,8 @@ def build_snapshot_data(snapshot, timezone_name=None):
         "generated_at": snapshot.get("generated_at"),
         "compact": projection.format_compact(snapshot),
         "today": today,
+        "confirmed_today": dashboard_charts.build_report(
+            snapshot, "custom", start=today.get("as_of"), end=today.get("as_of")),
         "applications": _application_rows(snapshot),
         "sankey": build_snapshot_sankey(snapshot),
         "runs": traces,
@@ -1204,18 +1219,27 @@ def _render_application_detail(detail):
     return "".join(out)
 
 
-def _render_today(report, compact):
+def _render_today(report, compact, confirmed_today=None, snapshot=None):
     goal = _as_dict(report.get("submission_goal"))
     buffer = _as_dict(report.get("ready_buffer"))
     attempts = _as_dict(report.get("attempts"))
     sync = _as_dict(report.get("tracker_sync"))
     gaps = _as_dict(report.get("snapshot_gaps"))
     blockers = _as_dict(report.get("blockers"))
+    confirmed = goal.get("confirmed")
+    coverage = _as_dict(goal.get("submissions")).get("coverage", "unknown")
+    if isinstance(confirmed_today, dict):
+        metric_coverage = _analytics_coverage(confirmed_today, "confirmed_submissions", snapshot or {})
+        observed = _as_dict(confirmed_today.get("observed_totals")).get("confirmed_submissions", 0)
+        exact = _as_dict(confirmed_today.get("totals")).get("confirmed_submissions")
+        confirmed = exact if metric_coverage in ("complete", "stale") else (
+            "≥ {}".format(observed) if observed else "Unknown")
+        coverage = metric_coverage
     out = ["<div class='metrics'>",
-           "<article class='metric'><span class='metric-label'>Daily submission goal · {}</span>"
+           "<article class='metric'><span class='metric-label'>Daily submission goal · confirmed submissions · {}</span>"
            "<span class='metric-value'>{} / {}</span><span class='meta'>Coverage: {}</span></article>".format(
-               _e(report.get("timezone", "unknown")), _e(_count(goal.get("confirmed"))),
-               _e(_count(goal.get("target"))), _e(_as_dict(goal.get("submissions")).get("coverage", "unknown"))),
+               _e(report.get("timezone", "unknown")), _e(_count(confirmed)),
+               _e(_count(goal.get("target"))), _e(coverage)),
            "<article class='metric'><span class='metric-label'>Ready buffer</span>"
            "<span class='metric-value'>{} / {}</span><span class='meta'>Gap: {}</span></article>".format(
                _e(_count(buffer.get("queued"))), _e(_count(buffer.get("target"))),
@@ -1265,7 +1289,7 @@ def _chart_interval_label(item):
     return "{} to {}".format(start, end)
 
 
-def _render_metric_chart(report, snapshot, metric, title, state=None, *, limit=None):
+def _render_metric_chart(report, snapshot, metric, title, state=None, *, limit=None, trend=False):
     import dashboard_charts
     state = state or explorer.parse_query("")
     items = report.get("series", [])
@@ -1285,11 +1309,12 @@ def _render_metric_chart(report, snapshot, metric, title, state=None, *, limit=N
                                          and snapshot.get("facts", {}).get("applications")):
         out.append("<p class='empty' role='status'>No applications with dated evidence are in this range.</p></section>")
         return "".join(out)
-    if status == "partial":
+    if status in ("partial", "unknown"):
         if observed_total:
-            out.append("<p class='caveat' role='status'>Partial coverage: values below are observed counts, not complete totals.</p>")
+            label = "Partial" if status == "partial" else "Unknown"
+            out.append("<p class='caveat' role='status'>{} coverage: values below are observed counts, not complete totals.</p>".format(label))
         else:
-            out.append("<p class='empty' role='status'>No observations appear in the cache; incomplete coverage means this is not a confirmed zero.</p></section>")
+            out.append("<p class='empty' role='status'>No observations appear in the cache; {} coverage means this is not a confirmed zero.</p></section>".format(status))
             return "".join(out)
     elif status == "stale":
         out.append("<p class='caveat' role='status'>The relevant cached source is stale; counts are last observed values.</p>")
@@ -1300,28 +1325,47 @@ def _render_metric_chart(report, snapshot, metric, title, state=None, *, limit=N
         return "".join(out)
     values = [item.get("observed_values", {}).get(metric, 0) for item in items]
     max_value = max([value for value in values if isinstance(value, int)] + [1])
-    row_height, width, left, max_width = 34, 760, 190, 520
-    height = 24 + len(items) * row_height
-    out.append("<svg class='chart' width='100%' height='auto' role='img' aria-label='{}' viewBox='0 0 {} {}' xmlns='http://www.w3.org/2000/svg'>".format(
-        _e(title), width, height))
-    for index, item in enumerate(items):
-        value = item.get("observed_values", {}).get(metric, 0)
-        value = value if isinstance(value, int) and not isinstance(value, bool) else 0
-        y = 20 + index * row_height
-        label = _chart_interval_label(item)
-        app_ids = dashboard_charts.metric_application_ids(
-            report, metric, item.get("start"), item.get("end")) if item.get("start") and item.get("end") else []
-        href = explorer.query_href(state, metric=metric, **{"from": item.get("start"),
-             "to": item.get("end"), "page": 1, "company": None}) if app_ids else None
-        width_value = max(2, int(value / max_value * max_width)) if value else 0
-        count_label = str(value) if status in ("complete", "stale") else "at least {}".format(value)
-        tag = "<a class='chart-link' tabindex='0' aria-label='{}: {}, open matching applications' href='{}'>".format(
-            _e(label), _e(count_label), _e(href)) if href else "<g>"
-        end_tag = "</a>" if href else "</g>"
-        out.append("{}<text class='bar-label' x='4' y='{}'>{}</text><rect class='bar{}' x='{}' y='{}' width='{}' height='22' rx='4'/><text x='{}' y='{}'>{}</text>{}".format(
-            tag, y + 16, _e(label), " partial" if status == "partial" else "",
-            left, y, width_value, left + width_value + 8, y + 16, _e(count_label), end_tag))
-    out.append("</svg><details class='chart-data'><summary>View chart data and keyboard links</summary><div class='data-table-wrap'><table><caption>{}</caption><thead><tr><th scope='col'>Interval</th><th scope='col'>Observed</th><th scope='col'>Coverage</th><th scope='col'>Applications</th></tr></thead><tbody>".format(_e(title)))
+    if trend:
+        plot = []
+        for index, item in enumerate(items):
+            value = item.get("observed_values", {}).get(metric, 0)
+            value = value if isinstance(value, int) and not isinstance(value, bool) else 0
+            x = 42 + int(index * 676 / max(1, len(items) - 1))
+            y = 142 - int(value / max_value * 100)
+            plot.append((x, y, item, value))
+        points = " ".join("{},{}".format(x, y) for x, y, _item, _value in plot)
+        out.append("<svg class='trend-chart' role='img' aria-label='{} line chart; exact values and links are in the data table' viewBox='0 0 760 190' xmlns='http://www.w3.org/2000/svg'><polyline points='{}'/>".format(
+            _e(title), points))
+        for x, y, item, value in plot:
+            ids = dashboard_charts.metric_application_ids(report, metric, item.get("start"), item.get("end"))
+            href = explorer.query_href(state, metric=metric, **{"from": item.get("start"), "to": item.get("end"), "page": 1, "company": None}) if ids else None
+            month = item.get("key", "")[:7]
+            count = str(value) if status in ("complete", "stale") else "≥ {}".format(value)
+            point = "<circle cx='{}' cy='{}' r='6'/><text x='{}' y='{}'>{}</text><text x='{}' y='176'>{}</text>".format(
+                x, y, x + 8, max(15, y - 8), _e(count), x - 18, _e(month))
+            out.append("<a href='{}' tabindex='0' aria-label='{}: {} applications; open matching applications'>{}</a>".format(
+                _e(href), _e(_chart_interval_label(item)), _e(len(ids)), point) if href else point)
+        out.append("</svg>")
+    else:
+        out.append("<div class='chart-bars' role='list' aria-label='{}'>".format(_e(title)))
+        for item in items:
+            value = item.get("observed_values", {}).get(metric, 0)
+            value = value if isinstance(value, int) and not isinstance(value, bool) else 0
+            label = _chart_interval_label(item)
+            app_ids = dashboard_charts.metric_application_ids(
+                report, metric, item.get("start"), item.get("end")) if item.get("start") and item.get("end") else []
+            href = explorer.query_href(state, metric=metric, **{"from": item.get("start"),
+                 "to": item.get("end"), "page": 1, "company": None}) if app_ids else None
+            width_value = max(2, int(value / max_value * 100)) if value else 0
+            count_label = str(value) if status in ("complete", "stale") else "≥ {} observed".format(value)
+            link_open = "<a class='chart-track' aria-label='{}: {}, open matching applications' href='{}'>".format(
+                _e(label), _e(count_label), _e(href)) if href else "<div class='chart-track'>"
+            link_close = "</a>" if href else "</div>"
+            out.append("<div class='chart-row' role='listitem'><span class='chart-label'>{}</span>{}<span class='chart-fill{}' style='width:{}%'></span><span class='chart-count'>{}</span>{}</div>".format(
+                _e(label), link_open, " partial" if status in ("partial", "unknown") else "",
+                width_value, _e(count_label), link_close))
+        out.append("</div>")
+    out.append("<details class='chart-data'><summary>View chart data and keyboard links</summary><div class='data-table-wrap'><table><caption>{}</caption><thead><tr><th scope='col'>Interval</th><th scope='col'>Observed</th><th scope='col'>Coverage</th><th scope='col'>Applications</th></tr></thead><tbody>".format(_e(title)))
     for item in items:
         value = item.get("observed_values", {}).get(metric, 0)
         ids = dashboard_charts.metric_application_ids(report, metric, item.get("start"), item.get("end"))
@@ -1331,7 +1375,7 @@ def _render_metric_chart(report, snapshot, metric, title, state=None, *, limit=N
         app_count = len(ids)
         app_html = "<a href='{}'>{} applications</a>".format(_e(link), app_count) if link else "{} applications".format(app_count)
         out.append("<tr><th scope='row'>{}</th><td>{}{}</td><td>{}</td><td>{}</td></tr>".format(
-            _e(label), "≥ " if status == "partial" else "", _e(value), _e(status), app_html))
+            _e(label), "≥ " if status not in ("complete", "stale") else "", _e(value), _e(status), app_html))
     out.append("</tbody></table></div></details></section>")
     return "".join(out)
 
@@ -1361,11 +1405,18 @@ def _render_company_analytics(view, state):
     for key, label in labels:
         out.append("<section><h4>{}</h4><ul class='dimension-list'>".format(_e(label)))
         rows = company_view["dimensions"].get(key, [])
+        max_applications = max([row.get("applications", 0) for row in rows] + [1])
         if not rows:
             out.append("<li>No classified companies</li>")
         for row in rows:
-            out.append("<li><span>{}</span><span>{} companies · {} applications</span></li>".format(
-                _e(row["label"]), _e(row["companies"]), _e(row["applications"])))
+            if key == "industry":
+                width = int(row.get("applications", 0) * 100 / max_applications)
+                out.append("<li class='industry-row'><span>{}</span><span>{} companies · {} applications</span><span class='industry-bar' role='img' aria-label='{}: {} companies and {} applications'><span style='width:{}%'></span></span></li>".format(
+                    _e(row["label"]), _e(row["companies"]), _e(row["applications"]),
+                    _e(row["label"]), _e(row["companies"]), _e(row["applications"]), width))
+            else:
+                out.append("<li><span>{}</span><span>{} companies · {} applications</span></li>".format(
+                    _e(row["label"]), _e(row["companies"]), _e(row["applications"])))
         out.append("</ul></section>")
     out.append("</div><h4>Companies</h4><ul class='dimension-list'>")
     companies = company_view.get("companies", [])
@@ -1526,7 +1577,8 @@ def _render_home(data):
     blockers = _as_dict(today.get("blockers"))
     attempts = _as_dict(today.get("attempts"))
     total_blockers = sum(_as_dict(blockers.get("by_code")).values())
-    home = [_render_today(today, data["compact"]),
+    home = [_render_today(today, data["compact"], data.get("confirmed_today"),
+                          {"sources": data["sources"], "facts": {}}),
             "<p class='meta'>Callback follow-up status is unknown; cached history cannot establish whether a reply still needs action. Queue attention: {} stale in-progress · {} outcome unknown · {} blockers. <a class='health-link' href='/jobs/system-health/'>Open system health</a></p>".format(
                 _e(_count(attempts.get("stale_in_progress"))),
                 _e(_count(attempts.get("outcome_unknown"))), _e(total_blockers))]
@@ -1539,9 +1591,13 @@ def _render_home(data):
         app_ids = set()
         for item in report.get("series", []):
             app_ids.update(item.get("application_ids", {}).get(metric, []))
-        wording = ("Observed" if coverage != "complete" else "Recorded")
-        home.append("<p class='meta'>{} {} application-day observations across {} distinct applications in the last 12 weeks.</p>".format(
-            _e(wording), _e(observed), _e(len(app_ids))))
+        wording = ("{} recorded application-day observations across {} distinct applications".format(
+                   observed, len(app_ids)) if coverage == "complete" else
+                   "at least {} observed application-day observations across {} distinct applications".format(
+                   observed, len(app_ids)) if observed else
+                   "coverage unknown; no observations recorded in the cache")
+        home.append("<p class='meta'>{}: {} in the last 12 weeks.</p>".format(
+            _e(label), _e(wording)))
     return "".join(home)
 
 
@@ -1566,7 +1622,8 @@ def _render_analytics(data, snapshot, state):
                _e(report.get("period", {}).get("start") or "earliest cached date"),
                _e(report.get("period", {}).get("end") or "unknown")),
            _render_metric_chart(view["monthly"], snapshot, "confirmed_submissions",
-                                "Monthly confirmed submission trend · last 12 available months", state, limit=12),
+                                "Monthly confirmed submission trend · last 12 available months", state,
+                                limit=12, trend=True),
            "<section class='panel'><h3>Current stages</h3><p class='meta'>Population: {} canonical applications · denominator includes current stages only; this is not a transition funnel.</p><div class='data-table-wrap'><table><caption>Current application stages</caption><thead><tr><th scope='col'>Stage</th><th scope='col'>Applications</th><th scope='col'>Share</th></tr></thead><tbody>".format(
                _e(_count(population.get("canonical_count"))))]
     stage_counts = report.get("current_stage_counts", {})

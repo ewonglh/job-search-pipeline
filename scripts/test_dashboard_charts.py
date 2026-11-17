@@ -21,6 +21,9 @@ def test_metric_bins_use_singapore_dates_canonical_ids_and_render_exact_rows():
     selected, note = dashboard_charts.filter_applications(snapshot, rows, state)
     assert [row["company"] for row in selected] == ["Acme & Co"]
     assert "1 canonical applications" in note
+    analytics = dashboard.render_snapshot_html(
+        snapshot, page="analytics", query_state=application_explorer.parse_query("period=alltime"))
+    assert "<polyline" in analytics
 
 
 def test_company_dimensions_count_independent_denominators_and_filter_by_key():
@@ -61,9 +64,29 @@ def test_malformed_query_and_range_form_are_bounded_and_get_only():
     assert "mature cohort" in rendered
 
 
+def test_partial_unavailable_stale_and_genuine_zero_are_distinct():
+    snapshot = synthetic_snapshot()
+    partial = dashboard.render_snapshot_html(snapshot, page="home")
+    assert "partial coverage" in partial.casefold() and "not a confirmed zero" in partial
+    zero_snapshot = synthetic_snapshot()
+    zero_snapshot["facts"]["confirmed_submissions"] = []
+    genuine_zero = dashboard.render_snapshot_html(zero_snapshot, page="home")
+    assert "genuine zero observations" in genuine_zero
+    stale_snapshot = synthetic_snapshot()
+    stale_snapshot["facts"]["confirmed_submissions"] = []
+    stale_snapshot["sources"]["snapshots"]["status"] = "stale"
+    stale = dashboard.render_snapshot_html(stale_snapshot, page="home")
+    assert "last observed values" in stale
+    unavailable_snapshot = synthetic_snapshot()
+    unavailable_snapshot["sources"]["snapshots"]["status"] = "unavailable"
+    unavailable = dashboard.render_snapshot_html(unavailable_snapshot, page="home")
+    assert "metric is unavailable" in unavailable and "no zero is inferred" in unavailable
+
+
 if __name__ == "__main__":
     for test in (test_metric_bins_use_singapore_dates_canonical_ids_and_render_exact_rows,
                  test_company_dimensions_count_independent_denominators_and_filter_by_key,
-                 test_malformed_query_and_range_form_are_bounded_and_get_only):
+                 test_malformed_query_and_range_form_are_bounded_and_get_only,
+                 test_partial_unavailable_stale_and_genuine_zero_are_distinct):
         test()
     print("test_dashboard_charts: all assertions passed")

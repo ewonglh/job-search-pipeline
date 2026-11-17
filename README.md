@@ -198,8 +198,8 @@ calculated.
   boundaries, and chart links select exact metric bins or catalog company keys.
   Partial, stale, unavailable, and complete-zero coverage are labelled
   separately; company dimensions show both company and application counts.
-  See [chart selection](scripts/dashboard_charts.py#L10) and
-  [dashboard rendering](scripts/dashboard.py#L1234).
+  See [chart selection](scripts/dashboard_charts.py#L21) and
+  [dashboard rendering](scripts/dashboard.py#L1292).
 
 `python3 summary.py health --as-of YYYY-MM-DD` shows daily submission and queue
 health; `python3 summary.py funnel --as-of YYYY-MM-DD` shows mature 14/28-day
