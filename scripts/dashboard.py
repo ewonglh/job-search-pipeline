@@ -26,6 +26,7 @@ from urllib.parse import urlsplit
 import summary as s
 from config import default_repo_dir, default_runtime_path, path_setting
 import dashboard_shell
+import application_explorer as explorer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO_DIR = path_setting("JOBSEARCH_REPO", default_repo_dir())
@@ -643,6 +644,18 @@ main { min-width: 0; padding-top: 22px; }
 .count { color: var(--muted); font-variant-numeric: tabular-nums; }
 .application-list, .run-list { display: grid; gap: 10px; }
 .application-card, .run-card { padding: 14px; min-width: 0; }
+.explorer-views, .pagination, .explorer-filters { display: flex; flex-wrap: wrap; align-items: end; gap: 10px; margin: 12px 0; }
+.explorer-views a, .pagination a, .load-more, .detail-link, .explorer-filters button { min-height: 44px; display: inline-flex; align-items: center; padding: 8px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
+.explorer-views a[aria-current='page'] { background: var(--primary); color: white; }
+.explorer-filters label { display: grid; gap: 4px; font-weight: 600; }
+.explorer-filters input, .explorer-filters select { min-height: 44px; max-width: 100%; padding: 8px; border: 1px solid var(--border); border-radius: 6px; font: inherit; }
+.explorer-filters input[type='search'] { width: min(28rem, 80vw); }
+.explorer-filters button { color: var(--text); font: inherit; cursor: pointer; }
+.phone-cards { display: none; }
+.result-count { color: var(--muted); }
+.board { align-items: start; }
+.board-column { align-self: start; }
+.load-more { margin-top: 10px; }
 .card-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; flex-wrap: wrap; }
 .card-title { font-weight: 700; font-size: 1.02rem; overflow-wrap: anywhere; }
 .role { color: var(--muted); overflow-wrap: anywhere; }
@@ -682,6 +695,10 @@ footer { margin-top: 32px; padding-top: 14px; border-top: 1px solid var(--border
   .source-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .board { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .cohorts, .quality-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 47.999rem) {
+  .explorer-table { display: none; }
+  .phone-cards { display: grid; gap: 10px; }
 }
 @media (min-width: 64rem) {
   .shell { padding-inline: 32px; }
@@ -769,123 +786,120 @@ def _status_for_row(row):
 
 
 def _application_rows(snapshot):
-    """Build a display-only board; missing joins never become Applied."""
+    """Build compact rows; detailed timelines are resolved only on detail requests."""
     facts = _as_dict(snapshot.get("facts"))
-    aliases = _as_dict(facts.get("application_aliases"))
-    conflicts = set(facts.get("conflicted_application_aliases", []))
-    events_by_id = defaultdict(list)
-    for event in facts.get("events", []):
-        if not isinstance(event, dict):
-            continue
-        event_id = event.get("application_id")
-        if not isinstance(event_id, str) or event_id in conflicts:
-            continue
-        canonical = aliases.get(event_id, event_id)
-        stamp = event.get("occurred_at")
-        if isinstance(stamp, str) and stamp:
-            events_by_id[canonical].append(event)
-
     raw_apps = [row for row in facts.get("applications", []) if isinstance(row, dict)]
-    known_ids = {row.get("application_id") for row in raw_apps
-                 if isinstance(row.get("application_id"), str)}
-    attempts_by_id = defaultdict(list)
-    unmatched_attempts = []
-    for attempt in facts.get("attempts", []):
-        if not isinstance(attempt, dict):
-            continue
-        app_id = attempt.get("application_id")
-        if isinstance(app_id, str) and app_id in known_ids:
-            attempts_by_id[app_id].append(attempt)
-        else:
-            unmatched_attempts.append(attempt)
-
-    as_of = snapshot.get("as_of")
     try:
-        today = dt.date.fromisoformat(as_of)
+        today = dt.date.fromisoformat(snapshot.get("as_of"))
     except (TypeError, ValueError):
         today = None
-
     result = []
     for app in raw_apps:
         row = _as_dict(app.get("row"))
         status = _status_for_row(row)
-        days, age_from = card_age(row, today) if today else (None, None)
-        timeline = []
-        claims = app.get("submission_date_claims", [])
-        if isinstance(claims, list) and claims:
-            for claim in claims:
-                if not isinstance(claim, dict):
-                    continue
-                source = _display(claim.get("source"), "unknown source", 80)
-                value = claim.get("value")
-                if claim.get("invalid"):
-                    timeline.append("Submission date invalid in {} record".format(source))
-                elif claim.get("missing") or not value:
-                    timeline.append("Submission date unknown in {} record".format(source))
-                else:
-                    timeline.append("Submission date {} · {} record".format(
-                        _display(value, "unknown date", 40), source))
-        else:
-            timeline.append("Submission date not recorded")
         stage_since = row.get("stage_since")
-        timeline.append("Current status {}{}".format(
-            status, " since " + _display(stage_since, "", 40) if stage_since else
-            " · stage date unknown"))
-        app_id = app.get("application_id")
-        if isinstance(app_id, str):
-            for event in events_by_id.get(app_id, []):
-                event_type = _display(event.get("event_type"), "unknown event", 80)
-                verified = "verified" if event.get("verification") == "verified" else "unverified"
-                timeline.append("{} event · {} · {}".format(
-                    _display(event.get("occurred_at"), "unknown date", 48), verified, event_type))
-        for attempt in attempts_by_id.get(app_id, []):
-            attempt_status = _display(attempt.get("status"), "unknown", 48)
-            code = attempt.get("blocker_code")
-            timeline.append("Queue attempt: {}{}".format(
-                attempt_status, " · blocker " + _display(code, "", 80) if code else ""))
-        link = _safe_http_url(row.get("link"))
+        days, age_from = card_age(row, today) if today else (None, None)
         pr = _safe_http_url(row.get("pr"))
-        if not pr and row.get("pr_number") is not None:
-            number = str(row.get("pr_number"))
-            if number.isdigit():
-                pr = "https://github.com/{}/pull/{}".format(s.GH_REPO_DEFAULT, number)
+        if not pr and str(row.get("pr_number", "")).isdigit():
+            pr = "https://github.com/{}/pull/{}".format(s.GH_REPO_DEFAULT, row["pr_number"])
         result.append({
             "company": _display(row.get("company"), "Company unknown"),
             "role": _display(row.get("role"), "Role unknown"),
             "source": _display(row.get("source"), "Unknown source", 120),
+            "application_key": explorer.opaque_key(app.get("application_id")),
             "status": status,
             "stage_since": _display(stage_since, "", 40) if stage_since else None,
-            "days": days,
-            "age_from": age_from,
+            "applied_date": _display(row.get("applied_date"), "", 40) if row.get("applied_date") else None,
+            "days": days, "age_from": age_from,
             "age_label": _age_label({"days": days, "age_from": age_from,
-                                     "stage_since": stage_since, "status": status}),
-            "link": link,
-            "pr": pr,
-            "timeline": timeline,
+                                      "stage_since": stage_since, "status": status}),
+            "link": _safe_http_url(row.get("link")), "pr": pr,
         })
-
-    for attempt in unmatched_attempts:
-        attempt_status = _display(attempt.get("status"), "unknown", 48)
+    known_ids = {app.get("application_id") for app in raw_apps}
+    for attempt in facts.get("attempts", []):
+        if not isinstance(attempt, dict) or attempt.get("application_id") in known_ids:
+            continue
         code = attempt.get("blocker_code")
         result.append({
             "company": _display(attempt.get("company"), "Company unknown"),
             "role": _display(attempt.get("role"), "Role unknown"),
             "source": _display(attempt.get("source"), "Unknown source", 120),
-            "status": "Unknown / unmatched",
-            "stage_since": None,
-            "days": None,
-            "age_from": None,
+            "application_key": None, "status": "Unknown / unmatched",
+            "stage_since": None, "applied_date": None, "days": None, "age_from": None,
             "age_label": "No matched application or stage date",
             "link": _safe_http_url(attempt.get("link")),
             "pr": _safe_http_url(attempt.get("pr")),
-            "timeline": ["Unmatched queue attempt · {}{}".format(
-                attempt_status, " · blocker " + _display(code, "", 80) if code else "")],
+            "attempt_summary": "Unmatched queue attempt · {}{}".format(
+                _display(attempt.get("status"), "unknown", 48),
+                " · blocker " + _display(code, "", 80) if code else ""),
         })
-
     return sorted(result, key=lambda item: (
         APPLICATION_STATUS_ORDER.index(item["status"])
         if item["status"] in APPLICATION_STATUS_ORDER else len(APPLICATION_STATUS_ORDER),
         item["company"].casefold(), item["role"].casefold()))
+
+
+def _application_detail(snapshot, key):
+    """Resolve exactly one canonical application from its opaque route key."""
+    facts = _as_dict(snapshot.get("facts"))
+    matches = [app for app in facts.get("applications", [])
+               if isinstance(app, dict)
+               and explorer.opaque_key(app.get("application_id")) == key]
+    if len(matches) != 1:
+        return "ambiguous" if len(matches) > 1 else None
+    app = matches[0]
+    app_id = app.get("application_id")
+    row = _as_dict(app.get("row"))
+    aliases = _as_dict(facts.get("application_aliases"))
+    conflicts = set(facts.get("conflicted_application_aliases", []))
+    timeline = []
+    claims = app.get("submission_date_claims", [])
+    if isinstance(claims, list) and claims:
+        for claim in claims:
+            if not isinstance(claim, dict):
+                continue
+            source = _display(claim.get("source"), "unknown source", 80)
+            value = claim.get("value")
+            if claim.get("invalid"):
+                timeline.append("Submission date invalid in {} record".format(source))
+            elif claim.get("missing") or not value:
+                timeline.append("Submission date unknown in {} record".format(source))
+            else:
+                timeline.append("Submission date {} · {} record".format(
+                    _display(value, "unknown date", 40), source))
+    else:
+        timeline.append("Submission date not recorded")
+    status = _status_for_row(row)
+    stage_since = row.get("stage_since")
+    timeline.append("Current status {}{}".format(
+        status, " since " + _display(stage_since, "", 40) if stage_since else " · stage date unknown"))
+    for event in facts.get("events", []):
+        if not isinstance(event, dict):
+            continue
+        event_id = event.get("application_id")
+        if isinstance(event_id, str) and event_id not in conflicts and aliases.get(event_id, event_id) == app_id:
+            timeline.append("{} event · {} · {}".format(
+                _display(event.get("occurred_at"), "unknown date", 48),
+                "verified" if event.get("verification") == "verified" else "unverified",
+                _display(event.get("event_type"), "unknown event", 80)))
+    for attempt in facts.get("attempts", []):
+        if isinstance(attempt, dict) and attempt.get("application_id") == app_id:
+            code = attempt.get("blocker_code")
+            timeline.append("Queue attempt: {}{}".format(
+                _display(attempt.get("status"), "unknown", 48),
+                " · blocker " + _display(code, "", 80) if code else ""))
+    pr = _safe_http_url(row.get("pr"))
+    if not pr and str(row.get("pr_number", "")).isdigit():
+        pr = "https://github.com/{}/pull/{}".format(s.GH_REPO_DEFAULT, row["pr_number"])
+    return {"company": _display(row.get("company"), "Company unknown"),
+            "role": _display(row.get("role"), "Role unknown"), "status": status,
+            "applied_date": _display(row.get("applied_date"), "", 40) if row.get("applied_date") else None,
+            "stage_since": _display(stage_since, "", 40) if stage_since else None,
+            "source": _display(row.get("source"), "Unknown source", 120),
+            "link": _safe_http_url(row.get("link")), "pr": pr, "timeline": timeline,
+            "next_action": _display(row.get("next_action"), "No next action recorded", 200),
+            "provenance": "Canonical application record · source {}".format(
+                _display(app.get("source"), "unknown", 80))}
 
 
 def build_snapshot_sankey(snapshot):
@@ -1038,67 +1052,135 @@ def _render_sankey_svg(sankey):
     return "".join(out)
 
 
-def _render_applications(applications, sankey, sources):
+def _application_card(app, compact=False):
+    title = _e(app.get("company", "Company unknown"))
+    role = _e(app.get("role", "Role unknown"))
+    if app.get("application_key"):
+        title = "<a href='/jobs/applications/{}'>{}</a>".format(
+            app["application_key"], title)
+    out = ["<article class='application-card'><div class='card-top'><div class='card-title'>"
+           "{}</div><span class='badge'>{}</span></div><div class='role'>{}</div>".format(
+               title, _e(app.get("status", "Unknown / unmatched")), role)]
+    meta = "Source: {}".format(_e(app.get("source", "Unknown source")))
+    if app.get("applied_date"):
+        meta += " · Submitted {}".format(_e(app["applied_date"]))
+    out.append("<div class='details'>{}</div>".format(meta))
+    if app.get("attempt_summary"):
+        out.append("<div class='details'>{}</div>".format(_e(app["attempt_summary"])))
+    if compact and app.get("application_key"):
+        out.append("<a class='detail-link' href='/jobs/applications/{}'>Application details</a>".format(
+            app["application_key"]))
+    return "".join(out) + "</article>"
+
+
+def _render_applications(applications, sankey, sources, state=None):
+    state = state or explorer.parse_query("")
     sources = _as_dict(sources)
-    app_source_status = {
-        name: _as_dict(sources.get(name)).get("status", "unavailable")
-        for name in ("tracker", "queue")
-    }
-    grouped = {status: [] for status in APPLICATION_STATUS_ORDER}
-    for app in applications:
-        grouped.setdefault(app.get("status", "Unknown / unmatched"), []).append(app)
+    app_source_status = {name: _as_dict(sources.get(name)).get("status", "unavailable")
+                         for name in ("tracker", "queue")}
+    rows = explorer.filtered_rows(applications, state)
     out = []
-    if all(status == "unavailable" for status in app_source_status.values()):
-        out.append("<div class='empty' role='status'><strong>Application data unavailable.</strong> Tracker and queue are unavailable; empty status columns do not mean zero applications.</div>")
-    elif any(status != "fresh" for status in app_source_status.values()):
-        states = ", ".join("{}: {}".format(name, status)
-                            for name, status in sorted(app_source_status.items()))
-        out.append("<div class='empty' role='status'><strong>Application source coverage is incomplete.</strong> {}. Rows below are last-good cached facts when available; see System health for source details.</div>".format(
-            _e(states)))
-    out.append("<div class='board'>")
-    for status in APPLICATION_STATUS_ORDER:
-        cards = grouped.get(status, [])
-        out.append("<section class='board-column' aria-label='{} applications'>"
-                   "<h3><span>{}</span><span class='count'>{}</span></h3>".format(
-                       _e(status), _e(status), len(cards)))
-        if not cards:
-            out.append("<p class='empty'>No canonical application rows in this status.</p>")
-        else:
-            out.append("<div class='application-list'>")
-            for app in cards:
-                company = _e(app.get("company", "Company unknown"))
-                role = _e(app.get("role", "Role unknown"))
-                links = []
-                if app.get("link"):
-                    links.append("<a href='{}' rel='noreferrer'>Posting</a>".format(
-                        _e(app["link"])))
-                if app.get("pr"):
-                    links.append("<a href='{}' rel='noreferrer'>PR</a>".format(_e(app["pr"])))
-                out.append("<article class='application-card'><div class='card-top'>"
-                           "<div><div class='card-title'>{}</div><div class='role'>{}</div></div>"
-                           "<span class='badge'>{}</span></div>".format(
-                               company, role, _e(app.get("status"))))
-                out.append("<div class='details'>Source: {} · {}</div>".format(
-                    _e(app.get("source", "Unknown source")), _e(app.get("age_label", "No date recorded"))))
-                if links:
-                    out.append("<div class='link-list'>{}</div>".format("".join(links)))
-                out.append("<details><summary>Timeline and dated evidence</summary><ul class='timeline'>")
-                for item in app.get("timeline", []):
-                    out.append("<li>{}</li>".format(_e(item)))
-                out.append("</ul></details></article>")
-            out.append("</div>")
-        out.append("</section>")
-    out.append("</div>")
-    out.extend(["<section class='panel chart'><h3>Posting source → current status</h3>",
+    if all(value == "unavailable" for value in app_source_status.values()):
+        out.append("<div class='empty' role='status'><strong>Application data unavailable.</strong> Tracker and queue are unavailable; cached status columns do not imply zero applications.</div>")
+    elif any(value != "fresh" for value in app_source_status.values()):
+        states = ", ".join("{}: {}".format(name, value)
+                            for name, value in sorted(app_source_status.items()))
+        out.append("<div class='empty' role='status'><strong>Application source coverage is incomplete.</strong> {}. Rows show last-good cached facts when available.</div>".format(_e(states)))
+    out.append("<nav class='explorer-views' aria-label='Application view'>")
+    for view, label in (("table", "Table"), ("board", "Board")):
+        current = " aria-current='page'" if state["view"] == view else ""
+        out.append("<a{} href='{}'>{}</a>".format(current,
+            _e(explorer.query_href(state, view=view, page=1)), label))
+    out.append("</nav><form class='explorer-filters' method='get' action='/jobs/applications/'>")
+    out.append("<label>Search applications <input type='search' name='q' maxlength='120' value='{}'></label>".format(_e(state["q"])))
+    out.append("<label>Stage <select name='stage'>")
+    for stage in ("all",) + explorer.STAGES:
+        selected = " selected" if state["stage"] == stage else ""
+        out.append("<option value='{}'{}>{}</option>".format(_e(stage), selected,
+            "All stages" if stage == "all" else _e(stage)))
+    out.append("</select></label><input type='hidden' name='view' value='{}'>".format(state["view"]))
+    out.append("<input type='hidden' name='sort' value='{}'><input type='hidden' name='dir' value='{}'>".format(state["sort"], state["dir"]))
+    out.append("<button type='submit'>Apply filters</button></form>")
+    if not rows:
+        out.append("<p class='empty' role='status'>No applications match these filters.</p>")
+    elif state["view"] == "table":
+        start = (state["page"] - 1) * explorer.PAGE_SIZE
+        page_rows = rows[start:start + explorer.PAGE_SIZE]
+        out.append("<p class='result-count' role='status'>{} matching applications · page {} of {}</p>".format(
+            len(rows), min(state["page"], max(1, (len(rows) + explorer.PAGE_SIZE - 1) // explorer.PAGE_SIZE)),
+            max(1, (len(rows) + explorer.PAGE_SIZE - 1) // explorer.PAGE_SIZE)))
+        out.append("<div class='data-table-wrap explorer-table'><table><caption>Applications</caption><thead><tr>")
+        for field, label in (("company", "Company"), ("role", "Role"), ("status", "Stage"), ("source", "Source"), ("applied_date", "Submitted")):
+            direction = "desc" if state["sort"] == field and state["dir"] == "asc" else "asc"
+            href = _e(explorer.query_href(state, sort=field, dir=direction, page=1))
+            out.append("<th scope='col'><a href='{}'>{}</a></th>".format(href, label))
+        out.append("</tr></thead><tbody>")
+        for app in page_rows:
+            company = _e(app.get("company", "Company unknown"))
+            if app.get("application_key"):
+                company = "<a href='/jobs/applications/{}'>{}</a>".format(app["application_key"], company)
+            out.append("<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>".format(
+                company, _e(app.get("role")), _e(app.get("status")),
+                _e(app.get("source")), _e(app.get("applied_date") or "Unknown")))
+        out.append("</tbody></table></div><div class='phone-cards'>")
+        out.extend(_application_card(app, compact=True) for app in page_rows)
+        out.append("</div>")
+        pages = max(1, (len(rows) + explorer.PAGE_SIZE - 1) // explorer.PAGE_SIZE)
+        out.append("<nav class='pagination' aria-label='Application pages'>")
+        if state["page"] > 1:
+            out.append("<a href='{}'>Previous page</a>".format(_e(explorer.query_href(state, page=state["page"] - 1))))
+        if state["page"] < pages:
+            out.append("<a href='{}'>Next page</a>".format(_e(explorer.query_href(state, page=state["page"] + 1))))
+        out.append("</nav>")
+    else:
+        grouped = {stage: [] for stage in explorer.STAGES}
+        for app in rows:
+            grouped.setdefault(app.get("status", "Unknown / unmatched"), []).append(app)
+        out.append("<div class='board'>")
+        for stage in explorer.STAGES:
+            lane = stage.lower().replace(" / unmatched", "").replace(" ", "-")
+            cards = grouped.get(stage, [])
+            limit = state["loads"].get(lane, explorer.LANE_SIZE)
+            shown = cards[:limit]
+            out.append("<section class='board-column' aria-label='{} applications'><h3><span>{}</span><span class='count'>{}</span></h3>".format(_e(stage), _e(stage), len(cards)))
+            if not cards:
+                out.append("<p class='empty'>No applications in this stage.</p>")
+            else:
+                out.append("<div class='application-list'>")
+                out.extend(_application_card(app) for app in shown)
+                out.append("</div>")
+                if len(cards) > limit:
+                    loads = dict(state["loads"])
+                    loads[lane] = min(10000, limit + explorer.LANE_SIZE)
+                    out.append("<a class='load-more' href='{}'>Load 10 more ({} remaining)</a>".format(
+                        _e(explorer.query_href(state, loads=loads)), len(cards) - limit))
+            out.append("</section>")
+        out.append("</div>")
+    out.extend(["<details class='panel chart'><summary>Posting source by current stage</summary>",
                 "<p class='caveat'>Each canonical application is counted once. This diagram shows current status by recorded posting source; it is not a history of stage transitions.</p>",
                 _render_sankey_svg(sankey)])
-    if sankey.get("flows"):
-        out.append("<div class='data-table-wrap'><table><caption>Source-to-current-status counts</caption><thead><tr><th scope='col'>Posting source</th><th scope='col'>Current status</th><th scope='col'>Applications</th></tr></thead><tbody>")
-        for flow in sankey["flows"]:
-            out.append("<tr><td>{}</td><td>{}</td><td>{}</td></tr>".format(
-                _e(flow["from"]), _e(flow["to"]), flow["count"]))
-        out.append("</tbody></table></div>")
-    out.append("</section>")
+    out.append("</details>")
+    return "".join(out)
+
+
+def _render_application_detail(detail):
+    if detail == "ambiguous":
+        return "<div class='empty' role='status'>This application key matches multiple records. Open the application list and choose a specific record.</div>"
+    if detail is None:
+        return "<div class='empty' role='status'>Application details are unavailable for this record.</div>"
+    out = ["<p><a href='/jobs/applications/'>Back to applications</a></p>",
+           "<section class='panel detail-summary'><h3>{}</h3><p class='role'>{}</p>".format(
+               _e(detail["company"]), _e(detail["role"])),
+           "<p><strong>Stage:</strong> {}</p><h3>Submission evidence</h3><ul class='timeline'>".format(_e(detail["status"]))]
+    for item in detail["timeline"]:
+        out.append("<li>{}</li>".format(_e(item)))
+    out.append("</ul><h3>Next action</h3><p>{}</p><div class='link-list'>".format(_e(detail["next_action"])))
+    if detail.get("link"):
+        out.append("<a href='{}' rel='noreferrer'>Posting</a>".format(_e(detail["link"])))
+    if detail.get("pr"):
+        out.append("<a href='{}' rel='noreferrer'>Review pull request</a>".format(_e(detail["pr"])))
+    out.append("</div><details><summary>Evidence and provenance</summary><p>{}</p><p>Source: {}</p></details></section>".format(
+        "Dated evidence above comes from recorded claims and events only.", _e(detail["provenance"])))
     return "".join(out)
 
 
@@ -1317,16 +1399,30 @@ PAGE_RENDERERS = {
 }
 
 
-def render_snapshot_html(snapshot, data=None, page="home"):
+def render_snapshot_html(snapshot, data=None, page="home", query_state=None,
+                         application_key=None):
     """Render exactly one dashboard page from a cached snapshot."""
-    if page not in PAGE_RENDERERS:
+    detail_page = page == "application-detail"
+    if page not in PAGE_RENDERERS and not detail_page:
         raise ValueError("unknown dashboard page")
-    data = data or build_snapshot_data(snapshot)
+    if detail_page:
+        content = _render_application_detail(_application_detail(snapshot, application_key))
+        shell_page = "applications"
+    else:
+        data = data or build_snapshot_data(snapshot)
+        if page == "applications":
+            intro = ("<p class='intro'>Canonical applications from the last cached snapshot. "
+                     "Unknown stages remain unmatched; missing submission dates and next actions stay unknown.</p>")
+            content = intro + _render_applications(data["applications"], data["sankey"],
+                                                    data["sources"], query_state)
+        else:
+            content = PAGE_RENDERERS[page](data)
+        shell_page = page
     metadata = (("Snapshot ID", _display(snapshot.get("snapshot_id"), "unknown", 128)),
                 ("Generated at", _display(snapshot.get("generated_at"), "unknown", 48)),
                 ("Schema version", _display(snapshot.get("schema_version"), "unknown", 24)))
     return dashboard_shell.render(
-        page, PAGE_RENDERERS[page](data),
+        shell_page, content,
         _display(snapshot.get("as_of"), "unknown", 48), metadata, DASHBOARD_CSS)
 
 

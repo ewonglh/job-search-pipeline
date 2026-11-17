@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Read-only loopback HTTP entrypoint for the cached jobs dashboard."""
 import argparse
+import re
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import dashboard
 import projection
+import application_explorer as explorer
 
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
@@ -38,7 +40,7 @@ SECURITY_HEADERS = (
     ("Content-Security-Policy",
      "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; "
      "img-src 'self' data:; font-src 'self'; connect-src 'none'; base-uri 'none'; "
-     "form-action 'none'; frame-ancestors 'none'"),
+     "form-action 'self'; frame-ancestors 'none'"),
     ("Permissions-Policy", "camera=(), microphone=(), geolocation=()"),
 )
 
@@ -196,14 +198,31 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         target = self.path
-        if (not isinstance(target, str) or len(target) > MAX_REQUEST_LINE
-                or any(char in target for char in ("%", "\\", "?", "#", "\x00"))
-                or target not in ROUTES):
+        if not isinstance(target, str) or len(target) > MAX_REQUEST_LINE:
             self._write_response(404, "text/plain; charset=utf-8", b"not found\n")
             return
+        if any(char in target for char in ("\\", "#", "\x00")):
+            self._write_response(404, "text/plain; charset=utf-8", b"not found\n")
+            return
+        path, separator, query = target.partition("?")
+        detail_match = re.fullmatch(r"/jobs/applications/([0-9a-f]{64})", path)
+        app_path = path in ("/jobs/applications", "/jobs/applications/")
+        if "%" in path or (path not in ROUTES and not detail_match):
+            self._write_response(404, "text/plain; charset=utf-8", b"not found\n")
+            return
+        if separator and (not app_path or detail_match):
+            self._write_response(404, "text/plain; charset=utf-8", b"not found\n")
+            return
+        query_state = None
+        if app_path:
+            try:
+                query_state = explorer.parse_query(query if separator else "")
+            except ValueError:
+                self._write_response(400, "text/plain; charset=utf-8", b"bad request\n")
+                return
         if not self._safe_get_only():
             return
-        route = ROUTES[target]
+        route = "page:application-detail" if detail_match else ROUTES[path]
         is_page = route.startswith("page:")
         try:
             snapshot = self._read_snapshot()
@@ -219,7 +238,25 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if is_page:
             try:
                 page = route.split(":", 1)[1]
-                body = dashboard.render_snapshot_html(snapshot, page=page).encode("utf-8")
+                if page == "application-detail":
+                    detail = dashboard._application_detail(snapshot, detail_match.group(1))
+                    if detail is None:
+                        self._write_response(404, "text/html; charset=utf-8",
+                            dashboard.render_snapshot_html(snapshot, page=page,
+                                application_key=detail_match.group(1)).encode("utf-8"))
+                        return
+                    if detail == "ambiguous":
+                        self._write_response(409, "text/html; charset=utf-8",
+                            dashboard.render_snapshot_html(snapshot, page=page,
+                                application_key=detail_match.group(1)).encode("utf-8"))
+                        return
+                    body = dashboard.render_snapshot_html(snapshot, page=page,
+                        application_key=detail_match.group(1)).encode("utf-8")
+                elif page == "applications":
+                    body = dashboard.render_snapshot_html(snapshot, page=page,
+                        query_state=query_state).encode("utf-8")
+                else:
+                    body = dashboard.render_snapshot_html(snapshot, page=page).encode("utf-8")
             except (ValueError, KeyError, TypeError, ZeroDivisionError):
                 self._write_response(503, "text/html; charset=utf-8",
                                      dashboard.render_unavailable_html().encode("utf-8"))

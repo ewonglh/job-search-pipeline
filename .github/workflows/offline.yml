@@ -36,6 +36,7 @@ jobs:
           python test_stages.py
           python test_dashboard.py
           python test_dashboard_views.py
+          python test_application_explorer.py
           python test_dashboard_server.py
           python test_reports.py
           python test_projection.py
