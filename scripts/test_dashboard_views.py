@@ -217,6 +217,100 @@ def test_stale_blocked_and_unknown_states_remain_visible():
     assert data["funnel"]["mature_cohorts"][0]["coverage"]["status"] == "partial"
 
 
+def test_operations_run_order_detail_privacy_and_paging():
+    snapshot = synthetic_snapshot()
+    traces = snapshot["facts"]["traces"]
+    success = traces["runs"][0]
+    success["application_join_status"] = "unknown"
+    success["artifact_join_status"] = "unknown"
+    success["tool_events"][0]["name"] = "<script>tool</script>"
+    failed = dict(success, run_id="run-failed", execution_result="failed",
+                  completion_status="failed", attention_codes=["scheduler_failed"])
+    incomplete = dict(success, run_id="run-incomplete", execution_result="unknown",
+                      completion_status="unknown", tool_trace_status="incomplete",
+                      attention_codes=["completion_unknown"])
+    traces["runs"] = [success, failed, incomplete]
+    data = d.build_snapshot_data(snapshot)
+    listing = d.render_snapshot_html(snapshot, data=data, page="runs")
+    assert listing.index("Failure") < listing.index("Incomplete / unknown") < listing.index("Successful")
+    assert "run-failed" in listing and "Redacted tool details" not in listing
+    assert "PRIVATE_TOOL_OUTPUT_CANARY" not in listing and "OTP-123-CANARY" not in listing
+
+    key = d.run_detail_key(success)
+    assert key == d.run_detail_key(dict(success, execution_result="failed"))
+    detail = d.render_snapshot_html(snapshot, page="run-detail", run_key=key)
+    assert "Redacted tool timeline" in detail
+    assert "&lt;script&gt;tool&lt;/script&gt;" in detail
+    assert "Duration (ms)</dt><dd>2000</dd>" in detail
+    assert "Retry context</dt><dd>none</dd>" in detail
+    assert "Application join</dt><dd>unknown</dd>" in detail
+    for canary in ("PRIVATE_TOOL_OUTPUT_CANARY", "OTP-123-CANARY", "MAIL_BODY_CANARY"):
+        assert canary not in detail
+
+    many = [dict(success, run_id="paged-{}".format(index)) for index in range(22)]
+    report = {"source": {"status": "fresh"}, "runs": many}
+    first = d._render_runs(report, 1)
+    second = d._render_runs(report, 2)
+    assert first.count("<article class='run-card'>") == 20
+    assert second.count("<article class='run-card'>") == 2
+    assert "page 2 of 2" in second and "Previous page" in second
+    assert d.parse_runs_query("") == 1 and d.parse_runs_query("page=2") == 2
+    for query in ("page=0", "page=51", "page=1&page=2", "q=private", "page=%3Cscript%3E"):
+        try:
+            d.parse_runs_query(query)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("Runs query was accepted: {!r}".format(query))
+    assert "Run history is unavailable" in d._render_runs(
+        {"source": {"status": "unavailable"}, "runs": []})
+    assert "No run records were observed" in d._render_runs(
+        {"source": {"status": "fresh"}, "runs": []})
+    assert "does not confirm that no runs occurred" in d._render_runs(
+        {"source": {"status": "stale"}, "runs": []})
+
+
+def test_tailoring_evidence_and_health_impact_states():
+    snapshot = synthetic_snapshot()
+    records = snapshot["facts"]["review_quality"]["records"]
+    records[:] = [
+        {"artifact_head": "c" * 64, "model_acceptance": "accepted",
+         "owner_acceptance": "not_accepted", "provenance_status": "verified",
+         "rework_codes": ["layout_issue"]},
+        {"artifact_head": "d" * 64, "model_acceptance": "accepted",
+         "owner_acceptance": "unknown", "provenance_status": "unknown",
+         "rework_codes": []},
+    ]
+    snapshot["sources"]["preflight"]["status"] = "unavailable"
+    data = d.build_snapshot_data(snapshot)
+    quality = data["quality"]
+    assert quality["potential_mistailor_heuristic"] == 1
+    assert quality["mistailor_unknown_owner"] == 1
+    tailoring = d.render_snapshot_html(snapshot, data=data, page="tailoring")
+    assert "Model review" in tailoring and "Owner review" in tailoring
+    assert "Potential mistailors · heuristic" in tailoring
+    assert "review cue, not a verified tailoring defect" in tailoring
+    assert "Missing owner evidence stays unknown" in tailoring
+    assert "Review evidence source coverage is incomplete" in tailoring
+    assert "layout_issue" in tailoring
+    assert ("c" * 64) not in tailoring and ("d" * 64) not in tailoring
+
+    sources = dict(data["sources"])
+    sources["events"] = dict(sources["events"], status="stale", error_code=None,
+                             coverage_status="partial", coverage_reasons=["cursor_gap"])
+    sources["queue"] = dict(sources["queue"], status="stale",
+                            error_code="<source_failed>",
+                            last_success_at="2026-11-10T00:00:00Z")
+    health = d._render_sources(sources)
+    assert "The latest collection failed; last-good cached facts may be out of date." in health
+    assert "Only part of this source was collected, so some records may be missing." in health
+    assert "Next step:" in health and "<source_failed>" not in health
+    assert "&lt;source_failed&gt;" in health
+    assert "<details><summary>Source provenance</summary>" in health
+    assert "Observed at" in health
+    assert "2026-11-10T00:00:00Z" not in health.split("<details", 1)[0]
+
+
 def test_render_escapes_html_svg_attributes_and_embedded_json():
     snapshot = synthetic_snapshot()
     snapshot["snapshot_id"] = "</script><script>alert('json-breakout')</script>"
