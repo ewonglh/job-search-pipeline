@@ -27,7 +27,7 @@ MAX_BATCH_SIZE = 1000
 MAX_SOURCE_RECORDS = 200000
 SNAPSHOT_HISTORY = 8
 SOURCES = ("tracker", "queue", "events", "ingestion", "snapshots",
-           "reviews", "preflight", "traces")
+           "reviews", "preflight", "activities", "companies", "traces")
 HASH40_RE = re.compile(r"^[0-9a-f]{40}$")
 HASH64_RE = re.compile(r"^[0-9a-f]{64}$")
 CODE_RE = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,63}$")
@@ -65,7 +65,9 @@ QUEUE_ENUMS = {
     "attempt_state": {"authorized", "submitted", "outcome_unknown", "failed"},
 }
 SOURCE_FRESHNESS = dict(report_snapshot.SOURCE_FRESHNESS_SECONDS)
-SOURCE_FRESHNESS.update({"reviews": 86400, "preflight": 86400, "traces": 3600})
+SOURCE_FRESHNESS.update({"reviews": 86400, "preflight": 86400,
+                         "activities": 14 * 86400, "companies": 30 * 86400,
+                         "traces": 3600})
 
 
 class ProjectionError(Exception):
@@ -483,6 +485,68 @@ def _read_events(path):
         return _source_error(path, exc)
 
 
+def _read_companies(path):
+    """Import validated catalog facts once per source collection generation."""
+    import company_catalog
+    try:
+        catalog = company_catalog.load(path)
+        records = []
+        for row in catalog["records"]:
+            clean = dict(row)
+            clean["aliases"] = [_safe_text(alias, 120) for alias in row["aliases"]]
+            clean["primary_industry"] = _safe_text(row["primary_industry"], 100)
+            if row.get("source_url") is not None:
+                clean["source_url"] = _safe_url(row["source_url"])
+            records.append(clean)
+        return {"records": records, "record_count": len(records),
+                "observed_at": None, "error_code": None,
+                "coverage_status": "complete", "quarantined_count": 0}
+    except (OSError, UnicodeError, ValueError, TypeError, _InvalidSource) as exc:
+        return _source_error(path, exc)
+
+
+def _read_activities(path):
+    """Read only explicit completion facts from a private local ledger."""
+    try:
+        document = _read_json(path)
+        coverage = document.get("coverage") if isinstance(document, dict) else None
+        activities = document.get("activities") if isinstance(document, dict) else None
+        if (not isinstance(document, dict) or document.get("schema") != 1
+                or not isinstance(coverage, dict) or type(coverage.get("complete")) is not bool
+                or not isinstance(activities, list) or len(activities) > MAX_SOURCE_RECORDS):
+            raise _InvalidSource()
+        records, quarantined = [], 0
+        for item in activities:
+            if not isinstance(item, dict):
+                quarantined += 1
+                continue
+            try:
+                activity_id = _safe_text(item.get("activity_id"), 120)
+                application_id = _safe_application_id(item.get("application_id"))
+                kind = item.get("kind")
+                completed_at = _timestamp(item.get("completed_at")) or _day(item.get("completed_at"))
+                if (not activity_id or not re.fullmatch(r"[A-Za-z0-9._:-]{1,120}", activity_id)
+                        or kind not in ("initial_tailoring", "retailoring") or not completed_at):
+                    raise _InvalidSource()
+            except _InvalidSource:
+                quarantined += 1
+                continue
+            records.append({"activity_id": activity_id, "application_id": application_id,
+                            "kind": kind, "completed_at": completed_at})
+        partial = bool(quarantined) or coverage.get("complete") is not True
+        reasons = ["records_quarantined"] if quarantined else []
+        if coverage.get("complete") is not True:
+            reasons.append("source_declared_incomplete")
+        return {"records": records, "record_count": len(activities),
+                "observed_at": None, "coverage_complete": coverage.get("complete") is True,
+                "error_code": "partial_coverage" if partial else None,
+                "quarantined_count": quarantined,
+                "coverage_status": "partial" if partial else "complete",
+                "coverage_reasons": reasons}
+    except (OSError, UnicodeError, ValueError, TypeError, _InvalidSource) as exc:
+        return _source_error(path, exc)
+
+
 def _read_ingestion(path):
     try:
         document = _read_json(path)
@@ -556,7 +620,7 @@ def _read_snapshots(root):
                 raise _InvalidSource()
             records.append({"snapshot_id": name[:-5], "application_id": _safe_application_id(
                 document.get("canonical_application_id")), "attempt_id": attempt_id,
-                "resume_hash": resume_hash})
+                "resume_hash": resume_hash, "submitted_at": submitted})
             stamp = _timestamp(document.get("captured_at"))
             if stamp:
                 observed = max(observed, stamp) if observed else stamp
@@ -1131,6 +1195,26 @@ def _make_snapshot(connection, *, as_of, generated_at, snapshot_root):
         event["quarantined"] = event.get("event_id") in quarantined_ids
     snapshot["facts"]["event_diagnostics"] = event_diagnostics
     snapshot["facts"]["quarantined_event_count"] = quarantined_count
+    snapshot["facts"]["company_catalog"] = {
+        "schema_version": 1, "records": _read_active_records(connection, "companies")}
+    activity_source = sources.get("activities", {})
+    activities, activity_unmatched = [], 0
+    app_aliases = snapshot["facts"].get("application_aliases", {})
+    app_ids = {item.get("application_id") for item in snapshot["facts"].get("applications", [])}
+    for item in _read_active_records(connection, "activities"):
+        canonical = app_aliases.get(item.get("application_id"))
+        if canonical in app_ids:
+            activities.append({"activity_id": item["activity_id"],
+                               "application_id": canonical, "kind": item["kind"],
+                               "completed_at": item["completed_at"]})
+        else:
+            activity_unmatched += 1
+    snapshot["facts"]["activities"] = activities
+    snapshot["facts"]["activity_unmatched_count"] = activity_unmatched
+    snapshot["facts"]["activity_coverage"] = {
+        "complete": (activity_source.get("status") in ("fresh", "stale")
+                     and activity_source.get("coverage_status") == "complete"
+                     and activity_unmatched == 0)}
     review_rows = _read_active_records(connection, "reviews")
     preflight_rows = _read_active_records(connection, "preflight")
     review_meta = connection.execute("SELECT quarantined_count FROM source_state WHERE source='reviews'").fetchone()
@@ -1195,6 +1279,8 @@ def _input_paths(repo=None, tracker=None, queue=None, ledger=None, ingestion=Non
         "snapshots": snapshot_root or path_setting("JOBSEARCH_SNAPSHOT_ROOT", default_runtime_path("submission-snapshots")),
         "reviews": review_state or path_setting("JOBSEARCH_REVIEW_STATE", default_runtime_path("review_state.json")),
         "preflight": preflight_state or path_setting("JOBSEARCH_PREFLIGHT_STATE", default_runtime_path("preflight_records.json")),
+        "activities": path_setting("JOBSEARCH_ACTIVITY_STATE", default_runtime_path("tailoring_activities.json")),
+        "companies": path_setting("JOBSEARCH_COMPANY_CATALOG", default_runtime_path("company_catalog.json")),
     }
     return paths
 
@@ -1208,6 +1294,8 @@ def _collect_inputs(paths, trace_data=None):
         "snapshots": _read_snapshots(paths["snapshots"]),
         "reviews": _read_reviews(paths["reviews"]),
         "preflight": _read_preflight(paths["preflight"]),
+        "activities": _read_activities(paths["activities"]),
+        "companies": _read_companies(paths["companies"]),
     }
     if trace_data is not None:
         import openclaw_traces
@@ -1460,9 +1548,14 @@ def _parser():
     read.add_argument("--db", default=None)
     read.add_argument("--json", action="store_true")
     report = commands.add_parser("report", help="render a cached report (read-only)")
-    report.add_argument("kind", choices=("compact", "health", "funnel", "traces"))
+    report.add_argument("kind", choices=("compact", "health", "funnel", "traces", "analytics"))
     report.add_argument("--db", default=None)
     report.add_argument("--as-of", default=None)
+    report.add_argument("--period", choices=("last12weeks", "thisweek", "thismonth",
+                                               "last3months", "alltime", "custom"),
+                        default="last12weeks")
+    report.add_argument("--start", default=None, help="inclusive custom Singapore date")
+    report.add_argument("--end", default=None, help="inclusive custom Singapore date")
     report.add_argument("--timezone", default=os.environ.get("JOBSEARCH_TIMEZONE", "Asia/Singapore"))
     report.add_argument("--weekday-goal", type=int, default=1)
     report.add_argument("--weekend-goal", type=int, default=0)
@@ -1503,6 +1596,12 @@ def main(argv=None):
             result = build_trace_report(snapshot)
             print(json.dumps(result, indent=2, ensure_ascii=False)
                   if args.json else format_traces(snapshot))
+            return 0
+        if args.kind == "analytics":
+            import activity_analytics
+            report = activity_analytics.build_report(
+                snapshot, args.period, start=args.start, end=args.end)
+            print(json.dumps(report, indent=2, ensure_ascii=False))
             return 0
         if args.kind == "health":
             import pipeline_health
