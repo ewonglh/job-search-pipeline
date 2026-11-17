@@ -729,16 +729,24 @@ def _read_exports(root, *, deadline=None):
         manifest_path = directory / "manifest.json"
         events_path = directory / "events.jsonl"
         if manifest_path.is_symlink() or events_path.is_symlink():
-            raise TraceError("trajectory_export_invalid")
+            quarantined_count += 1
+            continue
         if not manifest_path.exists() and not events_path.exists():
             continue
         try:
             total_bytes += manifest_path.stat().st_size + events_path.stat().st_size
         except OSError:
-            raise TraceError("trajectory_export_invalid")
+            quarantined_count += 1
+            continue
         if total_bytes > EXPORT_TOTAL_BYTES_MAX:
             raise TraceError("trajectory_export_limit")
-        export = _parse_export_directory(directory, deadline=deadline)
+        try:
+            export = _parse_export_directory(directory, deadline=deadline)
+        except TraceError as exc:
+            if exc.code not in ("trajectory_export_invalid", "unsupported_schema"):
+                raise
+            quarantined_count += 1
+            continue
         total_events += export["event_count"]
         if total_events > EVENT_TOTAL_COUNT_MAX:
             raise TraceError("trajectory_event_limit")

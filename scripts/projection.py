@@ -32,7 +32,10 @@ HASH40_RE = re.compile(r"^[0-9a-f]{40}$")
 HASH64_RE = re.compile(r"^[0-9a-f]{64}$")
 CODE_RE = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,63}$")
 PRIVATE_TEXT_RE = re.compile(
-    r"(?i)(?:\b(?:password|passphrase|token|otp|verification code|security code)\s*[:=]|"
+    r"(?i)(?:\b(?:password|passphrase|token|secret|otp|"
+    r"(?:access|refresh|auth|id|session)[ _-]?token|"
+    r"(?:api|private|secret)[ _-]?key|client[ _-]?secret|"
+    r"verification[ _-]?code|security[ _-]?code)[\"']?\s*[:=]|"
     r"\bBearer\s+[A-Za-z0-9._~+/=-]{8,}|\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b)"
 )
 TEXT_FIELDS = {
@@ -205,6 +208,8 @@ def _compatible_rows(rows, fields, *, queue_statuses=None, tracker_statuses=None
                             value = _safe_url(value)
                         elif value and not value.isdigit():
                             raise _InvalidSource()
+                    if value is not None and not application_identity.pr_number({key: value}):
+                        raise _InvalidSource()
                 elif key in ("applied_date", "stage_since"):
                     value = _day(value) if isinstance(value, str) else None
                     if value is None:
