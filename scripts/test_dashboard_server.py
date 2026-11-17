@@ -76,6 +76,13 @@ def test_only_exact_routes_and_methods_are_available():
                 assert status == 200 and present in body and absent not in body, path
                 assert headers.get("Cache-Control") == "no-store, max-age=0"
                 assert b"aria-current='page'" in body
+            status, headers, body = request(
+                base + "/jobs/analytics/?period=custom&start=2026-11-01&end=2026-11-16")
+            assert status == 200 and b"Selected range: 2026-11-01 to 2026-11-16" in body
+            assert b"method='get' action='/jobs/analytics/'" in body
+            assert "form-action 'self'" in headers.get("Content-Security-Policy")
+            status, _headers, body = request(base + "/jobs/analytics/?period=custom&start=bad")
+            assert status == 400 and b"bad request" in body
             status, headers, body = request(base + "/api/snapshot.json")
             assert status == 200 and headers.get_content_type() == "application/json"
             assert json.loads(body)["snapshot_id"] == snapshot["snapshot_id"]

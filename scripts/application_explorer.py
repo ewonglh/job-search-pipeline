@@ -1,5 +1,7 @@
 """Bounded, URL-addressable application explorer query helpers."""
 import hashlib
+import re
+from datetime import date
 from urllib.parse import urlencode
 
 PAGE_SIZE = 25
@@ -20,10 +22,11 @@ def parse_query(query):
         raise ValueError("query too long")
     try:
         pairs = parse_qsl(query, keep_blank_values=True, strict_parsing=True,
-                          max_num_fields=16, encoding="utf-8", errors="strict") if query else []
+                          max_num_fields=24, encoding="utf-8", errors="strict") if query else []
     except (ValueError, UnicodeError):
         raise ValueError("malformed query")
-    allowed = {"q", "stage", "sort", "dir", "page", "view"}
+    allowed = {"q", "stage", "sort", "dir", "page", "view", "period",
+               "start", "end", "metric", "from", "to", "company"}
     allowed.update("load_" + lane for lane in LANES)
     values = {}
     for key, value in pairs:
@@ -53,8 +56,55 @@ def parse_query(query):
             loads[lane] = _bounded_int(values[key], LANE_SIZE, 10000)
             if loads[lane] % LANE_SIZE:
                 raise ValueError("invalid lane load")
+    period = values.get("period", "last12weeks")
+    if period not in ("last12weeks", "thisweek", "thismonth", "last3months",
+                      "alltime", "custom"):
+        raise ValueError("invalid period")
+    start_day = _query_date(values.get("start"), "start")
+    end_day = _query_date(values.get("end"), "end")
+    if period == "custom":
+        if start_day is None or end_day is None or start_day > end_day:
+            raise ValueError("invalid custom range")
+    elif start_day is not None or end_day is not None:
+        raise ValueError("dates require custom period")
+    metric = values.get("metric")
+    date_start = _query_date(values.get("from"), "from")
+    date_end = _query_date(values.get("to"), "to")
+    if metric is not None:
+        if metric not in ("confirmed_submissions", "recorded_claims",
+                          "initial_tailoring", "retailoring"):
+            raise ValueError("invalid metric")
+        if date_start is None or date_end is None or date_start > date_end:
+            raise ValueError("metric selection needs a valid date range")
+    elif date_start is not None or date_end is not None:
+        raise ValueError("date selection needs a metric")
+    company = values.get("company")
+    if company is not None and not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,79}", company):
+        raise ValueError("invalid company key")
     return {"q": q, "stage": stage, "sort": sort, "dir": direction,
-            "page": page, "view": view, "loads": loads}
+            "page": page, "view": view, "loads": loads, "period": period,
+            "start": start_day.isoformat() if start_day else None,
+            "end": end_day.isoformat() if end_day else None,
+            "metric": metric,
+            "from": date_start.isoformat() if date_start else None,
+            "to": date_end.isoformat() if date_end else None,
+            "company": company}
+
+
+def _query_date(value, field):
+    if value is None:
+        return None
+    if value == "":
+        return None
+    if len(value) != 10:
+        raise ValueError("invalid {} date".format(field))
+    try:
+        parsed = date.fromisoformat(value)
+    except ValueError:
+        raise ValueError("invalid {} date".format(field))
+    if parsed.isoformat() != value:
+        raise ValueError("invalid {} date".format(field))
+    return parsed
 
 
 def _bounded_int(value, minimum, maximum):
@@ -95,7 +145,8 @@ def query_href(state, **updates):
     if "loads" in updates:
         loads = dict(updates["loads"])
     next_state["loads"] = loads
-    pairs = [(key, next_state[key]) for key in ("q", "stage", "sort", "dir", "page", "view")
+    pairs = [(key, next_state[key]) for key in ("q", "stage", "sort", "dir", "page", "view",
+             "period", "start", "end", "metric", "from", "to", "company")
              if next_state.get(key) not in (None, "", "all" if key == "stage" else None)]
     if next_state.get("stage", "all") == "all":
         pairs.append(("stage", "all"))
