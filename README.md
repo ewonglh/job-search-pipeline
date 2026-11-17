@@ -214,6 +214,17 @@ model verdict never implies owner acceptance.
 Acknowledgements are excluded from hiring outcomes. Text and JSON both expose
 identity and malformed-evidence diagnostics.
 
+## Dashboard pages
+
+- Run `python3 dashboard_server.py` from `scripts/`; the default listener is
+  `127.0.0.1:8765` ([server defaults](scripts/dashboard_server.py#L10)).
+- Open `/jobs/` for Home, Applications, Analytics, Runs, Tailoring and System
+  health ([page navigation](scripts/dashboard_shell.py#L5)).
+- `/` and `/index.html` remain Home aliases; `/api/snapshot.json` and `/healthz`
+  remain read-only endpoints ([routes](scripts/dashboard_server.py#L15)).
+- Page requests read the cached projection without collecting source data
+  ([cache reader](scripts/dashboard_server.py#L190)).
+
 ## Review readiness
 
 From `scripts/`, `python3 automerge.py` reports whether a reviewed tailoring PR

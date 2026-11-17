@@ -55,12 +55,26 @@ def test_only_exact_routes_and_methods_are_available():
         server, thread = start_server()
         try:
             base = "http://{}:{}".format(server_module.HOST, server.server_address[1])
-            for path in ("/", "/index.html", "/jobs", "/jobs/"):
+            for path in ("/", "/index.html", "/jobs", "/jobs/", "/jobs/home/"):
                 status, headers, body = request(base + path)
                 assert status == 200 and b"Private jobs dashboard" in body
+                assert b"Daily submission goal" in body
                 assert headers.get("Cache-Control") == "no-store, max-age=0"
                 assert headers.get("X-Content-Type-Options") == "nosniff"
                 assert headers.get("Content-Security-Policy")
+
+            page_routes = (
+                ("/jobs/applications/", b"Acme &amp; Co", b"Daily submission goal"),
+                ("/jobs/analytics/", b"Eligible applications", b"Acme &amp; Co"),
+                ("/jobs/runs/", b"job-alpha", b"Acme &amp; Co"),
+                ("/jobs/tailoring/", b"First-pass acceptance", b"Acme &amp; Co"),
+                ("/jobs/system-health/", b"Source health", b"Acme &amp; Co"),
+            )
+            for path, present, absent in page_routes:
+                status, headers, body = request(base + path)
+                assert status == 200 and present in body and absent not in body, path
+                assert headers.get("Cache-Control") == "no-store, max-age=0"
+                assert b"aria-current='page'" in body
             status, headers, body = request(base + "/api/snapshot.json")
             assert status == 200 and headers.get_content_type() == "application/json"
             assert json.loads(body)["snapshot_id"] == snapshot["snapshot_id"]
@@ -72,7 +86,8 @@ def test_only_exact_routes_and_methods_are_available():
 
             for path in ("/private.sqlite3", "/scripts/dashboard_server.py",
                          "/api/snapshot.json?download=1", "/api%2Fsnapshot.json",
-                         "/%2e%2e/private.sqlite3", "/.git/config"):
+                         "/%2e%2e/private.sqlite3", "/.git/config",
+                         "/jobs/applications/?tab=all", "/jobs//applications/"):
                 status, _headers, body = request(base + path)
                 assert status == 404, (path, status, body)
 

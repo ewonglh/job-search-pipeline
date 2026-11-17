@@ -13,10 +13,19 @@ MAX_REQUEST_LINE = 4096
 MAX_HEADER_BYTES = 16384
 MAX_HEADER_COUNT = 32
 ROUTES = {
-    "/": "page", "/index.html": "page",
+    "/": "page:home", "/index.html": "page:home",
     "/api/snapshot.json": "api", "/healthz": "health",
     # Exact aliases support mounting this app under a Tailscale Serve path.
-    "/jobs": "page", "/jobs/": "page", "/jobs/index.html": "page",
+    "/jobs": "page:home", "/jobs/": "page:home",
+    "/jobs/home": "page:home", "/jobs/home/": "page:home",
+    "/jobs/index.html": "page:home",
+    "/jobs/applications": "page:applications",
+    "/jobs/applications/": "page:applications",
+    "/jobs/analytics": "page:analytics", "/jobs/analytics/": "page:analytics",
+    "/jobs/runs": "page:runs", "/jobs/runs/": "page:runs",
+    "/jobs/tailoring": "page:tailoring", "/jobs/tailoring/": "page:tailoring",
+    "/jobs/system-health": "page:system-health",
+    "/jobs/system-health/": "page:system-health",
     "/jobs/api/snapshot.json": "api", "/jobs/healthz": "health",
 }
 SECURITY_HEADERS = (
@@ -195,10 +204,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if not self._safe_get_only():
             return
         route = ROUTES[target]
+        is_page = route.startswith("page:")
         try:
             snapshot = self._read_snapshot()
         except (projection.ProjectionError, OSError, ValueError, KeyError, TypeError):
-            if route == "page":
+            if is_page:
                 body = dashboard.render_unavailable_html().encode("utf-8")
                 self._write_response(503, "text/html; charset=utf-8", body)
             else:
@@ -206,9 +216,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
                                       "code": "snapshot_unavailable"})
             return
 
-        if route == "page":
+        if is_page:
             try:
-                body = dashboard.render_snapshot_html(snapshot).encode("utf-8")
+                page = route.split(":", 1)[1]
+                body = dashboard.render_snapshot_html(snapshot, page=page).encode("utf-8")
             except (ValueError, KeyError, TypeError, ZeroDivisionError):
                 self._write_response(503, "text/html; charset=utf-8",
                                      dashboard.render_unavailable_html().encode("utf-8"))
