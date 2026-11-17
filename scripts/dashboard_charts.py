@@ -64,7 +64,8 @@ def _company_views(snapshot, report):
     views = {}
     for dimension, get_value in dimensions.items():
         companies, applications = defaultdict(set), Counter()
-        for key, record in records.items():
+        for key in app_counts:
+            record = records[key]
             value = get_value(record) or "unknown"
             if value.casefold() == "unknown":
                 value = "Unknown"

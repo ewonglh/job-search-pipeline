@@ -39,6 +39,9 @@ def test_company_dimensions_count_independent_denominators_and_filter_by_key():
     assert size["SME"] == {"label": "SME", "companies": 1, "applications": 1}
     assert size["large"] == {"label": "large", "companies": 1, "applications": 1}
     assert view["companies"]["unresolved_applications"] == 1
+    one_day = dashboard_charts.build_view(snapshot, "custom", "2026-11-16", "2026-11-16")
+    selected_size = {row["label"]: row for row in one_day["companies"]["dimensions"]["size"]}
+    assert selected_size == {"large": {"label": "large", "companies": 1, "applications": 1}}
     state = application_explorer.parse_query("period=alltime&company=acme")
     selected, _note = dashboard_charts.filter_applications(
         snapshot, dashboard._application_rows(snapshot), state)
