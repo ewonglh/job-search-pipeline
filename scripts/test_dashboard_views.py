@@ -234,7 +234,13 @@ def test_render_escapes_html_svg_attributes_and_embedded_json():
     runs_page = d.render_snapshot_html(snapshot, page="runs")
     assert "OTP-123-CANARY" not in runs_page
     assert "PRIVATE_TOOL_OUTPUT_CANARY" not in runs_page
-    assert "browser.open" in runs_page
+    assert "browser.open" not in runs_page
+    trace_run_key = d.run_detail_key(snapshot["facts"]["traces"]["runs"][0])
+    run_detail = d.render_snapshot_html(snapshot, page="run-detail",
+                                        run_key=trace_run_key)
+    assert "browser.open" in run_detail
+    assert "OTP-123-CANARY" not in run_detail
+    assert "PRIVATE_TOOL_OUTPUT_CANARY" not in run_detail
     assert "Tailoring quality" not in rendered and "Hiring funnel" not in rendered
     assert "Applications" in rendered and "Current status" not in rendered
     detail_key = d._application_rows(snapshot)[0]["application_key"]
