@@ -207,14 +207,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
         path, separator, query = target.partition("?")
         detail_match = re.fullmatch(r"/jobs/applications/([0-9a-f]{64})", path)
         app_path = path in ("/jobs/applications", "/jobs/applications/")
+        analytics_path = path in ("/jobs/analytics", "/jobs/analytics/")
         if "%" in path or (path not in ROUTES and not detail_match):
             self._write_response(404, "text/plain; charset=utf-8", b"not found\n")
             return
-        if separator and (not app_path or detail_match):
+        if separator and (not (app_path or analytics_path) or detail_match):
             self._write_response(404, "text/plain; charset=utf-8", b"not found\n")
             return
         query_state = None
-        if app_path:
+        if app_path or analytics_path:
             try:
                 query_state = explorer.parse_query(query if separator else "")
             except ValueError:
@@ -253,6 +254,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     body = dashboard.render_snapshot_html(snapshot, page=page,
                         application_key=detail_match.group(1)).encode("utf-8")
                 elif page == "applications":
+                    body = dashboard.render_snapshot_html(snapshot, page=page,
+                        query_state=query_state).encode("utf-8")
+                elif page == "analytics":
                     body = dashboard.render_snapshot_html(snapshot, page=page,
                         query_state=query_state).encode("utf-8")
                 else:

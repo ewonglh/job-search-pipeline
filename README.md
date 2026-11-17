@@ -193,6 +193,13 @@ calculated.
   confidence, and review state. Ambiguous aliases stay unknown. See
   [catalog update](scripts/company_catalog.py#L133) and
   [alias resolution](scripts/company_catalog.py#L155).
+- The local Home and Analytics pages render chart data from the cached snapshot
+  through `scripts/dashboard_charts.py`; date ranges use Asia/Singapore calendar
+  boundaries, and chart links select exact metric bins or catalog company keys.
+  Partial, stale, unavailable, and complete-zero coverage are labelled
+  separately; company dimensions show both company and application counts.
+  See [chart selection](scripts/dashboard_charts.py#L10) and
+  [dashboard rendering](scripts/dashboard.py#L1234).
 
 `python3 summary.py health --as-of YYYY-MM-DD` shows daily submission and queue
 health; `python3 summary.py funnel --as-of YYYY-MM-DD` shows mature 14/28-day
