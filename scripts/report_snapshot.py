@@ -213,6 +213,7 @@ def normalize_snapshot(tracker_rows, queue_rows, event_doc, ingestion_state,
     resolved = application_identity.resolve_applications(tracker_rows, queue_rows)
     import summary as summary_module
     applications = []
+    confirmed_submissions = []
     for canonical_id, record in sorted(resolved["applications"].items()):
         tr = [_allow_fields(row, _APP_FIELDS) for row in record["tracker_rows"]]
         qr = [_allow_fields(row, _QUEUE_FIELDS) for row in record["queue_rows"]]
@@ -258,6 +259,19 @@ def normalize_snapshot(tracker_rows, queue_rows, event_doc, ingestion_state,
             attempt["snapshot_manifest_status"] = "verified" if candidate else "missing_or_invalid"
             if candidate and not resume_hash:
                 resume_hash = candidate
+            if candidate and isinstance(snapshot_facts, dict):
+                manifest = snapshot_facts.get(attempt.get("snapshot_id"), {})
+                submitted_at = (_timestamp(manifest.get("submitted_at"))
+                                or _day(manifest.get("submitted_at")))
+                if (submitted_at and attempt.get("status") == "submitted"
+                        and attempt.get("attempt_state") in (None, "submitted")
+                        and manifest.get("application_id") in record["aliases"]
+                        and manifest.get("attempt_id") == attempt.get("attempt_id")):
+                    confirmed_submissions.append({
+                        "application_id": canonical_id,
+                        "attempt_id": attempt.get("attempt_id"),
+                        "submitted_at": submitted_at,
+                    })
         applications.append({
             "application_id": canonical_id,
             "aliases": record["aliases"],
@@ -354,6 +368,7 @@ def normalize_snapshot(tracker_rows, queue_rows, event_doc, ingestion_state,
 
     facts = {
         "applications": applications,
+        "confirmed_submissions": confirmed_submissions,
         "attempts": attempts,
         "identity_conflicts": [{"reason": item["reason"],
                                 "row_refs": item.get("row_refs", [])}
