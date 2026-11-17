@@ -170,6 +170,30 @@ run summaries and mail content are not stored. Application/artifact joins stay
 unknown unless the native source exposes explicit IDs. Native counters stay
 separated by provider and cron-run scope; no cost or overlapping totals are
 calculated.
+
+- `python3 projection.py report analytics --period last12weeks` reads cached
+  analytics. Presets include `thisweek`, `thismonth`, `last3months`, `alltime`,
+  and `custom --start YYYY-MM-DD --end YYYY-MM-DD` with inclusive Singapore
+  dates, Monday weeks, and calendar months. See [report builder](scripts/activity_analytics.py#L159).
+- Series include canonical application IDs. Verified submission manifests,
+  recorded date claims, and current stages have separate counts. Missing dates
+  keep coverage partial. See [metric aggregation](scripts/activity_analytics.py#L159).
+- Explicit initial-tailoring and retailoring completions come from
+  `JOBSEARCH_ACTIVITY_STATE`, defaulting to
+  `~/.local/state/job-search-pipeline/tailoring_activities.json`. The schema is
+  `{"schema":1,"coverage":{"complete":true},"activities":[{"activity_id":"stable-id","application_id":"canonical-or-supported-alias","kind":"initial_tailoring","completed_at":"2026-01-01T12:00:00Z"}]}`.
+  Use `initial_tailoring` or `retailoring`; declare complete coverage only for a
+  complete history. See [activity reader](scripts/projection.py#L508).
+- The authoritative company catalog uses `JOBSEARCH_COMPANY_CATALOG`, defaulting
+  to `~/.local/state/job-search-pipeline/company_catalog.json`, outside the
+  checkout. Collection stores sanitized copies in the cached generation;
+  reports use those copies. See [catalog reader](scripts/projection.py#L488).
+- `company_catalog.upsert(record)` atomically updates stable keys, exact aliases,
+  independent size and footprint classifications, industry, source URL, date,
+  confidence, and review state. Ambiguous aliases stay unknown. See
+  [catalog update](scripts/company_catalog.py#L133) and
+  [alias resolution](scripts/company_catalog.py#L155).
+
 `python3 summary.py health --as-of YYYY-MM-DD` shows daily submission and queue
 health; `python3 summary.py funnel --as-of YYYY-MM-DD` shows mature 14/28-day
 outcome cohorts. Add `--json` for JSON. These read/report commands open the
@@ -323,6 +347,8 @@ or a repository inside this checkout. Empty path overrides fail immediately.
 | `JOBSEARCH_DASHBOARD_OUT` | Dashboard output | `~/.local/state/job-search-pipeline/dashboard/index.html` |
 | `JOBSEARCH_INGEST_STATE` | Private email-ingestion cursors | `~/.local/state/job-search-pipeline/email_ingest_state.json` |
 | `JOBSEARCH_PROJECTION_DB` | Private cached report projection | `~/.local/state/job-search-pipeline/projection/index.sqlite3` |
+| `JOBSEARCH_ACTIVITY_STATE` | Private explicit tailoring completion ledger | `~/.local/state/job-search-pipeline/tailoring_activities.json` |
+| `JOBSEARCH_COMPANY_CATALOG` | Private offline company classifications | `~/.local/state/job-search-pipeline/company_catalog.json` |
 | `JOBSEARCH_OPENCLAW_TRAJECTORY_ROOT` | Private root of OpenClaw trajectory exports imported by explicit trace collection | unset |
 | `JOBSEARCH_TRACE_RETENTION_RECORDS` | Maximum retained native run detail records | `500` (maximum `10000`) |
 | `JOBSEARCH_PREFLIGHT_STATE` | Optional content-free preflight records | `~/.local/state/job-search-pipeline/preflight_records.json` |
