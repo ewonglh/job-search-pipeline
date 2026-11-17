@@ -223,6 +223,38 @@ def test_application_queries_and_opaque_detail_routes():
             stop_server(server, thread)
 
 
+def test_bounded_run_routes_and_sanitized_detail():
+    snapshot = synthetic_snapshot()
+    with mock.patch.object(projection, "read_snapshot", return_value=snapshot):
+        server, thread = start_server()
+        try:
+            base = "http://{}:{}".format(server_module.HOST, server.server_address[1])
+            status, _headers, listing = request(base + "/jobs/runs/?page=1")
+            assert status == 200 and b"job-alpha" in listing
+            assert b"browser.open" not in listing
+            assert b"PRIVATE_TOOL_OUTPUT_CANARY" not in listing
+            assert b"form-action 'self'" in request(base + "/jobs/runs/")[1].get(
+                "Content-Security-Policy").encode("ascii")
+
+            for query in ("?page=0", "?page=51", "?page=1&page=2", "?q=private",
+                          "?page=2"):
+                status, _headers, body = request(base + "/jobs/runs/" + query)
+                assert status == 400 and b"private" not in body
+
+            run = snapshot["facts"]["traces"]["runs"][0]
+            key = server_module.dashboard.run_detail_key(run)
+            status, headers, detail = request(base + "/jobs/runs/" + key)
+            assert status == 200 and headers.get("Referrer-Policy") == "no-referrer"
+            assert b"browser.open" in detail
+            assert b"PRIVATE_TOOL_OUTPUT_CANARY" not in detail
+            assert b"OTP-123-CANARY" not in detail
+            assert b"MAIL_BODY_CANARY" not in detail
+            status, _headers, _body = request(base + "/jobs/runs/" + "f" * 64)
+            assert status == 404
+        finally:
+            stop_server(server, thread)
+
+
 def main():
     tests = [value for name, value in sorted(globals().items())
              if name.startswith("test_") and callable(value)]
