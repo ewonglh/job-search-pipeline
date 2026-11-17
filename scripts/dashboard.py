@@ -675,15 +675,15 @@ main { min-width: 0; padding-top: 22px; }
 .chart .flow { fill: none; stroke-linecap: round; opacity: .42; }
 .chart .node { fill: var(--surface); stroke: var(--border); stroke-width: 1.5; }
 .bar-chart { min-width: 0; overflow: hidden; }
-.chart-bars { display: grid; gap: 7px; }
+.chart-bars { display: grid; gap: 4px; }
 .trend-chart { display: block; width: 100%; height: auto; margin-top: 12px; color: var(--text); }
 .trend-chart text { fill: currentColor; font: 12px system-ui, sans-serif; }
 .trend-chart polyline { fill: none; stroke: #1d4ed8; stroke-width: 3; }
 .trend-chart circle { fill: #1d4ed8; stroke: var(--surface); stroke-width: 2; }
 .trend-chart a:focus circle { stroke: #111827; stroke-width: 4; }
-.chart-row { display: grid; grid-template-columns: minmax(6rem, 34%) minmax(0, 1fr); align-items: center; gap: 8px; }
-.chart-label { font-size: .88rem; line-height: 1.3; overflow-wrap: anywhere; }
-.chart-track { position: relative; display: block; min-width: 0; min-height: 32px; overflow: hidden; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-muted); text-decoration: none; }
+.chart-row { display: grid; grid-template-columns: minmax(7.5rem, 34%) minmax(0, 1fr); align-items: center; gap: 8px; }
+.chart-label { font-size: .88rem; line-height: 1.3; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.chart-track { position: relative; display: block; min-width: 0; min-height: 28px; overflow: hidden; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-muted); text-decoration: none; }
 .chart-track:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
 .chart-fill { position: absolute; inset: 0 auto 0 0; min-width: 0; background: #2563eb; }
 .chart-fill.partial { background: repeating-linear-gradient(135deg, #b45309, #b45309 6px, #fcd34d 6px, #fcd34d 10px); }
@@ -694,7 +694,7 @@ main { min-width: 0; padding-top: 22px; }
 .industry-row .industry-bar { grid-column: 1 / -1; }
 .chart-data { margin-top: 12px; }
 .chart-data table { font-size: .92rem; }
-.chart-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; }
+.chart-grid { display: grid; grid-template-columns: minmax(0, 1fr); align-items: start; gap: 12px; }
 .range-form { display: flex; flex-wrap: wrap; align-items: end; gap: 10px; margin: 12px 0 18px; }
 .range-form label { display: grid; gap: 4px; font-weight: 600; }
 .range-form select, .range-form input, .range-form button { min-height: 44px; max-width: 100%; padding: 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--text); font: inherit; }
@@ -1402,6 +1402,27 @@ def _chart_interval_label(item):
     return "{} to {}".format(start, end)
 
 
+def _short_interval_label(item):
+    """Compact visible label such as '31 Aug – 6 Sep'; full ISO dates stay in aria/title."""
+    import datetime
+    try:
+        start = datetime.date.fromisoformat(item.get("start") or "")
+        end = datetime.date.fromisoformat(item.get("end") or "")
+    except ValueError:
+        return _chart_interval_label(item)
+    def fmt(day):
+        return "{} {}".format(day.day, day.strftime("%b"))
+    if end == start:
+        return fmt(start)
+    return "{} \u2013 {}".format(fmt(start), fmt(end))
+
+
+def _stage_label(stage):
+    """Readable stage name; raw keys such as new_status become 'New status'."""
+    text = str(stage).replace("_", " ").strip()
+    return text[:1].upper() + text[1:] if text else "Unknown"
+
+
 def _render_metric_chart(report, snapshot, metric, title, state=None, *, limit=None, trend=False):
     import dashboard_charts
     state = state or explorer.parse_query("")
@@ -1474,8 +1495,8 @@ def _render_metric_chart(report, snapshot, metric, title, state=None, *, limit=N
             link_open = "<a class='chart-track' aria-label='{}: {}, open matching applications' href='{}'>".format(
                 _e(label), _e(count_label), _e(href)) if href else "<div class='chart-track'>"
             link_close = "</a>" if href else "</div>"
-            out.append("<div class='chart-row' role='listitem'><span class='chart-label'>{}</span>{}<span class='chart-fill{}' style='width:{}%'></span><span class='chart-count'>{}</span>{}</div>".format(
-                _e(label), link_open, " partial" if status in ("partial", "unknown") else "",
+            out.append("<div class='chart-row' role='listitem'><span class='chart-label' title='{}'>{}</span>{}<span class='chart-fill{}' style='width:{}%'></span><span class='chart-count'>{}</span>{}</div>".format(
+                _e(label), _e(_short_interval_label(item)), link_open, " partial" if status in ("partial", "unknown") else "",
                 width_value, _e(count_label), link_close))
         out.append("</div>")
     out.append("<details class='chart-data'><summary>View chart data and keyboard links</summary><div class='data-table-wrap'><table><caption>{}</caption><thead><tr><th scope='col'>Interval</th><th scope='col'>Observed</th><th scope='col'>Coverage</th><th scope='col'>Applications</th></tr></thead><tbody>".format(_e(title)))
@@ -1817,7 +1838,7 @@ def _render_analytics(data, snapshot, state):
         for stage, count in stage_counts.items():
             share = "{:.1f}%".format(count / stage_total * 100) if stage_total else "Unavailable"
             out.append("<tr><th scope='row'>{}</th><td>{}</td><td>{}</td></tr>".format(
-                _e(stage), _e(count), _e(share)))
+                _e(_stage_label(stage)), _e(count), _e(share)))
     else:
         out.append("<tr><td colspan='3'>No canonical applications are available.</td></tr>")
     out.append("</tbody></table></div></section><h3>Activity in selected range</h3><div class='chart-grid'>")
