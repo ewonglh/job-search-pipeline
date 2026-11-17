@@ -31,6 +31,10 @@ SOURCES = ("tracker", "queue", "events", "ingestion", "snapshots",
 HASH40_RE = re.compile(r"^[0-9a-f]{40}$")
 HASH64_RE = re.compile(r"^[0-9a-f]{64}$")
 CODE_RE = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,63}$")
+PRIVATE_TEXT_RE = re.compile(
+    r"(?i)(?:\b(?:password|passphrase|token|otp|verification code|security code)\s*[:=]|"
+    r"\bBearer\s+[A-Za-z0-9._~+/=-]{8,}|\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b)"
+)
 TEXT_FIELDS = {
     "company": 120, "role": 120, "source": 80, "status": 80,
     "stage": 80, "tracker_sync": 80, "snapshot_provenance": 80,
@@ -112,7 +116,8 @@ def _safe_text(value, limit):
     if not isinstance(value, str):
         raise _InvalidSource()
     compact = " ".join(value.split())
-    if len(compact) > limit or any(ord(char) < 32 for char in compact):
+    if (len(compact) > limit or any(ord(char) < 32 for char in compact)
+            or PRIVATE_TEXT_RE.search(compact)):
         raise _InvalidSource()
     return compact or None
 
@@ -148,67 +153,104 @@ def _safe_application_id(value):
         return "link:" + _safe_url(value[len("link:"):])
     if value and re.fullmatch(r"pr:[1-9][0-9]*", value):
         return value
-    if value and value.startswith("identity:") and "|" in value[len("identity:"):]:
-        return value
+    if value and value.startswith("identity:"):
+        parts = value[len("identity:"):].split("|")
+        if len(parts) == 2:
+            company = _safe_text(parts[0], 120)
+            role = _safe_text(parts[1], 120)
+            if company and role:
+                return "identity:{}|{}".format(company, role)
     raise _InvalidSource()
 
 
-def _strict_rows(rows, fields, *, queue_statuses=None, tracker_statuses=None):
+def _compatible_rows(rows, fields, *, queue_statuses=None, tracker_statuses=None):
+    """Keep safe observer rows while isolating malformed identities/metadata."""
     if not isinstance(rows, list) or len(rows) > MAX_SOURCE_RECORDS:
         raise _InvalidSource()
-    result = []
+    import application_identity
+    clean_rows, quarantined, redacted = [], 0, 0
+    identity_fields = {"company", "role", "link", "pr", "pr_number"}
     for row in rows:
         if not isinstance(row, dict):
-            raise _InvalidSource()
-        clean = {}
+            quarantined += 1
+            continue
+        clean, unsafe_identity = {}, False
         for key in fields:
             if key not in row or row[key] is None:
                 continue
             value = row[key]
-            if key in TEXT_FIELDS:
-                value = _safe_text(value, TEXT_FIELDS[key])
-                if value and key == "attempt_id" and not re.fullmatch(
-                        r"[A-Za-z0-9._:-]{1,120}", value):
-                    raise _InvalidSource()
-                if value and key == "blocker_code" and not CODE_RE.fullmatch(value.lower()):
-                    raise _InvalidSource()
-                if value and key in QUEUE_ENUMS and value not in QUEUE_ENUMS[key]:
-                    raise _InvalidSource()
-                if value is not None and key in ("status", "stage"):
-                    allowed = (queue_statuses if queue_statuses and key == "status"
-                               else tracker_statuses or TRACKER_STATUS_VALUES)
-                    if value.lower() not in allowed and value not in allowed:
+            try:
+                if key in TEXT_FIELDS:
+                    value = _safe_text(value, TEXT_FIELDS[key])
+                    if value and key == "attempt_id" and not re.fullmatch(
+                            r"[A-Za-z0-9._:-]{1,120}", value):
                         raise _InvalidSource()
-            elif key == "link":
-                value = _safe_url(value)
-            elif key in ("pr", "pr_number"):
-                if isinstance(value, bool) or not isinstance(value, (str, int)):
-                    raise _InvalidSource()
-                if isinstance(value, str):
-                    value = _safe_text(value, 2048)
-                    if value and "://" in value:
-                        value = _safe_url(value)
-                    elif value and not value.isdigit():
+                    if value and key == "blocker_code" and not CODE_RE.fullmatch(value.lower()):
                         raise _InvalidSource()
-            elif key in ("applied_date", "stage_since"):
-                if not isinstance(value, str) or not _day(value):
-                    raise _InvalidSource()
-                value = _day(value)
-            elif key in ("submitted_at", "claimed_at"):
-                if not isinstance(value, str):
-                    raise _InvalidSource()
-                value = _timestamp(value) or _day(value)
-                if value is None:
-                    raise _InvalidSource()
-            elif key in ("snapshot_id", "prepared_snapshot_id"):
-                if not isinstance(value, str) or not HASH64_RE.fullmatch(value):
-                    raise _InvalidSource()
-            if value is not None:
-                clean[key] = value
-        if not any(clean.get(key) for key in ("company", "role", "link", "pr", "pr_number")):
-            raise _InvalidSource()
-        result.append(clean)
-    return result
+                    if value and key in QUEUE_ENUMS and value not in QUEUE_ENUMS[key]:
+                        raise _InvalidSource()
+                    if value is not None and key in ("status", "stage"):
+                        allowed = (queue_statuses if queue_statuses and key == "status"
+                                   else tracker_statuses or TRACKER_STATUS_VALUES)
+                        if value.lower() not in allowed and value not in allowed:
+                            raise _InvalidSource()
+                elif key == "link":
+                    value = _safe_url(value)
+                elif key in ("pr", "pr_number"):
+                    if isinstance(value, bool) or not isinstance(value, (str, int)):
+                        raise _InvalidSource()
+                    if isinstance(value, str):
+                        value = _safe_text(value, 2048)
+                        if value and "://" in value:
+                            value = _safe_url(value)
+                        elif value and not value.isdigit():
+                            raise _InvalidSource()
+                elif key in ("applied_date", "stage_since"):
+                    value = _day(value) if isinstance(value, str) else None
+                    if value is None:
+                        raise _InvalidSource()
+                elif key in ("submitted_at", "claimed_at"):
+                    value = (_timestamp(value) or _day(value)) if isinstance(value, str) else None
+                    if value is None:
+                        raise _InvalidSource()
+                elif key in ("snapshot_id", "prepared_snapshot_id"):
+                    if not isinstance(value, str) or not HASH64_RE.fullmatch(value):
+                        raise _InvalidSource()
+                if value is not None:
+                    clean[key] = value
+            except _InvalidSource:
+                if key in identity_fields:
+                    unsafe_identity = True
+                else:
+                    redacted += 1
+        if unsafe_identity:
+            quarantined += 1
+            continue
+        try:
+            has_safe_identity = bool(
+                clean.get("link") or application_identity.pr_number(clean)
+                or (clean.get("company") and clean.get("role")))
+        except (TypeError, ValueError):
+            has_safe_identity = False
+        if not has_safe_identity:
+            quarantined += 1
+            continue
+        clean_rows.append(clean)
+    return clean_rows, quarantined, redacted
+
+
+def _coverage_reasons(quarantined=0, redacted=0, *, legacy_missing=False,
+                      source_incomplete=False):
+    reasons = []
+    if quarantined:
+        reasons.append("records_quarantined")
+    if redacted:
+        reasons.append("optional_metadata_redacted")
+    if legacy_missing:
+        reasons.append("legacy_coverage_missing")
+    if source_incomplete:
+        reasons.append("source_declared_incomplete")
+    return sorted(set(reasons))
 
 
 def _unique_object(pairs):
@@ -251,10 +293,16 @@ def _read_tracker(path):
             raise _InvalidSource()
         statuses = set(summary.STATUS_ALIASES) | {str(value).lower()
                                                  for value in summary.STATUS_ALIASES.values()}
-        return {"records": _strict_rows(parsed, TRACKER_FIELDS,
-                                        tracker_statuses=statuses | TRACKER_STATUS_VALUES),
+        records, quarantined, redacted = _compatible_rows(
+            parsed, TRACKER_FIELDS,
+            tracker_statuses=statuses | TRACKER_STATUS_VALUES)
+        partial = bool(quarantined or redacted)
+        return {"records": records, "record_count": len(parsed),
                 "observed_at": None,
-                "error_code": None, "quarantined_count": 0}
+                "error_code": "partial_coverage" if partial else None,
+                "quarantined_count": quarantined, "redacted_count": redacted,
+                "coverage_status": "partial" if partial else "complete",
+                "coverage_reasons": _coverage_reasons(quarantined, redacted)}
     except (OSError, UnicodeError, ValueError, TypeError, _InvalidSource) as exc:
         return _source_error(path, exc)
 
@@ -264,9 +312,15 @@ def _read_queue(path):
         import queue as queue_module
         with open(path, "r", encoding="utf-8") as source:
             parsed = queue_module.parse_queue(source.read())
-        return {"records": _strict_rows(parsed, QUEUE_FIELDS,
-                                        queue_statuses=set(queue_module.STATUSES)),
-                "observed_at": None, "error_code": None, "quarantined_count": 0}
+        records, quarantined, redacted = _compatible_rows(
+            parsed, QUEUE_FIELDS, queue_statuses=set(queue_module.STATUSES))
+        partial = bool(quarantined or redacted)
+        return {"records": records, "record_count": len(parsed),
+                "observed_at": None,
+                "error_code": "partial_coverage" if partial else None,
+                "quarantined_count": quarantined, "redacted_count": redacted,
+                "coverage_status": "partial" if partial else "complete",
+                "coverage_reasons": _coverage_reasons(quarantined, redacted)}
     except (OSError, UnicodeError, ValueError, TypeError, _InvalidSource) as exc:
         return _source_error(path, exc)
 
@@ -279,72 +333,147 @@ def _read_events(path):
     try:
         import recruitment_evidence
         document = _read_json(path)
-        if (not isinstance(document, dict) or document.get("schema") != 1
-                or not isinstance(document.get("coverage"), dict)
-                or not isinstance(document.get("events"), list)):
+        if (not isinstance(document, dict) or type(document.get("schema")) is not int
+                or document.get("schema") != 1 or not isinstance(document.get("events"), list)):
             raise _InvalidSource()
         if len(document["events"]) > MAX_SOURCE_RECORDS:
             raise _InvalidSource()
-        effective, quarantined, diagnostics = recruitment_evidence.effective_events(document)
-        coverage = document["coverage"]
+        legacy_coverage_missing = "coverage" not in document
+        coverage = document.get("coverage", {})
+        if not isinstance(coverage, dict):
+            raise _InvalidSource()
         safe_coverage = {}
+        redacted = 0
         for field in ("complete", "transport_complete"):
             if field in coverage:
                 if type(coverage[field]) is not bool:
-                    raise _InvalidSource()
-                safe_coverage[field] = coverage[field]
+                    redacted += 1
+                    safe_coverage[field] = False
+                else:
+                    safe_coverage[field] = coverage[field]
         for field in ("observed_at", "last_scan_at"):
             if field in coverage and coverage[field] is not None:
                 stamp = _timestamp(coverage[field])
                 if stamp is None:
-                    raise _InvalidSource()
-                safe_coverage[field] = stamp
+                    redacted += 1
+                else:
+                    safe_coverage[field] = stamp
         for field in ("since", "until"):
             if field in coverage and coverage[field] is not None:
                 day = _day(coverage[field])
                 if day is None:
-                    raise _InvalidSource()
-                safe_coverage[field] = day
+                    redacted += 1
+                else:
+                    safe_coverage[field] = day
+        if "complete" not in safe_coverage:
+            safe_coverage["complete"] = False
+        if legacy_coverage_missing:
+            redacted += 1
         events = []
+        accepted_raw = []
+        quarantined_records = 0
         allowed_origins = {"human", "automated", "unknown"}
         allowed_verification = {"verified", "review_required", "unknown"}
-        for event in effective:
+        for event in document["events"]:
             if not isinstance(event, dict):
-                raise _InvalidSource()
+                quarantined_records += 1
+                continue
+            try:
+                event_id = _safe_text(event.get("event_id"), 256)
+                if not event_id or event.get("event_type") not in recruitment_evidence.EVENT_TYPES:
+                    raise _InvalidSource()
+                revision = event.get("revision")
+                if revision is not None and (type(revision) is not int or revision < 1
+                                             or revision > 1000000):
+                    raise _InvalidSource()
+                revision_id = event.get("revision_id")
+                if revision_id is not None and (not isinstance(revision_id, str)
+                                                or not HASH64_RE.fullmatch(revision_id)):
+                    raise _InvalidSource()
+                supersedes = event.get("supersedes")
+                if supersedes is not None and (
+                        not isinstance(supersedes, list) or len(supersedes) > 1000
+                        or any(not isinstance(item, str) or not HASH64_RE.fullmatch(item)
+                               for item in supersedes)):
+                    raise _InvalidSource()
+                if event.get("application_id") is not None:
+                    _safe_application_id(event["application_id"])
+                # The producer's revision rules are the source of truth. Verify
+                # each row alone first so one bad revision cannot hide peers.
+                recruitment_evidence.effective_events([event])
+            except (TypeError, ValueError, KeyError, _InvalidSource):
+                quarantined_records += 1
+                continue
+            accepted_raw.append(event)
+        try:
+            effective, quarantined, diagnostics = recruitment_evidence.effective_events(accepted_raw)
+        except (TypeError, ValueError, KeyError):
+            # The per-record validation above should make this unreachable; keep
+            # an honest unavailable source if the ledger contract changes.
+            raise _InvalidSource()
+        for event in effective:
             clean = {}
             for field in EVENT_FIELDS:
                 if field not in event or event[field] is None:
                     continue
                 value = event[field]
                 if field == "event_id":
-                    value = _safe_text(value, 256)
-                    if value:
-                        value = "event:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
+                    value = "event:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
                 elif field == "application_id":
-                    value = _safe_application_id(value)
+                    try:
+                        value = _safe_application_id(value)
+                    except _InvalidSource:
+                        # Identity claims are never repaired into another join.
+                        quarantined_records += 1
+                        continue
                 elif field == "event_type":
                     if value not in recruitment_evidence.EVENT_TYPES:
-                        raise _InvalidSource()
+                        quarantined_records += 1
+                        clean = None
+                        break
                 elif field == "occurred_at":
                     value = _timestamp(value)
                     if value is None:
-                        raise _InvalidSource()
+                        redacted += 1
+                        continue
                 elif field == "verification" and value not in allowed_verification:
-                    raise _InvalidSource()
+                    value = "unknown"
+                    redacted += 1
                 elif field == "origin" and value not in allowed_origins:
-                    raise _InvalidSource()
+                    value = "unknown"
+                    redacted += 1
                 clean[field] = value
-            events.append({"kind": "event", "value": clean,
-                           "quarantined": event.get("event_id") in quarantined})
+            if clean is not None:
+                events.append({"kind": "event", "value": clean,
+                               "quarantined": event.get("event_id") in quarantined})
+        diagnostics["quarantined_records"] = quarantined_records + len(quarantined)
+        diagnostics["redacted_optional_fields"] = redacted
+        diagnostics["legacy_coverage_missing"] = 1 if legacy_coverage_missing else 0
+        if (quarantined_records or quarantined or redacted or legacy_coverage_missing
+                or safe_coverage.get("complete") is not True
+                or safe_coverage.get("transport_complete") is False):
+            safe_coverage["complete"] = False
         observed = (_timestamp(safe_coverage.get("observed_at"))
                     or _timestamp(safe_coverage.get("last_scan_at")))
         records = [{"kind": "coverage", "value": safe_coverage},
                    {"kind": "diagnostics", "value": diagnostics,
-                    "quarantined_event_count": len(quarantined)}]
+                    "quarantined_event_count": quarantined_records + len(quarantined)}]
         records.extend(events)
+        partial = (quarantined_records > 0 or bool(quarantined) or redacted > 0
+                   or legacy_coverage_missing or safe_coverage.get("complete") is not True
+                   or safe_coverage.get("transport_complete") is False)
+        reasons = _coverage_reasons(
+            quarantined_records + len(quarantined), redacted,
+            legacy_missing=legacy_coverage_missing,
+            source_incomplete=(safe_coverage.get("complete") is not True
+                               or safe_coverage.get("transport_complete") is False))
         return {"records": records, "record_count": len(document["events"]),
-                "observed_at": observed, "error_code": None,
-                "quarantined_count": 0}
+                "observed_at": observed,
+                "error_code": "partial_coverage" if partial else None,
+                "quarantined_count": quarantined_records + len(quarantined),
+                "redacted_count": redacted,
+                "coverage_status": "partial" if partial else "complete",
+                "coverage_reasons": reasons}
     except (OSError, UnicodeError, ValueError, TypeError, _InvalidSource) as exc:
         return _source_error(path, exc)
 
@@ -352,24 +481,36 @@ def _read_events(path):
 def _read_ingestion(path):
     try:
         document = _read_json(path)
-        if (not isinstance(document, dict) or document.get("schema") != 1
-                or not isinstance(document.get("scopes"), dict)
-                or len(document["scopes"]) > MAX_SOURCE_RECORDS):
+        if (not isinstance(document, dict) or type(document.get("schema")) is not int
+                or document.get("schema") != 1):
+            raise _InvalidSource()
+        has_scopes, has_folders = "scopes" in document, "folders" in document
+        if has_scopes == has_folders:
+            raise _InvalidSource()
+        collection = document["scopes"] if has_scopes else document["folders"]
+        if not isinstance(collection, dict) or len(collection) > MAX_SOURCE_RECORDS:
             raise _InvalidSource()
         records, observed = [], None
-        for scope in document["scopes"].values():
+        quarantined = redacted = 0
+        for scope in collection.values():
             if not isinstance(scope, dict):
-                raise _InvalidSource()
+                quarantined += 1
+                continue
             value = scope.get("last_scan_at")
             if value is not None:
                 value = _timestamp(value)
                 if value is None:
-                    raise _InvalidSource()
-                observed = max(observed, value) if observed else value
+                    redacted += 1
+                else:
+                    observed = max(observed, value) if observed else value
             records.append({"kind": "scope", "value": {"last_scan_at": value}})
+        partial = bool(quarantined or redacted)
         return {"records": records, "record_count": len(records),
-                "observed_at": observed, "error_code": None,
-                "quarantined_count": 0}
+                "observed_at": observed,
+                "error_code": "partial_coverage" if partial else None,
+                "quarantined_count": quarantined, "redacted_count": redacted,
+                "coverage_status": "partial" if partial else "complete",
+                "coverage_reasons": _coverage_reasons(quarantined, redacted)}
     except (OSError, UnicodeError, ValueError, TypeError, _InvalidSource) as exc:
         return _source_error(path, exc)
 
@@ -690,6 +831,9 @@ def _ensure_schema(connection):
             error_code TEXT,
             record_count INTEGER NOT NULL DEFAULT 0,
             quarantined_count INTEGER NOT NULL DEFAULT 0,
+            redacted_count INTEGER NOT NULL DEFAULT 0,
+            coverage_status TEXT NOT NULL DEFAULT 'unknown',
+            coverage_reasons TEXT NOT NULL DEFAULT '[]',
             error_quarantined_count INTEGER NOT NULL DEFAULT 0,
             empty INTEGER NOT NULL DEFAULT 0
         );
@@ -720,6 +864,13 @@ def _ensure_schema(connection):
             payload TEXT NOT NULL
         );
     """)
+    existing_columns = {row[1] for row in connection.execute("PRAGMA table_info(source_state)")}
+    if "redacted_count" not in existing_columns:
+        connection.execute("ALTER TABLE source_state ADD COLUMN redacted_count INTEGER NOT NULL DEFAULT 0")
+    if "coverage_status" not in existing_columns:
+        connection.execute("ALTER TABLE source_state ADD COLUMN coverage_status TEXT NOT NULL DEFAULT 'unknown'")
+    if "coverage_reasons" not in existing_columns:
+        connection.execute("ALTER TABLE source_state ADD COLUMN coverage_reasons TEXT NOT NULL DEFAULT '[]'")
     existing = connection.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
     if existing and existing[0] != str(SCHEMA_VERSION):
         raise ProjectionError("unsupported projection database schema")
@@ -757,7 +908,18 @@ def _record_id(source, position, payload, occurrence):
 def _source_success(connection, source, generation, value, collected_at):
     observed = value.get("observed_at")
     status = "stale" if observed is None else "fresh"
-    error = "observation_time_unknown" if observed is None else None
+    coverage_status = value.get("coverage_status", "complete")
+    if coverage_status not in ("complete", "partial"):
+        coverage_status = "partial"
+    reasons = value.get("coverage_reasons", [])
+    if (not isinstance(reasons, list) or len(reasons) > 16
+            or any(not isinstance(code, str) or not CODE_RE.fullmatch(code) for code in reasons)):
+        reasons = ["partial_coverage"] if coverage_status == "partial" else []
+    reasons = sorted(set(reasons))
+    if coverage_status == "partial" and not reasons:
+        reasons = ["partial_coverage"]
+    error = ("partial_coverage" if coverage_status == "partial" else
+             "observation_time_unknown" if observed is None else None)
     if observed is not None:
         age = max(0, (datetime.fromisoformat(collected_at.replace("Z", "+00:00"))
                       - datetime.fromisoformat(observed.replace("Z", "+00:00"))).total_seconds())
@@ -766,14 +928,17 @@ def _source_success(connection, source, generation, value, collected_at):
     count = value.get("record_count", len(value["records"]))
     connection.execute("""UPDATE source_state SET active_generation=?,status=?,observed_at=?,
         collected_at=?,last_success_at=?,freshness_seconds=?,error_code=?,record_count=?,
-        quarantined_count=?,error_quarantined_count=0,empty=? WHERE source=?""",
+        quarantined_count=?,redacted_count=?,coverage_status=?,coverage_reasons=?,error_quarantined_count=0,
+        empty=? WHERE source=?""",
         (generation, status, observed, collected_at, collected_at, SOURCE_FRESHNESS[source],
          error, count, value.get("unknown_head_count", value.get("quarantined_count", 0)),
-         1 if count == 0 and not value.get("unknown_head_count") else 0, source))
+         value.get("redacted_count", 0), coverage_status, _canonical(reasons),
+         1 if count == 0 and not value.get("unknown_head_count")
+         and coverage_status == "complete" else 0, source))
 
 
 def _source_failure(connection, source, value, collected_at):
-    old = connection.execute("SELECT active_generation,last_success_at,observed_at,record_count,quarantined_count FROM source_state WHERE source=?",
+    old = connection.execute("SELECT active_generation,last_success_at,observed_at,record_count,quarantined_count,coverage_status,redacted_count FROM source_state WHERE source=?",
                              (source,)).fetchone()
     has_last_good = bool(old and old["active_generation"])
     connection.execute("""UPDATE source_state SET status=?,collected_at=?,error_code=?,
@@ -878,6 +1043,9 @@ def _health_sources(connection):
             "freshness_seconds": row["freshness_seconds"], "error_code": row["error_code"],
             "record_count": row["record_count"], "empty": bool(row["empty"]),
             "quarantined_count": row["quarantined_count"],
+            "redacted_count": row["redacted_count"],
+            "coverage_status": row["coverage_status"],
+            "coverage_reasons": json.loads(row["coverage_reasons"]),
             "error_quarantined_count": row["error_quarantined_count"],
         }
     return result
@@ -979,7 +1147,8 @@ def _make_snapshot(connection, *, as_of, generated_at, snapshot_root):
     snapshot["sources"] = sources
     source_identity = {name: {key: value.get(key) for key in
                        ("observed_at", "freshness_seconds", "error_code", "record_count",
-                        "quarantined_count", "error_quarantined_count")}
+                        "quarantined_count", "redacted_count", "coverage_status",
+                        "coverage_reasons", "error_quarantined_count")}
                        for name, value in sorted(sources.items())}
     content = {"schema_version": SCHEMA_VERSION, "as_of": snapshot["as_of"],
                "sources": source_identity, "facts": snapshot["facts"]}
@@ -1161,8 +1330,12 @@ def format_compact(snapshot):
     sources = snapshot.get("sources", {})
     def source_status(value):
         status = value.get("status", "unavailable")
+        if value.get("coverage_status") == "partial":
+            reasons = value.get("coverage_reasons") or ["partial_coverage"]
+            status += "/partial_" + "+".join(reasons)
         if value.get("error_code"):
-            status += "/" + value["error_code"]
+            if value["error_code"] not in ("partial_coverage",):
+                status += "/" + value["error_code"]
         age = value.get("age_seconds")
         status += " age=" + ("unknown" if age is None else str(age) + "s")
         if value.get("collection_age_seconds") is not None:

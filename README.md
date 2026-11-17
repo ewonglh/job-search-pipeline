@@ -187,6 +187,23 @@ filesystem modification times never refresh source age. Collection time,
 source observation time and snapshot generation time remain separate. A
 missing reply is not treated as a confirmed non-response.
 
+Projection compatibility is read-only and allowlisted. Tracker rows accept
+`pr` or `pr_number` references and `status` or `stage` values, using the
+existing status aliases. Schema-1 evidence ledgers with an `events` list but no
+`coverage` block remain readable and report incomplete coverage. Ingestion
+accepts the current `scopes` map and the issue-documented legacy `folders` map;
+only each entry's `last_scan_at` is projected. Invalid identity rows are
+quarantined, invalid optional fields are dropped, and source health reports
+`coverage_status`, `coverage_reasons`, `quarantined_count`, and
+`redacted_count`. The adapter
+contracts are implemented in `scripts/projection.py` (`TRACKER_FIELDS` at
+line 43 and source adapters at lines 284, 332, and 481). Tracker aliases come
+from `scripts/summary.py` line 98, and the older evidence envelope is accepted
+by `scripts/outcomes.py` line 35. The legacy `folders` key is specified in
+[issue 30](https://github.com/ewonglh/job-search-pipeline/issues/30). Native
+run pages remain pinned to the verified OpenClaw version; unknown page
+envelopes report `unsupported_schema` (`scripts/openclaw_traces.py` line 326).
+
 `JOBSEARCH_PREFLIGHT_STATE` optionally points to a private schema-1 JSON file
 with a `records` list. Each item contains the result shape returned by
 `tailor_preflight.check_artifact` under `report`, and may include a separate

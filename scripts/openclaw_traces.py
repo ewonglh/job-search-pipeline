@@ -59,6 +59,10 @@ COMPLETION_VALUES = frozenset(("succeeded", "failed", "unknown"))
 DELIVERY_VALUES = frozenset(("delivered", "not-delivered", "unknown", "not-requested"))
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:@/+\-]{0,255}$")
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/@+\-]{0,127}$")
+SENSITIVE_VALUE_RE = re.compile(
+    r"(?i)(?:\b(?:password|passphrase|token|otp|verification code|security code)\s*[:=]|"
+    r"\bBearer\s+[A-Za-z0-9._~+/=-]{8,}|\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b)"
+)
 VERSION_RE = re.compile(r"\b(\d{4}\.\d+\.\d+)\b")
 COMMIT_RE = re.compile(r"\b([0-9a-f]{7,40})\b", re.IGNORECASE)
 
@@ -88,7 +92,8 @@ def _json_loads(value):
 def _bounded_id(value, *, required=False):
     if value is None and not required:
         return None
-    if not isinstance(value, str) or not ID_RE.fullmatch(value):
+    if (not isinstance(value, str) or not ID_RE.fullmatch(value)
+            or SENSITIVE_VALUE_RE.search(value)):
         raise TraceError("unsupported_schema")
     return value
 
@@ -96,7 +101,8 @@ def _bounded_id(value, *, required=False):
 def _bounded_name(value):
     if value is None:
         return None
-    if not isinstance(value, str) or not NAME_RE.fullmatch(value):
+    if (not isinstance(value, str) or not NAME_RE.fullmatch(value)
+            or SENSITIVE_VALUE_RE.search(value)):
         return None
     return value
 
@@ -152,51 +158,86 @@ def _timestamp_ms(value):
 def _normalize_run(entry):
     if not isinstance(entry, dict) or not set(entry).issubset(RUN_FIELDS):
         raise TraceError("unsupported_schema")
-    _integer(entry.get("ts"), optional=False)
+    finished_ms = _integer(entry.get("ts"), optional=False)
     if entry.get("action") != "finished":
         raise TraceError("unsupported_schema")
+    job_id = _bounded_id(entry.get("jobId"), required=True)
+    run_id = _bounded_id(entry.get("runId"))
+    redacted = 0
+
+    def optional_id(field):
+        nonlocal redacted
+        value = entry.get(field)
+        if value is None:
+            return None
+        try:
+            return _bounded_id(value)
+        except TraceError:
+            redacted += 1
+            return None
+
     status = entry.get("status")
     completion = entry.get("completionStatus")
     delivery = entry.get("deliveryStatus")
     if status is not None and (not isinstance(status, str) or status not in STATUS_VALUES):
-        raise TraceError("unsupported_schema")
+        status = None
+        redacted += 1
     if completion is not None and (not isinstance(completion, str) or completion not in COMPLETION_VALUES):
-        raise TraceError("unsupported_schema")
+        completion = None
+        redacted += 1
     if delivery is not None and (not isinstance(delivery, str) or delivery not in DELIVERY_VALUES):
-        raise TraceError("unsupported_schema")
+        delivery = None
+        redacted += 1
     delivered = entry.get("delivered")
     trigger_fired = entry.get("triggerFired")
     if delivered is not None and type(delivered) is not bool:
-        raise TraceError("unsupported_schema")
+        delivered = None
+        redacted += 1
     if trigger_fired is not None and type(trigger_fired) is not bool:
-        raise TraceError("unsupported_schema")
-    job_id = _bounded_id(entry.get("jobId"), required=True)
-    run_id = _bounded_id(entry.get("runId"))
-    session_id = _bounded_id(entry.get("sessionId"))
-    session_key = _bounded_id(entry.get("sessionKey"))
-    run_at_ms = _integer(entry.get("runAtMs"))
-    duration_ms = _integer(entry.get("durationMs"), maximum=10 ** 12)
-    finished_at = _iso_ms(entry.get("ts"))
+        trigger_fired = None
+        redacted += 1
+    session_id = optional_id("sessionId")
+    session_key = optional_id("sessionKey")
+    try:
+        run_at_ms = _integer(entry.get("runAtMs"))
+    except TraceError:
+        run_at_ms = None
+        redacted += 1
+    try:
+        duration_ms = _integer(entry.get("durationMs"), maximum=10 ** 12)
+    except TraceError:
+        duration_ms = None
+        redacted += 1
+    finished_at = _iso_ms(finished_ms)
     started_at = _iso_ms(run_at_ms)
 
     provider = _bounded_name(entry.get("provider"))
     model = _bounded_name(entry.get("model"))
+    if entry.get("provider") is not None and provider is None:
+        redacted += 1
+    if entry.get("model") is not None and model is None:
+        redacted += 1
     raw_usage = entry.get("usage")
     usage = None
     if raw_usage is not None:
-        if not isinstance(raw_usage, dict) or not set(raw_usage).issubset({
-                "input_tokens", "output_tokens", "total_tokens",
-                "cache_read_tokens", "cache_write_tokens"}):
-            raise TraceError("unsupported_schema")
-        usage = {
-            "scope": "cron_run",
-            "provider": provider,
-            "input_tokens": _safe_counter(raw_usage.get("input_tokens")),
-            "output_tokens": _safe_counter(raw_usage.get("output_tokens")),
-            "cache_read_tokens": _safe_counter(raw_usage.get("cache_read_tokens")),
-            "cache_write_tokens": _safe_counter(raw_usage.get("cache_write_tokens")),
-            "cost_status": "unavailable",
-        }
+        if not isinstance(raw_usage, dict):
+            redacted += 1
+        else:
+            known_usage = {"input_tokens", "output_tokens", "total_tokens",
+                           "cache_read_tokens", "cache_write_tokens"}
+            redacted += len(set(raw_usage) - known_usage)
+            usage = {"scope": "cron_run", "provider": provider,
+                     "cost_status": "unavailable"}
+            for source_key, target_key in (
+                    ("input_tokens", "input_tokens"),
+                    ("output_tokens", "output_tokens"),
+                    ("cache_read_tokens", "cache_read_tokens"),
+                    ("cache_write_tokens", "cache_write_tokens")):
+                try:
+                    usage[target_key] = _safe_counter(raw_usage.get(source_key))
+                except TraceError:
+                    usage[target_key] = None
+                    redacted += 1
 
     if completion is None:
         if status in ("error", "skipped"):
@@ -278,6 +319,7 @@ def _normalize_run(entry):
         "retry_context": "unknown",
         "attention_codes": attention,
         "_finished_ms": _integer(entry.get("ts"), optional=False),
+        "_redacted_count": redacted,
     }
 
 
@@ -314,7 +356,16 @@ def _parse_page(stdout, *, expected_offset, requested_limit):
             raise TraceError("page_incomplete")
     elif next_offset is not None or offset + len(entries) != total:
         raise TraceError("page_incomplete")
-    normalized = [_normalize_run(entry) for entry in entries]
+    normalized = []
+    quarantined_count = redacted_count = 0
+    for entry in entries:
+        try:
+            run = _normalize_run(entry)
+        except TraceError:
+            quarantined_count += 1
+            continue
+        redacted_count += run.pop("_redacted_count", 0)
+        normalized.append(run)
     return {
         "total": total,
         "offset": offset,
@@ -322,7 +373,11 @@ def _parse_page(stdout, *, expected_offset, requested_limit):
         "has_more": has_more,
         "next_offset": next_offset,
         "entries": normalized,
-        "digest": hashlib.sha256(json.dumps(normalized, sort_keys=True,
+        "quarantined_count": quarantined_count,
+        "redacted_count": redacted_count,
+        # Hash the complete page in memory so invalid rows still participate in
+        # the repeat-read consistency check; no raw page values are persisted.
+        "digest": hashlib.sha256(json.dumps(entries, sort_keys=True, ensure_ascii=True,
                                               separators=(",", ":")).encode("utf-8")).hexdigest(),
     }
 
@@ -358,6 +413,7 @@ def _read_page_pass(runner, *, binary, page_size, max_pages, deadline,
                     byte_budget=CLI_COLLECTION_BYTES_MAX):
     pages = []
     entries = []
+    quarantined_count = redacted_count = 0
     offset = 0
     total = None
     bytes_read = 0
@@ -389,29 +445,34 @@ def _read_page_pass(runner, *, binary, page_size, max_pages, deadline,
             raise TraceError("snapshot_changed")
         pages.append((page["total"], page["offset"], page["digest"]))
         entries.extend(page["entries"])
+        quarantined_count += page["quarantined_count"]
+        redacted_count += page["redacted_count"]
         if len(entries) > RUN_COUNT_MAX:
             raise TraceError("record_limit")
         if not page["has_more"]:
             break
         offset = page["next_offset"]
-    return entries, pages, total, bytes_read
+    return entries, pages, total, bytes_read, quarantined_count, redacted_count
 
 
 def _dedupe_runs(entries):
     by_id = {}
     without_id = []
+    quarantined = 0
     for entry in entries:
         run_id = entry["run_id"]
         if run_id is None:
             without_id.append(entry)
             continue
-        previous = by_id.get(run_id)
-        if previous is None:
-            by_id[run_id] = entry
-            continue
-        if _run_public(previous) != _run_public(entry):
-            raise TraceError("duplicate_run_id_conflict")
-    return list(by_id.values()) + without_id
+        by_id.setdefault(run_id, []).append(entry)
+    deduped = []
+    for group in by_id.values():
+        first = group[0]
+        if any(_run_public(first) != _run_public(item) for item in group[1:]):
+            quarantined += len(group)
+        else:
+            deduped.append(first)
+    return deduped + without_id, quarantined
 
 
 def _run_public(record):
@@ -469,8 +530,11 @@ def _parse_export_directory(directory, *, deadline=None):
     if not isinstance(warnings, list):
         raise TraceError("trajectory_export_invalid")
     parsed_line_count = 0
+    quarantined_count = 0
+    redacted_count = 0
     seen_native_ids = {}
     seen_tool_events = {}
+    ambiguous_native_ids = set()
     try:
         with events_path.open("rb") as source:
             for line_number, raw_line in enumerate(source, 1):
@@ -484,65 +548,93 @@ def _parse_export_directory(directory, *, deadline=None):
                 try:
                     event = _json_loads(raw_line.decode("utf-8"))
                 except (UnicodeError, ValueError, TypeError):
-                    raise TraceError("trajectory_export_invalid")
-                if (not isinstance(event, dict) or len(event) > 128
-                        or not set(event).issubset(EVENT_FIELDS)
-                        or event.get("traceSchema") != TRAJECTORY_SCHEMA
-                        or type(event.get("schemaVersion")) is not int
-                        or event.get("schemaVersion") != TRAJECTORY_VERSION
-                        or event.get("sessionId") != session_id
-                        or event.get("source") not in ("runtime", "transcript")
-                        or event.get("traceId") != trace_id
-                        or not isinstance(event.get("type"), str)
-                        or len(event["type"]) > 128):
-                    raise TraceError("trajectory_export_invalid")
-                if type(event.get("seq")) is not int or event["seq"] < 0:
-                    raise TraceError("trajectory_export_invalid")
-                if _iso_timestamp(event.get("ts")) is None:
-                    raise TraceError("trajectory_export_invalid")
-                if (event["source"] == "transcript"
-                        and (type(event.get("sourceSeq")) is not int
-                             or event["sourceSeq"] < 1)):
-                    raise TraceError("trajectory_export_invalid")
-                entry_id = event.get("entryId")
-                if (entry_id is not None
-                        and (not isinstance(entry_id, str) or not ID_RE.fullmatch(entry_id))):
-                    raise TraceError("trajectory_export_invalid")
-                public = _tool_event_from_native(event, session_id)
-                if public is None:
+                    quarantined_count += 1
                     continue
-                event_id = _event_id(event)
-                if event_id is None:
-                    raise TraceError("trajectory_export_invalid")
-                prior_native = seen_native_ids.get(event_id)
-                if prior_native is not None:
-                    if prior_native != public:
+                try:
+                    if (not isinstance(event, dict) or len(event) > 128
+                            or not set(event).issubset(EVENT_FIELDS)
+                            or event.get("traceSchema") != TRAJECTORY_SCHEMA
+                            or type(event.get("schemaVersion")) is not int
+                            or event.get("schemaVersion") != TRAJECTORY_VERSION
+                            or event.get("sessionId") != session_id
+                            or event.get("source") not in ("runtime", "transcript")
+                            or event.get("traceId") != trace_id
+                            or not isinstance(event.get("type"), str)
+                            or len(event["type"]) > 128
+                            or type(event.get("seq")) is not int or event["seq"] < 0
+                            or _iso_timestamp(event.get("ts")) is None):
                         raise TraceError("trajectory_export_invalid")
-                    continue
-                seen_native_ids[event_id] = public
-                if public.get("unidentified"):
-                    continue
-                kind, call_id = public["kind"], public["tool_call_id"]
-                identity = (session_id, call_id, kind)
-                prior = seen_tool_events.get(identity)
-                if prior is not None:
-                    if prior["name"] and public["name"] and prior["name"] != public["name"]:
+                    if (event["source"] == "transcript"
+                            and (type(event.get("sourceSeq")) is not int
+                                 or event["sourceSeq"] < 1)):
                         raise TraceError("trajectory_export_invalid")
-                    # A runtime event has stronger timing/result detail than the
-                    # transcript alias, but both retain the native call id.
-                    if public["source"] == "runtime" or prior["source"] != "runtime":
+                    entry_id = event.get("entryId")
+                    if (entry_id is not None
+                            and (not isinstance(entry_id, str) or not ID_RE.fullmatch(entry_id))):
+                        raise TraceError("trajectory_export_invalid")
+                    data = event.get("data")
+                    if isinstance(data, dict):
+                        raw_name = data.get("name")
+                        if raw_name is None and isinstance(data.get("message"), dict):
+                            raw_name = data["message"].get("toolName")
+                        if raw_name is not None and _bounded_name(raw_name) is None:
+                            redacted_count += 1
+                    public = _tool_event_from_native(event, session_id)
+                    if public is None:
+                        continue
+                    event_id = _event_id(event)
+                    if event_id is None:
+                        raise TraceError("trajectory_export_invalid")
+                    if event_id in ambiguous_native_ids:
+                        quarantined_count += 1
+                        continue
+                    prior_native = seen_native_ids.get(event_id)
+                    if prior_native is not None:
+                        if prior_native != public:
+                            ambiguous_native_ids.add(event_id)
+                            seen_native_ids.pop(event_id, None)
+                            if not prior_native.get("unidentified"):
+                                prior_key = (session_id, prior_native["tool_call_id"],
+                                             prior_native["kind"])
+                                seen_tool_events.pop(prior_key, None)
+                            quarantined_count += 2
+                            continue
+                        continue
+                    seen_native_ids[event_id] = public
+                    if public.get("unidentified"):
+                        continue
+                    kind, call_id = public["kind"], public["tool_call_id"]
+                    identity = (session_id, call_id, kind)
+                    prior = seen_tool_events.get(identity)
+                    if prior is not None:
+                        if prior["name"] and public["name"] and prior["name"] != public["name"]:
+                            seen_tool_events.pop(identity, None)
+                            quarantined_count += 1
+                            continue
+                        # A runtime event has stronger timing/result detail than the
+                        # transcript alias, but both retain the native call id.
+                        if public["source"] == "runtime" or prior["source"] != "runtime":
+                            seen_tool_events[identity] = public
+                    else:
                         seen_tool_events[identity] = public
-                else:
-                    seen_tool_events[identity] = public
+                except TraceError:
+                    quarantined_count += 1
+                    continue
     except TraceError:
         raise
     except OSError:
         raise TraceError("trajectory_export_invalid")
     if parsed_line_count != declared_count:
-        raise TraceError("trajectory_export_incomplete")
+        quarantined_count += abs(parsed_line_count - declared_count) or 1
+    session_key = manifest.get("sessionKey")
+    try:
+        session_key = _bounded_id(session_key)
+    except TraceError:
+        session_key = None
+        redacted_count += 1
     return {
         "session_id": session_id,
-        "session_key": _bounded_id(manifest.get("sessionKey")),
+        "session_key": session_key,
         "has_warnings": bool(warnings),
         "events": list(seen_tool_events.values()),
         "unidentified_tool_event_ids": {
@@ -551,6 +643,8 @@ def _parse_export_directory(directory, *, deadline=None):
         },
         "event_count": declared_count,
         "generated_at": _iso_timestamp(manifest.get("generatedAt")),
+        "quarantined_count": quarantined_count,
+        "redacted_count": redacted_count,
     }
 
 
@@ -602,7 +696,7 @@ def _tool_event_from_native(event, session_id):
 
 def _read_exports(root, *, deadline=None):
     if root is None:
-        return {}, 0
+        return {}, 0, 0, 0, 0
     root = Path(root).expanduser()
     try:
         if root.is_symlink() or not root.is_dir():
@@ -627,6 +721,8 @@ def _read_exports(root, *, deadline=None):
     sessions = {}
     total_bytes = 0
     total_events = 0
+    quarantined_count = redacted_count = 0
+    warning_count = 0
     for directory in directories:
         if deadline is not None and time.monotonic() > deadline:
             raise TraceError("collection_timeout")
@@ -646,14 +742,21 @@ def _read_exports(root, *, deadline=None):
         total_events += export["event_count"]
         if total_events > EVENT_TOTAL_COUNT_MAX:
             raise TraceError("trajectory_event_limit")
+        quarantined_count += export["quarantined_count"]
+        redacted_count += export["redacted_count"]
+        warning_count += int(export["has_warnings"])
         session = sessions.setdefault(export["session_id"], {
             "session_key": export["session_key"], "events": {},
             "has_warnings": False,
+            "quarantined_count": 0,
+            "redacted_count": 0,
             "unidentified_tool_event_ids": set(),
             "event_count": 0, "export_count": 0, "generated_at": export["generated_at"],
         })
         session["export_count"] += 1
         session["has_warnings"] |= export["has_warnings"]
+        session["quarantined_count"] += export["quarantined_count"]
+        session["redacted_count"] += export["redacted_count"]
         if session["session_key"] != export["session_key"]:
             raise TraceError("trajectory_export_invalid")
         session["event_count"] = max(session["event_count"], export["event_count"])
@@ -666,7 +769,7 @@ def _read_exports(root, *, deadline=None):
             if old is None or event["source"] == "runtime" or old["source"] != "runtime":
                 session["events"][key] = event
         session["unidentified_tool_event_ids"].update(export["unidentified_tool_event_ids"])
-    return sessions, len(directories)
+    return sessions, len(directories), quarantined_count, redacted_count, warning_count
 
 
 def _attach_tool_events(runs, sessions):
@@ -783,6 +886,8 @@ def _attach_tool_events(runs, sessions):
         run["tool_events"] = sorted(tool_events, key=lambda item: (item["started_at"] or "", item["tool_call_id"]))
         joined = matched_sessions[id(run)]
         warned = any(sessions[key]["has_warnings"] for key in joined)
+        partial_export = any(sessions[key].get("quarantined_count")
+                             or sessions[key].get("redacted_count") for key in joined)
         if warned:
             run["attention_codes"].append("tool_trace_export_warning")
         if run["run_id"] in unknown_join_runs:
@@ -793,7 +898,8 @@ def _attach_tool_events(runs, sessions):
             run["attention_codes"].append("session_join_ambiguous")
         elif joined:
             incomplete_join = bool(joined & unknown_join_sessions)
-            run["tool_trace_status"] = "partial" if missing_result or incomplete_join or warned else "complete"
+            run["tool_trace_status"] = "partial" if (missing_result or incomplete_join
+                                                         or warned or partial_export) else "complete"
             if missing_result or warned:
                 run["attention_codes"].append("tool_trace_partial")
         else:
@@ -842,17 +948,18 @@ def collect_native(runner=None, *, trajectory_root=None, page_size=PAGE_SIZE_MAX
             raise TraceError("unsupported_version")
         if time.monotonic() > deadline:
             raise TraceError("collection_timeout")
-        first, first_pages, total, first_bytes = _read_page_pass(
+        first, first_pages, total, first_bytes, first_quarantined, first_redacted = _read_page_pass(
             runner, binary=binary, page_size=page_size, max_pages=max_pages, deadline=deadline)
         # OpenClaw's run-history page has no revision token. Repeat the full
         # bounded read and compare native page identities before publishing.
-        second, second_pages, second_total, _second_bytes = _read_page_pass(
+        second, second_pages, second_total, _second_bytes, second_quarantined, second_redacted = _read_page_pass(
             runner, binary=binary, page_size=page_size, max_pages=max_pages,
             deadline=deadline, byte_budget=CLI_COLLECTION_BYTES_MAX - first_bytes)
         if first_pages != second_pages or total != second_total:
             raise TraceError("snapshot_changed")
-        runs = _dedupe_runs(first)
-        sessions, export_count = _read_exports(trajectory_root, deadline=deadline)
+        runs, duplicate_quarantined = _dedupe_runs(first)
+        sessions, export_count, export_quarantined, export_redacted, export_warnings = _read_exports(
+            trajectory_root, deadline=deadline)
         unjoined = _attach_tool_events(runs, sessions)
         runs.sort(key=lambda row: (row["_finished_ms"], row["run_id"] or ""), reverse=True)
         if time.monotonic() > deadline:
@@ -863,6 +970,20 @@ def collect_native(runner=None, *, trajectory_root=None, page_size=PAGE_SIZE_MAX
             for run in retained_runs:
                 run["attention_codes"].append("retention_truncated")
                 run["attention_codes"] = sorted(set(run["attention_codes"]))
+        quarantined_count = (max(first_quarantined, second_quarantined)
+                             + duplicate_quarantined + export_quarantined)
+        redacted_count = max(first_redacted, second_redacted) + export_redacted
+        partial = bool(quarantined_count or redacted_count or dropped or export_warnings)
+        coverage_reasons = []
+        if quarantined_count:
+            coverage_reasons.append("records_quarantined")
+        if redacted_count:
+            coverage_reasons.append("optional_metadata_redacted")
+        if dropped:
+            coverage_reasons.append("retention_truncated")
+        if export_warnings:
+            coverage_reasons.append("trajectory_export_warning")
+        coverage_reasons.sort()
         records = [{
             "kind": "collection",
             "native_version": NATIVE_VERSION,
@@ -877,9 +998,20 @@ def collect_native(runner=None, *, trajectory_root=None, page_size=PAGE_SIZE_MAX
             "cursor_kind": "cron_runs_offset",
             "next_offset": total,
             "complete": True,
+            "coverage_status": "partial" if partial else "complete",
+            "quarantined_count": quarantined_count,
+            "redacted_count": redacted_count,
+            "trajectory_warning_count": export_warnings,
+            "coverage_reasons": coverage_reasons,
         }]
         records.extend(_run_public(row) for row in retained_runs)
-        return {"records": records, "observed_at": None, "error_code": None}
+        return {"records": records, "observed_at": None,
+                "error_code": "partial_coverage" if partial else None,
+                "coverage_status": "partial" if partial else "complete",
+                "quarantined_count": quarantined_count,
+                "redacted_count": redacted_count,
+                "trajectory_warning_count": export_warnings,
+                "coverage_reasons": coverage_reasons}
     except TraceError as exc:
         return {"records": None, "observed_at": None, "error_code": exc.code}
     except Exception:
@@ -889,14 +1021,19 @@ def collect_native(runner=None, *, trajectory_root=None, page_size=PAGE_SIZE_MAX
 
 def sanitize_collection(value):
     """Rebuild a strict projection payload from adapter output."""
-    if not isinstance(value, dict) or set(value) - {"records", "observed_at", "error_code"}:
+    if not isinstance(value, dict) or set(value) - {
+            "records", "observed_at", "error_code", "coverage_status",
+            "quarantined_count", "redacted_count", "trajectory_warning_count",
+            "coverage_reasons"}:
         return {"records": None, "observed_at": None, "error_code": "source_invalid"}
     records = value.get("records")
     if records is None:
         code = value.get("error_code")
         if not isinstance(code, str) or not re.fullmatch(r"[a-z0-9_]{1,64}", code):
             code = "source_invalid"
-        return {"records": None, "observed_at": None, "error_code": code}
+        return {"records": None, "observed_at": None, "error_code": code,
+                "coverage_status": "unknown", "quarantined_count": 0,
+                "redacted_count": 0}
     if not isinstance(records, list) or len(records) > RUN_COUNT_MAX + 1:
         return {"records": None, "observed_at": None, "error_code": "source_invalid"}
     clean = []
@@ -910,7 +1047,8 @@ def sanitize_collection(value):
                 keys = {"kind", "native_version", "native_commit", "native_total", "retention_limit",
                         "retained_run_count", "dropped_run_count", "trajectory_export_count",
                         "trajectory_session_count", "unjoined_tool_event_count", "cursor_kind",
-                        "next_offset", "complete"}
+                        "next_offset", "complete", "coverage_status", "quarantined_count",
+                        "redacted_count", "trajectory_warning_count", "coverage_reasons"}
                 if collection is not None or not set(record).issubset(keys):
                     raise TraceError("source_invalid")
                 collection = dict(record)
@@ -930,14 +1068,30 @@ def sanitize_collection(value):
                 or collection["next_offset"] != collection["native_total"]
                 or collection["trajectory_export_count"] > EXPORT_COUNT_MAX
                 or collection["trajectory_session_count"] > collection["trajectory_export_count"]
+                or collection["trajectory_warning_count"] > collection["trajectory_export_count"]
                 or collection["unjoined_tool_event_count"] > EVENT_TOTAL_COUNT_MAX):
             raise TraceError("source_invalid")
         if collection.get("native_version") != NATIVE_VERSION or collection.get("native_commit") != NATIVE_COMMIT:
             raise TraceError("source_invalid")
         if collection.get("cursor_kind") != "cron_runs_offset":
             raise TraceError("source_invalid")
+        if collection.get("coverage_status") not in ("complete", "partial"):
+            raise TraceError("source_invalid")
+        for key in ("quarantined_count", "redacted_count", "trajectory_warning_count"):
+            _integer(collection.get(key), optional=False, maximum=RUN_COUNT_MAX)
+        reasons = collection.get("coverage_reasons")
+        valid_reasons = {"records_quarantined", "optional_metadata_redacted",
+                         "retention_truncated", "trajectory_export_warning"}
+        if (not isinstance(reasons, list) or len(reasons) > 4
+                or any(reason not in valid_reasons for reason in reasons)
+                or reasons != sorted(set(reasons))):
+            raise TraceError("source_invalid")
         if collection["retained_run_count"] != len(runs):
             raise TraceError("source_invalid")
+        for field in ("coverage_status", "quarantined_count", "redacted_count",
+                      "trajectory_warning_count", "coverage_reasons"):
+            if field in value and value[field] != collection[field]:
+                raise TraceError("source_invalid")
         for run in runs:
             keys = {"kind", "run_id", "job_id", "session_id", "session_key", "scheduler_status",
                     "execution_result", "completion_status", "business_result",
@@ -1017,7 +1171,7 @@ def sanitize_collection(value):
                                "completion_unknown", "business_result_unknown", "delivery_unknown",
                                "run_id_unknown", "session_join_unknown", "session_join_ambiguous",
                                "tool_trace_missing", "tool_trace_partial", "tool_join_unknown",
-                               "retention_truncated"}
+                               "tool_trace_export_warning", "retention_truncated"}
             if (not isinstance(attention, list) or len(attention) > 32
                     or any(code not in valid_attention for code in attention)):
                 raise TraceError("source_invalid")
@@ -1037,9 +1191,37 @@ def sanitize_collection(value):
                 "retry_context": "unknown", "attention_codes": sorted(set(attention)),
             })
         clean.insert(0, collection)
-        return {"records": clean, "observed_at": None, "error_code": None}
+        coverage_status = collection["coverage_status"]
+        quarantined_count = collection["quarantined_count"]
+        redacted_count = collection["redacted_count"]
+        trajectory_warning_count = collection["trajectory_warning_count"]
+        coverage_reasons = collection["coverage_reasons"]
+        error_code = value.get("error_code")
+        if error_code is not None and error_code != "partial_coverage":
+            raise TraceError("source_invalid")
+        if ((quarantined_count or redacted_count or collection["dropped_run_count"]
+             or trajectory_warning_count)
+                and coverage_status != "partial"):
+            raise TraceError("source_invalid")
+        if ((quarantined_count and "records_quarantined" not in coverage_reasons)
+                or (redacted_count and "optional_metadata_redacted" not in coverage_reasons)
+                or (collection["dropped_run_count"]
+                    and "retention_truncated" not in coverage_reasons)
+                or (trajectory_warning_count
+                    and "trajectory_export_warning" not in coverage_reasons)
+                or (coverage_status == "complete" and coverage_reasons)):
+            raise TraceError("source_invalid")
+        return {"records": clean, "observed_at": None,
+                "error_code": error_code,
+                "coverage_status": coverage_status,
+                "quarantined_count": quarantined_count,
+                "redacted_count": redacted_count,
+                "trajectory_warning_count": trajectory_warning_count,
+                "coverage_reasons": coverage_reasons}
     except (TraceError, TypeError, ValueError, KeyError):
-        return {"records": None, "observed_at": None, "error_code": "source_invalid"}
+        return {"records": None, "observed_at": None, "error_code": "source_invalid",
+                "coverage_status": "unknown", "quarantined_count": 0,
+                "redacted_count": 0}
 
 
 def collect_and_project(*, db_path=None, trajectory_root=None, runner=None,
