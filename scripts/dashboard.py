@@ -15,13 +15,14 @@ Usage:
 import argparse
 import copy
 import datetime as dt
+import hashlib
 import html
 import json
 import os
 import subprocess
 import sys
 from collections import Counter, defaultdict
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 import summary as s
 from config import default_repo_dir, default_runtime_path, path_setting
@@ -43,6 +44,8 @@ QUEUE_SUBMITTED = "submitted"
 
 SOURCE_MIN = 3   # sources with fewer postings collapse into "Other"
 OTHER = "Other"
+RUNS_PAGE_SIZE = 20
+RUNS_MAX_PAGE = 50
 
 # Named SVG colours (avoid the '#' in the inline HTML doc; fill via attribute).
 FLOW_COLORS = ["#4c78a8", "#f58518", "#54a24b", "#e45756", "#72b7b2",
@@ -936,6 +939,18 @@ def build_snapshot_data(snapshot, timezone_name=None):
     facts = _as_dict(snapshot.get("facts"))
     quality_source = _as_dict(facts.get("review_quality"))
     quality = {key: value for key, value in quality_source.items() if key != "records"}
+    heads = [row for row in quality_source.get("records", []) if isinstance(row, dict)]
+    quality["potential_mistailor_heuristic"] = sum(
+        row.get("model_acceptance") == "accepted"
+        and row.get("owner_acceptance") == "not_accepted"
+        for row in heads)
+    quality["mistailor_unknown_owner"] = sum(
+        row.get("model_acceptance") == "accepted"
+        and row.get("owner_acceptance") == "unknown"
+        for row in heads)
+    quality["source_status"] = {
+        name: _as_dict(snapshot.get("sources", {}).get(name)).get("status", "unknown")
+        for name in ("reviews", "preflight")}
     provenance_counts = Counter(
         _display(row.get("provenance_status"), "unknown", 80)
         for row in quality_source.get("records", []) if isinstance(row, dict))
@@ -986,6 +1001,74 @@ def _state(value):
     return state, state.capitalize()
 
 
+def parse_runs_query(query=""):
+    """Parse a deliberately small, bounded Runs page query."""
+    if query == "":
+        return 1
+    try:
+        values = parse_qs(query, keep_blank_values=True, strict_parsing=True,
+                          max_num_fields=1)
+    except (ValueError, TypeError):
+        raise ValueError("invalid runs query")
+    if not values:
+        return 1
+    if set(values) != {"page"} or len(values["page"]) != 1:
+        raise ValueError("invalid runs query")
+    raw = values["page"][0]
+    if not raw.isdigit() or len(raw) > 2:
+        raise ValueError("invalid runs page")
+    page = int(raw)
+    if page < 1 or page > RUNS_MAX_PAGE:
+        raise ValueError("invalid runs page")
+    return page
+
+
+def run_detail_key(run):
+    """Hash native identity, or supported session/time facts when run ID is absent."""
+    job_id = run.get("job_id")
+    run_id = run.get("run_id")
+    if (not isinstance(job_id, str) or not job_id or len(job_id) > 100
+            or (run_id is not None and
+                (not isinstance(run_id, str) or not run_id or len(run_id) > 100))):
+        return None
+    if run_id is not None:
+        identity = [job_id, run_id]
+    else:
+        identity = [job_id, None] + [run.get(field) for field in
+            ("session_id", "session_key", "started_at", "finished_at")]
+    # Identical incomplete identities resolve to the existing ambiguous state.
+    return hashlib.sha256(json.dumps(identity, separators=(",", ":"),
+                                    ensure_ascii=True).encode("utf-8")).hexdigest()
+
+
+def _run_priority(run):
+    execution = run.get("execution_result")
+    completion = run.get("completion_status")
+    if execution in ("failed", "interrupted") or completion == "failed":
+        return 0
+    if (execution in (None, "unknown") or completion in (None, "unknown")
+            or run.get("tool_trace_status") in ("partial", "incomplete", "missing", "unsupported_schema")):
+        return 1
+    if execution == "succeeded" and completion == "succeeded":
+        return 2
+    return 3
+
+
+def _ordered_runs(runs):
+    return sorted((run for run in runs if isinstance(run, dict)), key=lambda run: (
+        _run_priority(run), str(run.get("finished_at") or ""),
+        str(run.get("job_id") or ""), str(run.get("run_id") or "")))
+
+
+def _run_detail(snapshot, key):
+    facts = _as_dict(_as_dict(snapshot.get("facts")).get("traces"))
+    matches = [run for run in facts.get("runs", [])
+               if isinstance(run, dict) and run_detail_key(run) == key]
+    if len(matches) > 1:
+        return "ambiguous"
+    return matches[0] if matches else None
+
+
 def _render_sources(sources):
     out = ["<div class='source-list' aria-label='Source freshness'>"]
     if not sources:
@@ -994,20 +1077,50 @@ def _render_sources(sources):
         value = _as_dict(value)
         state, state_label = _state(value.get("status"))
         age = _age_seconds(value.get("age_seconds"))
+        error = value.get("error_code")
+        coverage = value.get("coverage_status")
+        if error and state == "stale":
+            impact = "The latest collection failed; last-good cached facts may be out of date."
+            next_step = "Check the collection result, then refresh the cache when safe."
+        elif error or state == "unavailable":
+            impact = "No usable cached facts are available from this source."
+            next_step = "Check the source configuration and collection result before relying on this data."
+        elif coverage in ("partial", "incomplete"):
+            impact = "Only part of this source was collected, so some records may be missing."
+            next_step = "Review the coverage reasons and resolve the collection gap."
+        elif state == "stale":
+            impact = "The last observed data is older than its freshness window."
+            next_step = "Review the source and refresh its cached data when appropriate."
+        elif state == "fresh":
+            impact = "The latest cached source data is within its freshness window."
+            next_step = "No source action is indicated by this snapshot."
+        else:
+            impact = "Source freshness is unknown."
+            next_step = "Check collection metadata before relying on its coverage."
         out.append("<article class='source-card'><div class='source-head'>"
                    "<span class='source-name'>{}</span><span class='state {}'>{}</span>"
-                   "</div><div class='source-meta'>Observed: {} · {}</div>".format(
+                   "</div><div class='source-meta'>Last observation: {}</div>".format(
                        _e(_display(name, "unknown", 80)), state, state_label,
-                       _e(_display(value.get("observed_at"), "unknown", 48)), _e(age)))
+                       _e(age)))
+        out.append("<p>{}</p><p><strong>Next step:</strong> {}</p>".format(
+            _e(impact), _e(next_step)))
         out.append("<details><summary>Source provenance</summary><dl class='key-value'>")
-        for label, key in (("Collected", "collected_at"),
+        for label, key in (("Observed at", "observed_at"),
+                           ("Collected", "collected_at"),
                            ("Last successful collection", "last_success_at"),
                            ("Freshness window (seconds)", "freshness_seconds"),
-                           ("Source error", "error_code")):
+                           ("Source error code", "error_code"),
+                           ("Coverage status", "coverage_status"),
+                           ("Coverage reasons", "coverage_reasons"),
+                           ("Record count", "record_count"),
+                           ("Quarantined count", "quarantined_count"),
+                           ("Redacted count", "redacted_count")):
             source_value = value.get(key)
             if source_value is not None:
+                if isinstance(source_value, (list, dict)):
+                    source_value = json.dumps(source_value, ensure_ascii=True, sort_keys=True)
                 out.append("<dt>{}</dt><dd>{}</dd>".format(
-                    _e(label), _e(_display(source_value, "unknown", 80))))
+                    _e(label), _e(_display(source_value, "unknown", 180))))
         out.append("</dl></details>")
         out.append("</article>")
     out.append("</div>")
@@ -1219,57 +1332,119 @@ def _render_today(report, compact):
     return "".join(out)
 
 
-def _render_runs(trace_report):
+def _render_runs(trace_report, page=1):
     source = _as_dict(trace_report.get("source"))
     state, state_label = _state(source.get("status"))
-    runs = trace_report.get("runs", [])
-    out = ["<p class='intro'>Run records are available only when the trace source has collected them. Tool arguments and output are not included; cost remains unavailable.</p>",
-           "<p><span class='state {}'>Trace source: {}</span>{}</p>".format(
-               state, _e(state_label), " · source error: <code>{}</code>".format(_e(source.get("error_code")))
-               if source.get("error_code") else "")]
+    all_runs = _ordered_runs(trace_report.get("runs", []))
+    page_count = min(RUNS_MAX_PAGE, max(1, (len(all_runs) + RUNS_PAGE_SIZE - 1) // RUNS_PAGE_SIZE))
+    page = min(max(1, page), page_count)
+    runs = all_runs[(page - 1) * RUNS_PAGE_SIZE:page * RUNS_PAGE_SIZE]
+    out = ["<p class='intro'>Run records come from the cached trace source. Failures and incomplete runs appear first. Tool details contain only sanitized fields; unrecorded joins remain unknown and cost is unavailable.</p>",
+           "<p><span class='state {}'>Trace source: {}</span></p>".format(
+               state, _e(state_label))]
+    if source.get("error_code") or trace_report.get("collection"):
+        out.append("<details><summary>Trace collection metadata</summary><dl class='key-value'>")
+        for label, value in (("Source error code", source.get("error_code")),
+                             ("Collection status", _as_dict(trace_report.get("collection")).get("status"))):
+            if value is not None:
+                out.append("<dt>{}</dt><dd>{}</dd>".format(
+                    _e(label), _e(_display(value, "unknown", 80))))
+        out.append("</dl></details>")
     if not runs:
         if source.get("status") == "unavailable":
-            out.append("<p class='empty'>Run history is unavailable in this snapshot.</p>")
+            out.append("<p class='empty' role='status'>Run history is unavailable in this snapshot.</p>")
+        elif source.get("status") == "stale" or source.get("coverage_status") in ("partial", "incomplete"):
+            out.append("<p class='empty' role='status'>No run records were observed, but trace coverage is stale or partial; this does not confirm that no runs occurred.</p>")
         else:
-            out.append("<p class='empty'>No run records were observed in this snapshot.</p>")
+            out.append("<p class='empty' role='status'>No run records were observed in this snapshot.</p>")
         return "".join(out)
+    out.append("<p class='result-count' role='status'>{} runs · page {} of {}</p>".format(
+        len(all_runs), page, page_count))
+    if len(all_runs) > RUNS_MAX_PAGE * RUNS_PAGE_SIZE:
+        out.append("<p class='caveat'>This view is limited to the first {} prioritized runs.</p>".format(
+            RUNS_MAX_PAGE * RUNS_PAGE_SIZE))
     out.append("<div class='run-list'>")
     for run in runs:
-        if not isinstance(run, dict):
-            continue
         job = _display(run.get("job_id"), "Unknown job", 100)
         run_id = _display(run.get("run_id"), "Unknown run", 100)
-        out.append("<article class='run-card'><h3>{} · {}</h3>".format(_e(job), _e(run_id)))
-        fields = (("Execution", "execution_result"), ("Completion", "completion_status"),
-                  ("Business result", "business_result"), ("Application join", "application_join_status"),
-                  ("Artifact join", "artifact_join_status"), ("Delivery", "delivery_status"),
-                  ("Tool trace", "tool_trace_status"))
+        priority = _run_priority(run)
+        label = {0: "Failure", 1: "Incomplete / unknown", 2: "Successful"}.get(priority, "Needs review")
+        key = run_detail_key(run)
+        heading = "{} · {}".format(_e(job), _e(run_id))
+        if key:
+            heading = "<a href='/jobs/runs/{}'>{}</a>".format(key, heading)
+        out.append("<article class='run-card'><h3><span class='state'>{}</span> {}</h3>".format(
+            _e(label), heading))
         out.append("<dl class='key-value'>")
-        for label, key in fields:
+        for label, key_name in (("Execution", "execution_result"),
+                                ("Completion", "completion_status"),
+                                ("Tool trace", "tool_trace_status")):
             out.append("<dt>{}</dt><dd>{}</dd>".format(
-                _e(label), _e(_display(run.get(key), "unknown", 100))))
+                _e(label), _e(_display(run.get(key_name), "unknown", 100))))
         out.append("</dl>")
         attention = run.get("attention_codes") or []
         out.append("<p class='details'>Attention codes: {}</p>".format(
             _e(", ".join(_display(code, "unknown", 80) for code in attention) or "none")))
-        tools = run.get("tool_events") or []
-        if tools:
-            out.append("<details><summary>Redacted tool details ({})</summary><ul class='timeline'>".format(len(tools)))
-            for tool in tools:
-                if not isinstance(tool, dict):
-                    continue
-                out.append("<li><strong>{}</strong> · start {} · end {} · duration {} ms · result {} · retry {}</li>".format(
-                    _e(_display(tool.get("name"), "unknown tool", 100)),
-                    _e(_display(tool.get("started_at") or tool.get("at"), "unknown", 48)),
-                    _e(_display(tool.get("finished_at"), "unknown", 48)),
-                    _e(_count(tool.get("duration_ms"))),
-                    _e(_display(tool.get("result"), "unknown", 48)),
-                    _e(_display(tool.get("retry_context"), "unknown", 80))))
-            out.append("</ul></details>")
-        else:
-            out.append("<p class='meta'>No redacted tool details are available for this run.</p>")
+        out.append("<p><strong>Business result:</strong> {} · <strong>Application join:</strong> {} · <strong>Artifact join:</strong> {} · <strong>Delivery:</strong> {}</p>".format(
+            *[_e(_display(run.get(key_name), "unknown", 80)) for key_name in
+              ("business_result", "application_join_status", "artifact_join_status", "delivery_status")]))
         out.append("</article>")
-    out.extend(["</div>", "<p class='caveat'>Usage scopes may overlap. Cost is unavailable and is not estimated.</p>"])
+    out.append("</div><nav class='pagination' aria-label='Run pages'>")
+    if page > 1:
+        out.append("<a href='/jobs/runs/?page={}'>Previous page</a>".format(page - 1))
+    if page < page_count:
+        out.append("<a href='/jobs/runs/?page={}'>Next page</a>".format(page + 1))
+    out.append("</nav><p class='caveat'>Tool timeline details open on each run page. Cost is unavailable and is not estimated.</p>")
+    return "".join(out)
+
+
+def _render_run_detail(run):
+    if run == "ambiguous":
+        return "<p class='empty' role='status'>This run key matches multiple records. Return to Runs and choose a specific run.</p>"
+    if run is None:
+        return "<p class='empty' role='status'>Run details are unavailable in this snapshot.</p>"
+    out = ["<p><a href='/jobs/runs/'>Back to runs</a></p>",
+           "<section class='panel run-card'><h3>{} · {}</h3><dl class='key-value'>".format(
+               _e(_display(run.get("job_id"), "Unknown job", 100)),
+               _e(_display(run.get("run_id"), "Unknown run", 100)))]
+    for label, key_name in (("Execution", "execution_result"),
+                            ("Completion", "completion_status"),
+                            ("Business result", "business_result"),
+                            ("Application join", "application_join_status"),
+                            ("Artifact join", "artifact_join_status"),
+                            ("Delivery", "delivery_status"),
+                            ("Tool trace", "tool_trace_status"),
+                            ("Run duration (ms)", "duration_ms"),
+                            ("Retry context", "retry_context"),
+                            ("Started", "started_at"), ("Finished", "finished_at")):
+        value = run.get(key_name)
+        if key_name.endswith("_ms") and (type(value) is not int or value < 0):
+            value = "unknown"
+        out.append("<dt>{}</dt><dd>{}</dd>".format(
+            _e(label), _e(_display(value, "unknown", 100))))
+    out.append("</dl><p>Attention codes: {}</p></section>".format(
+        _e(", ".join(_display(code, "unknown", 80)
+                      for code in run.get("attention_codes", [])) or "none")))
+    tools = run.get("tool_events") or []
+    if tools:
+        out.append("<section class='panel'><h3>Redacted tool timeline</h3><ol class='timeline'>")
+        for tool in tools:
+            if not isinstance(tool, dict):
+                continue
+            duration = tool.get("duration_ms")
+            if type(duration) is not int or duration < 0:
+                duration = "unknown"
+            out.append("<li><strong>{}</strong><p class='meta'>Tool call: {}</p><dl class='key-value'><dt>Started</dt><dd>{}</dd><dt>Finished</dt><dd>{}</dd><dt>Duration (ms)</dt><dd>{}</dd><dt>Result</dt><dd>{}</dd><dt>Retry context</dt><dd>{}</dd></dl></li>".format(
+                _e(_display(tool.get("name"), "Unknown tool", 100)),
+                _e(_display(tool.get("tool_call_id"), "unknown", 100)),
+                _e(_display(tool.get("started_at") or tool.get("at"), "unknown", 48)),
+                _e(_display(tool.get("finished_at"), "unknown", 48)),
+                _e(_display(duration, "unknown", 40)),
+                _e(_display(tool.get("result"), "unknown", 48)),
+                _e(_display(tool.get("retry_context"), "unknown", 80))))
+        out.append("</ol></section>")
+    else:
+        out.append("<p class='empty'>No redacted tool details are available for this run.</p>")
     return "".join(out)
 
 
@@ -1277,6 +1452,11 @@ def _render_quality(quality):
     unique = quality.get("unique_artifact_heads", 0)
     first = _as_dict(quality.get("first_pass"))
     out = ["<p class='intro'>First-pass acceptance is counted once per unique artifact head. Model and explicit owner decisions use the same head denominator and remain separate.</p><div class='quality-grid'>"]
+    source_status = _as_dict(quality.get("source_status"))
+    if source_status and any(value != "fresh" for value in source_status.values()):
+        out.append("<section class='panel' role='status'><h3>Review evidence source coverage is incomplete</h3><p>Counts describe records present in this snapshot; missing review history does not mean acceptance or rejection.</p><p>Review source: {} · preflight source: {}</p></section>".format(
+            _e(_display(source_status.get("reviews"), "unknown", 40)),
+            _e(_display(source_status.get("preflight"), "unknown", 40))))
     for label, key in (("Model review", "model"), ("Owner review", "owner")):
         values = _as_dict(first.get(key))
         accepted = values.get("accepted", 0)
@@ -1306,6 +1486,11 @@ def _render_quality(quality):
     else:
         out.append("<p class='empty'>No structured rework reason codes are recorded.</p>")
     out.append("</section>")
+    out.append("<section class='panel'><h3>Potential mistailors · heuristic</h3>"
+               "<p>{} artifact heads have a recorded model acceptance and explicit owner nonacceptance. This is a review cue, not a verified tailoring defect or an application match.</p>"
+               "<p>Model accepted, owner decision unknown: {}. Missing owner evidence stays unknown.</p></section>".format(
+                   _e(_count(quality.get("potential_mistailor_heuristic"))),
+                   _e(_count(quality.get("mistailor_unknown_owner")))))
     interpretation = quality.get("interpretation")
     if interpretation:
         out.append("<p class='caveat'>{}</p>".format(_e(interpretation)))
@@ -1374,8 +1559,8 @@ def _render_analytics(data):
     return _render_funnel(data["funnel"])
 
 
-def _render_runs_page(data):
-    return _render_runs(data["runs"])
+def _render_runs_page(data, page=1):
+    return _render_runs(data["runs"], page)
 
 
 def _render_tailoring(data):
@@ -1400,14 +1585,18 @@ PAGE_RENDERERS = {
 
 
 def render_snapshot_html(snapshot, data=None, page="home", query_state=None,
-                         application_key=None):
+                         application_key=None, run_key=None):
     """Render exactly one dashboard page from a cached snapshot."""
     detail_page = page == "application-detail"
-    if page not in PAGE_RENDERERS and not detail_page:
+    run_detail_page = page == "run-detail"
+    if page not in PAGE_RENDERERS and not detail_page and not run_detail_page:
         raise ValueError("unknown dashboard page")
     if detail_page:
         content = _render_application_detail(_application_detail(snapshot, application_key))
         shell_page = "applications"
+    elif page == "run-detail":
+        content = _render_run_detail(_run_detail(snapshot, run_key))
+        shell_page = "runs"
     else:
         data = data or build_snapshot_data(snapshot)
         if page == "applications":
@@ -1415,6 +1604,8 @@ def render_snapshot_html(snapshot, data=None, page="home", query_state=None,
                      "Unknown stages remain unmatched; missing submission dates and next actions stay unknown.</p>")
             content = intro + _render_applications(data["applications"], data["sankey"],
                                                     data["sources"], query_state)
+        elif page == "runs":
+            content = PAGE_RENDERERS[page](data, query_state or 1)
         else:
             content = PAGE_RENDERERS[page](data)
         shell_page = page

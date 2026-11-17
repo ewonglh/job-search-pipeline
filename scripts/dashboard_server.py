@@ -206,11 +206,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
         path, separator, query = target.partition("?")
         detail_match = re.fullmatch(r"/jobs/applications/([0-9a-f]{64})", path)
+        run_detail_match = re.fullmatch(r"/jobs/runs/([0-9a-f]{64})", path)
         app_path = path in ("/jobs/applications", "/jobs/applications/")
-        if "%" in path or (path not in ROUTES and not detail_match):
+        runs_path = path in ("/jobs/runs", "/jobs/runs/")
+        if "%" in path or (path not in ROUTES and not detail_match and not run_detail_match):
             self._write_response(404, "text/plain; charset=utf-8", b"not found\n")
             return
-        if separator and (not app_path or detail_match):
+        if separator and (not (app_path or runs_path) or detail_match or run_detail_match):
             self._write_response(404, "text/plain; charset=utf-8", b"not found\n")
             return
         query_state = None
@@ -220,9 +222,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
             except ValueError:
                 self._write_response(400, "text/plain; charset=utf-8", b"bad request\n")
                 return
+        elif runs_path:
+            try:
+                query_state = dashboard.parse_runs_query(query if separator else "")
+            except ValueError:
+                self._write_response(400, "text/plain; charset=utf-8", b"bad request\n")
+                return
         if not self._safe_get_only():
             return
-        route = "page:application-detail" if detail_match else ROUTES[path]
+        route = ("page:application-detail" if detail_match else
+                 "page:run-detail" if run_detail_match else ROUTES[path])
         is_page = route.startswith("page:")
         try:
             snapshot = self._read_snapshot()
@@ -252,7 +261,32 @@ class DashboardHandler(BaseHTTPRequestHandler):
                         return
                     body = dashboard.render_snapshot_html(snapshot, page=page,
                         application_key=detail_match.group(1)).encode("utf-8")
+                elif page == "run-detail":
+                    detail = dashboard._run_detail(snapshot, run_detail_match.group(1))
+                    if detail is None:
+                        self._write_response(404, "text/html; charset=utf-8",
+                            dashboard.render_snapshot_html(snapshot, page=page,
+                                run_key=run_detail_match.group(1)).encode("utf-8"))
+                        return
+                    if detail == "ambiguous":
+                        self._write_response(409, "text/html; charset=utf-8",
+                            dashboard.render_snapshot_html(snapshot, page=page,
+                                run_key=run_detail_match.group(1)).encode("utf-8"))
+                        return
+                    body = dashboard.render_snapshot_html(snapshot, page=page,
+                        run_key=run_detail_match.group(1)).encode("utf-8")
                 elif page == "applications":
+                    body = dashboard.render_snapshot_html(snapshot, page=page,
+                        query_state=query_state).encode("utf-8")
+                elif page == "runs":
+                    trace_data = dashboard._as_dict(
+                        dashboard._as_dict(snapshot.get("facts")).get("traces"))
+                    total_runs = len(dashboard._ordered_runs(trace_data.get("runs", [])))
+                    total_pages = max(1, (total_runs + dashboard.RUNS_PAGE_SIZE - 1)
+                                      // dashboard.RUNS_PAGE_SIZE)
+                    if query_state > total_pages:
+                        self._write_response(400, "text/plain; charset=utf-8", b"bad request\n")
+                        return
                     body = dashboard.render_snapshot_html(snapshot, page=page,
                         query_state=query_state).encode("utf-8")
                 else:

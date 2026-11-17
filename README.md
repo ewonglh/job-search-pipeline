@@ -255,6 +255,19 @@ identity and malformed-evidence diagnostics.
   ([query contract](scripts/application_explorer.py#L16),
   [opaque keys](scripts/application_explorer.py#L69),
   [application views](scripts/dashboard.py#L1099)).
+- Runs sorts failures and incomplete records first, pages at 20 items, and uses
+  opaque keys for sanitized tool timelines
+  ([run views](scripts/dashboard.py#L1325),
+  [GET routes](scripts/dashboard_server.py#L211)).
+- Tailoring keeps model and owner decisions separate; potential mistailor
+  cues are explicitly heuristic and missing owner evidence stays unknown
+  ([review views](scripts/dashboard.py#L1438),
+  [review projection](scripts/dashboard.py#L937)).
+- System health explains source failure, stale data, and partial coverage
+  before expandable collection metadata
+  ([health views](scripts/dashboard.py#L1062)).
+- Private deployment, rollback, and phone/desktop acceptance steps are in
+  [dashboard operations](docs/dashboard-operations.md#L1).
 
 ## Review readiness
 
