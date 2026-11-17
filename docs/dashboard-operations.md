@@ -13,10 +13,11 @@ check was performed as part of the code change.
 - Start the reader from scripts with this command:
     python3 dashboard_server.py --db "$JOBSEARCH_PROJECTION_DB"
   It binds only
-  to loopback and serves cached reads ([server bind](../scripts/dashboard_server.py#L11),
+  to loopback and serves cached reads ([server bind guard](../scripts/dashboard_server.py#L88),
   [snapshot reader](../scripts/dashboard_server.py#L192)).
 - Keep the existing private access layer and its authentication in front of
-  loopback. Do not expose the listener publicly ([exact routes and headers](../scripts/dashboard_server.py#L15)).
+  loopback. Do not expose the listener publicly ([routes](../scripts/dashboard_server.py#L17),
+  [response headers](../scripts/dashboard_server.py#L34)).
 - For rollback, stop the dashboard process, restore the last known-good
   application revision using the owner's private deployment procedure, and
   restart against the preserved private cache. No projection schema or source
@@ -43,6 +44,5 @@ check was performed as part of the code change.
   remain read-only ([search form](../scripts/dashboard.py#L1197),
   [GET-only handler](../scripts/dashboard_server.py#L174)).
 
-Quiet routing remains off. Do not reload gateways, change schedules, suppress
-notifications, or alter queue, eligibility, source, or notification behavior
-as part of this rollout.
+- Limit rollout to the dashboard reader and preserved cache. Follow the
+  [owner acceptance checks](#owner-acceptance-gate) before accepting the UI.

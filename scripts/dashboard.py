@@ -1022,13 +1022,21 @@ def parse_runs_query(query=""):
 
 
 def run_detail_key(run):
-    """Return an opaque stable key only when a run has both supported IDs."""
+    """Hash native identity, or supported session/time facts when run ID is absent."""
     job_id = run.get("job_id")
     run_id = run.get("run_id")
     if (not isinstance(job_id, str) or not job_id or len(job_id) > 100
-            or not isinstance(run_id, str) or not run_id or len(run_id) > 100):
+            or (run_id is not None and
+                (not isinstance(run_id, str) or not run_id or len(run_id) > 100))):
         return None
-    return hashlib.sha256((job_id + "\0" + run_id).encode("utf-8")).hexdigest()
+    if run_id is not None:
+        identity = [job_id, run_id]
+    else:
+        identity = [job_id, None] + [run.get(field) for field in
+            ("session_id", "session_key", "started_at", "finished_at")]
+    # Identical incomplete identities resolve to the existing ambiguous state.
+    return hashlib.sha256(json.dumps(identity, separators=(",", ":"),
+                                    ensure_ascii=True).encode("utf-8")).hexdigest()
 
 
 def _run_priority(run):
@@ -1037,7 +1045,7 @@ def _run_priority(run):
     if execution in ("failed", "interrupted") or completion == "failed":
         return 0
     if (execution in (None, "unknown") or completion in (None, "unknown")
-            or run.get("tool_trace_status") in ("incomplete", "missing", "unsupported_schema")):
+            or run.get("tool_trace_status") in ("partial", "incomplete", "missing", "unsupported_schema")):
         return 1
     if execution == "succeeded" and completion == "succeeded":
         return 2
@@ -1326,7 +1334,7 @@ def _render_runs(trace_report, page=1):
     source = _as_dict(trace_report.get("source"))
     state, state_label = _state(source.get("status"))
     all_runs = _ordered_runs(trace_report.get("runs", []))
-    page_count = max(1, (len(all_runs) + RUNS_PAGE_SIZE - 1) // RUNS_PAGE_SIZE)
+    page_count = min(RUNS_MAX_PAGE, max(1, (len(all_runs) + RUNS_PAGE_SIZE - 1) // RUNS_PAGE_SIZE))
     page = min(max(1, page), page_count)
     runs = all_runs[(page - 1) * RUNS_PAGE_SIZE:page * RUNS_PAGE_SIZE]
     out = ["<p class='intro'>Run records come from the cached trace source. Failures and incomplete runs appear first. Tool details contain only sanitized fields; unrecorded joins remain unknown and cost is unavailable.</p>",
@@ -1350,6 +1358,9 @@ def _render_runs(trace_report, page=1):
         return "".join(out)
     out.append("<p class='result-count' role='status'>{} runs · page {} of {}</p>".format(
         len(all_runs), page, page_count))
+    if len(all_runs) > RUNS_MAX_PAGE * RUNS_PAGE_SIZE:
+        out.append("<p class='caveat'>This view is limited to the first {} prioritized runs.</p>".format(
+            RUNS_MAX_PAGE * RUNS_PAGE_SIZE))
     out.append("<div class='run-list'>")
     for run in runs:
         job = _display(run.get("job_id"), "Unknown job", 100)

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Synthetic cached-view, parity, age, and escaping checks for dashboard.py."""
 import contextlib
+import copy
 import datetime as dt
 import io
 import json
@@ -238,6 +239,18 @@ def test_operations_run_order_detail_privacy_and_paging():
 
     key = d.run_detail_key(success)
     assert key == d.run_detail_key(dict(success, execution_result="failed"))
+    partial = dict(success, run_id="partial", tool_trace_status="partial")
+    assert d._ordered_runs([success, partial])[0] is partial
+    session_run = dict(success, run_id=None, session_id="synthetic-session")
+    session_key = d.run_detail_key(session_run)
+    assert session_key and session_key != key
+    assert session_key != d.run_detail_key(dict(session_run, session_id="another-session"))
+    session_snapshot = copy.deepcopy(snapshot)
+    session_snapshot["facts"]["traces"]["runs"] = [session_run]
+    assert "Redacted tool timeline" in d.render_snapshot_html(
+        session_snapshot, page="run-detail", run_key=session_key)
+    session_snapshot["facts"]["traces"]["runs"].append(dict(session_run))
+    assert d._run_detail(session_snapshot, session_key) == "ambiguous"
     detail = d.render_snapshot_html(snapshot, page="run-detail", run_key=key)
     assert "Redacted tool timeline" in detail
     assert "&lt;script&gt;tool&lt;/script&gt;" in detail
@@ -254,6 +267,10 @@ def test_operations_run_order_detail_privacy_and_paging():
     assert first.count("<article class='run-card'>") == 20
     assert second.count("<article class='run-card'>") == 2
     assert "page 2 of 2" in second and "Previous page" in second
+    report["runs"] = [dict(success, run_id="cap-{}".format(index)) for index in range(1001)]
+    final_page = d._render_runs(report, 50)
+    assert "page 50 of 50" in final_page and "?page=51" not in final_page
+    assert "limited to the first 1000 prioritized runs" in final_page
     assert d.parse_runs_query("") == 1 and d.parse_runs_query("page=2") == 2
     for query in ("page=0", "page=51", "page=1&page=2", "q=private", "page=%3Cscript%3E"):
         try:
