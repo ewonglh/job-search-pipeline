@@ -216,11 +216,14 @@ identity and malformed-evidence diagnostics.
 
 ## Dashboard pages
 
-Run `python3 dashboard_server.py` from `scripts/` to serve the cached dashboard
-on `127.0.0.1:8765`. The `/jobs/` shell links to Home, Applications, Analytics,
-Runs, Tailoring, and System health. `/` and `/index.html` remain Home aliases;
-`/api/snapshot.json` and `/healthz` remain read-only endpoints. Page requests
-read only the cached projection and do not trigger source collection.
+- Run `python3 dashboard_server.py` from `scripts/`; the default listener is
+  `127.0.0.1:8765` ([server defaults](scripts/dashboard_server.py#L10)).
+- Open `/jobs/` for Home, Applications, Analytics, Runs, Tailoring and System
+  health ([page navigation](scripts/dashboard_shell.py#L5)).
+- `/` and `/index.html` remain Home aliases; `/api/snapshot.json` and `/healthz`
+  remain read-only endpoints ([routes](scripts/dashboard_server.py#L15)).
+- Page requests read the cached projection without collecting source data
+  ([cache reader](scripts/dashboard_server.py#L190)).
 
 ## Review readiness
 
