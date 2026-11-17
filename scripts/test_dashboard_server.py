@@ -193,8 +193,11 @@ def test_application_queries_and_opaque_detail_routes():
         server, thread = start_server()
         try:
             base = "http://{}:{}".format(server_module.HOST, server.server_address[1])
-            status, _headers, body = request(base + "/jobs/applications/?q=Company+269&stage=Rejected")
+            status, headers, body = request(base + "/jobs/applications/?q=Company+269&stage=Rejected")
             assert status == 200 and b"Company 269" in body and b"Company 268" not in body
+            csp = headers.get("Content-Security-Policy")
+            assert "form-action 'self'" in csp and "form-action 'none'" not in csp
+            assert b"method='get'" in body
             assert b"No next action recorded" not in body
             status, _headers, body = request(base + "/jobs/applications/?page=999999")
             assert status == 400 and b"999999" not in body

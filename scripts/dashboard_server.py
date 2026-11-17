@@ -40,7 +40,7 @@ SECURITY_HEADERS = (
     ("Content-Security-Policy",
      "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; "
      "img-src 'self' data:; font-src 'self'; connect-src 'none'; base-uri 'none'; "
-     "form-action 'none'; frame-ancestors 'none'"),
+     "form-action 'self'; frame-ancestors 'none'"),
     ("Permissions-Policy", "camera=(), microphone=(), geolocation=()"),
 )
 
