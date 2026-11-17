@@ -224,6 +224,10 @@ identity and malformed-evidence diagnostics.
   remain read-only endpoints ([routes](scripts/dashboard_server.py#L15)).
 - Page requests read the cached projection without collecting source data
   ([cache reader](scripts/dashboard_server.py#L190)).
+- Applications opens as a searchable, sortable table with 25 rows per page;
+  filters and page choices live in the URL. Board lanes start with 10 cards and
+  load independently. Application detail URLs use opaque keys and show only
+  recorded evidence and safe HTTP(S) links.
 
 ## Review readiness
 

@@ -14,6 +14,7 @@ from unittest import mock
 import dashboard_server as server_module
 import projection
 from test_dashboard_views import synthetic_snapshot
+from test_application_explorer import many_snapshot
 
 
 def start_server(port=0, db_path=None):
@@ -184,6 +185,32 @@ def test_restart_smoke_on_same_ephemeral_loopback_port():
             assert status == 200 and json.loads(body)["snapshot_id"] == snapshot["snapshot_id"]
         finally:
             stop_server(second, second_thread)
+
+
+def test_application_queries_and_opaque_detail_routes():
+    snapshot = many_snapshot()
+    with mock.patch.object(projection, "read_snapshot", return_value=snapshot):
+        server, thread = start_server()
+        try:
+            base = "http://{}:{}".format(server_module.HOST, server.server_address[1])
+            status, _headers, body = request(base + "/jobs/applications/?q=Company+269&stage=Rejected")
+            assert status == 200 and b"Company 269" in body and b"Company 268" not in body
+            assert b"No next action recorded" not in body
+            status, _headers, body = request(base + "/jobs/applications/?page=999999")
+            assert status == 400 and b"999999" not in body
+            status, _headers, body = request(base + "/jobs/applications/?q=%3Cscript%3Ealert(1)%3C/script%3E")
+            assert status == 200 and b"<script>" not in body
+            key = server_module.explorer.opaque_key("synthetic-application-269")
+            status, headers, body = request(base + "/jobs/applications/" + key)
+            assert status == 200 and b"Company 269" in body
+            assert headers.get("Referrer-Policy") == "no-referrer"
+            assert b"synthetic-application-269" not in body
+            status, _headers, _body = request(base + "/jobs/applications/" + "f" * 64)
+            assert status == 404
+            status, _headers, _body = request(base + "/jobs/applications/not-a-key")
+            assert status == 404
+        finally:
+            stop_server(server, thread)
 
 
 def main():
