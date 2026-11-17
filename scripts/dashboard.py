@@ -1003,6 +1003,8 @@ def _state(value):
 
 def parse_runs_query(query=""):
     """Parse a deliberately small, bounded Runs page query."""
+    if query == "":
+        return 1
     try:
         values = parse_qs(query, keep_blank_values=True, strict_parsing=True,
                           max_num_fields=1)
