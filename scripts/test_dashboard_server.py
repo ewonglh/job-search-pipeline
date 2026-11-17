@@ -87,9 +87,11 @@ def test_only_exact_routes_and_methods_are_available():
             for path in ("/private.sqlite3", "/scripts/dashboard_server.py",
                          "/api/snapshot.json?download=1", "/api%2Fsnapshot.json",
                          "/%2e%2e/private.sqlite3", "/.git/config",
-                         "/jobs/applications/?tab=all", "/jobs//applications/"):
+                         "/jobs//applications/"):
                 status, _headers, body = request(base + path)
                 assert status == 404, (path, status, body)
+            status, _headers, body = request(base + "/jobs/applications/?tab=all")
+            assert status == 400 and body == b"bad request\n"
 
             connection = http.client.HTTPConnection(
                 server_module.HOST, server.server_address[1], timeout=3)

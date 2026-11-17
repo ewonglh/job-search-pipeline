@@ -236,7 +236,11 @@ def test_render_escapes_html_svg_attributes_and_embedded_json():
     assert "PRIVATE_TOOL_OUTPUT_CANARY" not in runs_page
     assert "browser.open" in runs_page
     assert "Tailoring quality" not in rendered and "Hiring funnel" not in rendered
-    assert "Current status" in rendered
+    assert "Applications" in rendered and "Current status" not in rendered
+    detail_key = d._application_rows(snapshot)[0]["application_key"]
+    detail = d.render_snapshot_html(snapshot, page="application-detail",
+                                    application_key=detail_key)
+    assert "Current status" in detail and "Submission evidence" in detail
     assert "not a history of stage transitions" in rendered
 
     safe_json = d._safe_json_response({"value": "</script><img src=x>"})
