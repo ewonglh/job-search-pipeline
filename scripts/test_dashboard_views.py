@@ -220,17 +220,22 @@ def test_stale_blocked_and_unknown_states_remain_visible():
 def test_render_escapes_html_svg_attributes_and_embedded_json():
     snapshot = synthetic_snapshot()
     snapshot["snapshot_id"] = "</script><script>alert('json-breakout')</script>"
-    rendered = d.render_snapshot_html(snapshot)
+    rendered = d.render_snapshot_html(snapshot, page="applications")
     assert "Acme &amp; Co" in rendered
     assert "Backend &lt;script&gt;role&lt;/script&gt;" in rendered
     assert "&lt;img src=x onerror=alert(1)&gt;" in rendered
     assert "Board &lt;One&gt;" in rendered
     assert "href='javascript:" not in rendered
     assert "</script><script>alert('json-breakout')" not in rendered
-    assert "\\u003c/script\\u003e\\u003cscript\\u003e" in rendered
+    assert "&lt;/script&gt;&lt;script&gt;alert(&#x27;json-breakout&#x27;)&lt;/script&gt;" in rendered
+    assert "Snapshot provenance" in rendered and "Snapshot ID" in rendered
     for canary in ("MAIL_BODY_CANARY", "OTP-123-CANARY", "PRIVATE_TOOL_OUTPUT_CANARY"):
         assert canary not in rendered
-    assert "Tailoring quality" in rendered and "Hiring funnel" in rendered
+    runs_page = d.render_snapshot_html(snapshot, page="runs")
+    assert "OTP-123-CANARY" not in runs_page
+    assert "PRIVATE_TOOL_OUTPUT_CANARY" not in runs_page
+    assert "browser.open" in runs_page
+    assert "Tailoring quality" not in rendered and "Hiring funnel" not in rendered
     assert "Current status" in rendered
     assert "not a history of stage transitions" in rendered
 
@@ -242,15 +247,14 @@ def test_render_escapes_html_svg_attributes_and_embedded_json():
 def test_stage_since_projection_allowlist_is_typed():
     row = {"company": "Synthetic", "role": "Engineer", "status": "interview",
            "stage_since": "2026-11-10"}
-    cleaned = projection._strict_rows([row], projection.TRACKER_FIELDS)
+    cleaned, quarantined, redacted = projection._compatible_rows(
+        [row], projection.TRACKER_FIELDS)
     assert cleaned[0]["stage_since"] == "2026-11-10"
-    try:
-        projection._strict_rows([dict(row, stage_since="not-a-date")],
-                                projection.TRACKER_FIELDS)
-    except projection._InvalidSource:
-        pass
-    else:
-        raise AssertionError("invalid stage_since was accepted")
+    assert quarantined == 0 and redacted == 0
+    invalid, quarantined, redacted = projection._compatible_rows(
+        [dict(row, stage_since="not-a-date")], projection.TRACKER_FIELDS)
+    assert quarantined == 0 and redacted == 1
+    assert "stage_since" not in invalid[0]
     assert d.card_age({"stage_since": "2026-11-10", "applied_date": "2026-10-01"},
                       dt.date(2026, 11, 16)) == (6, "stage_since")
 
@@ -271,8 +275,42 @@ def test_cli_json_and_html_use_cached_snapshot_only():
                 assert d.main(["--out", out, "--db", "ignored.sqlite3"]) == 0
         with open(out, encoding="utf-8") as stream:
             page = stream.read()
-        assert "id='today'" in page and "id='applications'" in page
-        assert "Snapshot ID" in page
+        assert "Daily submission goal" in page and "id='main'" in page
+        assert "Acme &amp; Co" not in page and "Snapshot ID" in page
+
+
+def test_page_routes_render_only_their_view_and_keep_non_board_pages_bounded():
+    snapshot = synthetic_snapshot()
+    data = d.build_snapshot_data(snapshot)
+    expectations = {
+        "home": ("Daily submission goal", "Acme &amp; Co"),
+        "applications": ("Acme &amp; Co", "Daily submission goal"),
+        "analytics": ("Eligible applications", "Acme &amp; Co"),
+        "runs": ("job-alpha", "Acme &amp; Co"),
+        "tailoring": ("First-pass acceptance", "Acme &amp; Co"),
+        "system-health": ("Source health", "Acme &amp; Co"),
+    }
+    for page, (present, absent) in expectations.items():
+        rendered = d.render_snapshot_html(snapshot, data=data, page=page)
+        assert present in rendered, page
+        assert absent not in rendered, page
+        assert "aria-current='page'" in rendered, page
+        assert "href='#today'" not in rendered, page
+    for unknown in ("", "../scripts/dashboard.py", "api/snapshot.json"):
+        try:
+            d.render_snapshot_html(snapshot, data=data, page=unknown)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("unknown page was rendered: {!r}".format(unknown))
+
+    expanded = dict(data)
+    expanded["applications"] = list(data["applications"]) + [
+        {"company": "Application volume canary", "role": "Synthetic", "status": "Found"}
+        for _index in range(500)]
+    for page in ("home", "runs", "tailoring", "system-health"):
+        assert d.render_snapshot_html(snapshot, data=expanded, page=page) == \
+            d.render_snapshot_html(snapshot, data=data, page=page)
 
 
 def test_missing_cache_renders_explicit_unavailable_state_without_paths():

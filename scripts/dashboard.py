@@ -25,6 +25,7 @@ from urllib.parse import urlsplit
 
 import summary as s
 from config import default_repo_dir, default_runtime_path, path_setting
+import dashboard_shell
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO_DIR = path_setting("JOBSEARCH_REPO", default_repo_dir())
@@ -577,19 +578,11 @@ SOURCE_COLORS = ("#2563eb", "#c2410c", "#0f766e", "#7c3aed", "#b42318",
 
 DASHBOARD_CSS = r"""
 :root {
-  color-scheme: light dark;
+  color-scheme: light;
   --bg: #f8fafc; --surface: #fff; --surface-muted: #e9eff8;
   --text: #1e293b; --muted: #475569; --border: #cbd5e1;
   --primary: #2563eb; --success: #166534; --warning: #9a3412;
   --danger: #b42318; --focus: #1d4ed8;
-}
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #0b1220; --surface: #111c2e; --surface-muted: #18263a;
-    --text: #e2e8f0; --muted: #cbd5e1; --border: #42536b;
-    --primary: #93c5fd; --success: #86efac; --warning: #fdba74;
-    --danger: #fca5a5; --focus: #93c5fd;
-  }
 }
 * { box-sizing: border-box; }
 html { scroll-behavior: auto; }
@@ -604,18 +597,26 @@ a:focus-visible, summary:focus-visible {
 }
 .skip { position: absolute; left: -9999px; top: 8px; z-index: 1; padding: 10px 14px; background: var(--surface); }
 .skip:focus { left: 8px; }
-.shell { width: min(100%, 1440px); margin-inline: auto; padding: 20px 16px 48px; }
+.shell { width: min(100%, 1440px); margin-inline: auto; padding: 16px 12px 40px; }
 .masthead { border-bottom: 1px solid var(--border); padding: 8px 0 18px; }
 h1 { margin: 0; font-size: clamp(1.7rem, 4vw, 2.35rem); line-height: 1.2; letter-spacing: -.025em; }
 h2 { margin: 0 0 12px; font-size: 1.45rem; line-height: 1.3; }
 h3 { margin: 0 0 8px; font-size: 1.08rem; line-height: 1.35; }
 p { margin: 8px 0; }
-.mast-meta { display: grid; gap: 4px; margin-top: 12px; color: var(--muted); overflow-wrap: anywhere; }
-.snapshot-id { font: 0.88rem/1.45 ui-monospace, SFMono-Regular, Consolas, monospace; }
-.nav { display: flex; flex-wrap: wrap; gap: 8px; padding: 14px 0; border-bottom: 1px solid var(--border); }
-.nav a { display: inline-flex; align-items: center; min-height: 44px; padding: 8px 13px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); font-weight: 600; text-decoration: none; }
+.snapshot-asof { margin: 10px 0 0; color: var(--muted); }
+.provenance dl { display: grid; grid-template-columns: minmax(0, 10rem) minmax(0, 1fr); gap: 4px 12px; margin: 8px 0; }
+.provenance dl div { display: contents; }
+.provenance dt { color: var(--muted); }
+.provenance dd { margin: 0; overflow-wrap: anywhere; font: .9rem/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; }
+.workspace { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; }
+.nav { padding: 12px 0; border-bottom: 1px solid var(--border); }
+.nav ul { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 0; padding: 0; list-style: none; }
+.nav li { min-width: 0; }
+.nav a { display: flex; align-items: center; min-width: 0; min-height: 44px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); font-weight: 600; text-decoration: none; overflow-wrap: anywhere; }
 .nav a:hover { background: var(--surface-muted); }
+.nav a[aria-current='page'] { border-color: var(--primary); background: var(--primary); color: #fff; }
 .view { padding: 26px 0 10px; scroll-margin-top: 12px; }
+main { min-width: 0; padding-top: 22px; }
 .intro { max-width: 72ch; color: var(--muted); margin: 0 0 16px; }
 .metrics { display: grid; grid-template-columns: 1fr; gap: 12px; }
 .metric, .panel, .source-card, .application-card, .run-card, .cohort {
@@ -666,13 +667,13 @@ caption { padding: 0 0 8px; text-align: left; font-weight: 700; }
 .cohorts, .quality-grid { display: grid; grid-template-columns: 1fr; gap: 12px; }
 .cohort { padding: 16px; min-width: 0; }
 .cohort h3 { font-size: 1.15rem; }
-.key-value { display: grid; grid-template-columns: minmax(130px, 1fr) auto; gap: 5px 12px; margin: 10px 0; }
+.key-value { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 5px 12px; margin: 10px 0; }
 .key-value dt { color: var(--muted); overflow-wrap: anywhere; }
-.key-value dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
+.key-value dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 .reason-list { display: flex; flex-wrap: wrap; gap: 8px; padding: 0; list-style: none; }
 .reason-list li { padding: 5px 9px; border: 1px solid var(--border); border-radius: 8px; overflow-wrap: anywhere; }
 details { margin-top: 10px; }
-summary { min-height: 44px; display: flex; align-items: center; cursor: pointer; font-weight: 650; }
+summary { min-height: 44px; display: list-item; padding: 10px 0; cursor: pointer; font-weight: 650; }
 .caveat { color: var(--muted); font-size: .94rem; }
 footer { margin-top: 32px; padding-top: 14px; border-top: 1px solid var(--border); color: var(--muted); font-size: .92rem; }
 @media (min-width: 48rem) {
@@ -684,6 +685,10 @@ footer { margin-top: 32px; padding-top: 14px; border-top: 1px solid var(--border
 }
 @media (min-width: 64rem) {
   .shell { padding-inline: 32px; }
+  .workspace { grid-template-columns: 220px minmax(0, 1fr); gap: 28px; align-items: start; }
+  .nav { position: sticky; top: 16px; padding: 24px 0; border: 0; }
+  .nav ul { grid-template-columns: minmax(0, 1fr); }
+  main { padding-top: 24px; }
   .board { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
 @media (min-width: 88rem) {
@@ -975,18 +980,21 @@ def _render_sources(sources):
         value = _as_dict(value)
         state, state_label = _state(value.get("status"))
         age = _age_seconds(value.get("age_seconds"))
-        error = value.get("error_code")
         out.append("<article class='source-card'><div class='source-head'>"
                    "<span class='source-name'>{}</span><span class='state {}'>{}</span>"
                    "</div><div class='source-meta'>Observed: {} · {}</div>".format(
                        _e(_display(name, "unknown", 80)), state, state_label,
                        _e(_display(value.get("observed_at"), "unknown", 48)), _e(age)))
-        if error:
-            out.append("<div class='source-meta'>Source error: <code>{}</code></div>".format(
-                _e(_display(error, "unknown", 80))))
-        if value.get("last_success_at"):
-            out.append("<div class='source-meta'>Last successful collection: {}</div>".format(
-                _e(_display(value.get("last_success_at"), "unknown", 48))))
+        out.append("<details><summary>Source provenance</summary><dl class='key-value'>")
+        for label, key in (("Collected", "collected_at"),
+                           ("Last successful collection", "last_success_at"),
+                           ("Freshness window (seconds)", "freshness_seconds"),
+                           ("Source error", "error_code")):
+            source_value = value.get(key)
+            if source_value is not None:
+                out.append("<dt>{}</dt><dd>{}</dd>".format(
+                    _e(label), _e(_display(source_value, "unknown", 80))))
+        out.append("</dl></details>")
         out.append("</article>")
     out.append("</div>")
     return "".join(out)
@@ -1045,7 +1053,7 @@ def _render_applications(applications, sankey, sources):
     elif any(status != "fresh" for status in app_source_status.values()):
         states = ", ".join("{}: {}".format(name, status)
                             for name, status in sorted(app_source_status.items()))
-        out.append("<div class='empty' role='status'><strong>Application source coverage is incomplete.</strong> {}. Rows below are last-good cached facts when available; read each source error on Today.</div>".format(
+        out.append("<div class='empty' role='status'><strong>Application source coverage is incomplete.</strong> {}. Rows below are last-good cached facts when available; see System health for source details.</div>".format(
             _e(states)))
     out.append("<div class='board'>")
     for status in APPLICATION_STATUS_ORDER:
@@ -1094,7 +1102,7 @@ def _render_applications(applications, sankey, sources):
     return "".join(out)
 
 
-def _render_today(report, sources, compact):
+def _render_today(report, compact):
     goal = _as_dict(report.get("submission_goal"))
     buffer = _as_dict(report.get("ready_buffer"))
     attempts = _as_dict(report.get("attempts"))
@@ -1124,9 +1132,7 @@ def _render_today(report, sources, compact):
             out.append("<li><code>{}</code> · {}</li>".format(_e(code), _e(count)))
         out.append("</ul><p class='meta'>Unclassified blockers: {}</p></section>".format(
             _e(_count(blockers.get("unclassified")))))
-    out.append("<section class='panel'><h3>Source freshness</h3>{}</section>".format(
-        _render_sources(sources)))
-    out.append("<section class='panel'><h3>Shared compact summary</h3><pre class='compact'>{}</pre></section>".format(
+    out.append("<details class='panel'><summary>Compact cached summary</summary><pre class='compact'>{}</pre></details>".format(
         _e(compact)))
     return "".join(out)
 
@@ -1269,41 +1275,59 @@ def _render_funnel(report):
     return "".join(out)
 
 
-def render_snapshot_html(snapshot, data=None):
-    """Render all views from a cached snapshot as one self-contained HTML file."""
+def _render_home(data):
+    return _render_today(data["today"], data["compact"])
+
+
+def _render_applications_page(data):
+    intro = ("<p class='intro'>Read-only status board. Counts include canonical tracker/queue rows "
+             "in this snapshot; discovered postings without a canonical row are not in the snapshot "
+             "and unmatched rows never default to Applied. Status age uses a known stage start when "
+             "present; otherwise the displayed label names the date basis. Timelines contain dated "
+             "submission claims and recorded events only.</p>")
+    return intro + _render_applications(data["applications"], data["sankey"], data["sources"])
+
+
+def _render_analytics(data):
+    return _render_funnel(data["funnel"])
+
+
+def _render_runs_page(data):
+    return _render_runs(data["runs"])
+
+
+def _render_tailoring(data):
+    return _render_quality(data["quality"])
+
+
+def _render_system_health(data):
+    return ("<p class='intro'>Freshness and availability come from the latest cached snapshot. "
+            "Opening this page does not refresh or contact any source.</p>"
+            "<section class='panel'><h3>Source health</h3>{}</section>".format(
+                _render_sources(data["sources"])))
+
+
+PAGE_RENDERERS = {
+    "home": _render_home,
+    "applications": _render_applications_page,
+    "analytics": _render_analytics,
+    "runs": _render_runs_page,
+    "tailoring": _render_tailoring,
+    "system-health": _render_system_health,
+}
+
+
+def render_snapshot_html(snapshot, data=None, page="home"):
+    """Render exactly one dashboard page from a cached snapshot."""
+    if page not in PAGE_RENDERERS:
+        raise ValueError("unknown dashboard page")
     data = data or build_snapshot_data(snapshot)
-    snapshot_id = _display(snapshot.get("snapshot_id"), "unknown", 128)
-    snapshot_date = _display(snapshot.get("as_of"), "unknown", 48)
-    generated = _display(snapshot.get("generated_at"), "unknown", 48)
-    out = ["<!doctype html><html lang='en'><head><meta charset='utf-8'>",
-           "<meta name='viewport' content='width=device-width,initial-scale=1'>",
-           "<meta name='color-scheme' content='light dark'>",
-           "<meta name='referrer' content='no-referrer'>",
-           "<title>Private jobs dashboard</title><style>", DASHBOARD_CSS,
-           "</style></head><body><a class='skip' href='#main'>Skip to dashboard content</a><div class='shell'>",
-           "<header class='masthead'><h1>Private jobs dashboard</h1><div class='mast-meta'>",
-           "<span>Snapshot as of {}</span><span>Collected {}</span>".format(
-               _e(snapshot_date), _e(generated)),
-           "<span class='snapshot-id'>Snapshot ID: <code>{}</code></span></div></header>".format(
-               _e(snapshot_id)),
-           "<nav class='nav' aria-label='Dashboard views'><a href='#today'>Today</a><a href='#applications'>Applications</a><a href='#runs'>Runs</a><a href='#quality'>Tailoring quality</a><a href='#funnel'>Hiring funnel</a></nav>",
-           "<main id='main'>",
-           "<section class='view' id='today' aria-labelledby='today-heading'><h2 id='today-heading'>Today</h2>",
-           _render_today(data["today"], data["sources"], data["compact"]),
-           "</section><section class='view' id='applications' aria-labelledby='applications-heading'><h2 id='applications-heading'>Applications</h2><p class='intro'>Read-only status board. Counts include canonical tracker/queue rows in this snapshot; discovered postings without a canonical row are not in the snapshot and unmatched rows never default to Applied. Status age uses a known stage start when present; otherwise the displayed label names the date basis. Timelines contain dated submission claims and recorded events only.</p>",
-           _render_applications(data["applications"], data["sankey"], data["sources"]),
-           "</section><section class='view' id='runs' aria-labelledby='runs-heading'><h2 id='runs-heading'>Runs</h2>",
-           _render_runs(data["runs"]),
-           "</section><section class='view' id='quality' aria-labelledby='quality-heading'><h2 id='quality-heading'>Tailoring quality</h2>",
-           _render_quality(data["quality"]),
-           "</section><section class='view' id='funnel' aria-labelledby='funnel-heading'><h2 id='funnel-heading'>Hiring funnel</h2>",
-           _render_funnel(data["funnel"]),
-           "</section></main><footer>Private local dashboard · read-only snapshot · no source collection is triggered by viewing this page.</footer>",
-           "<script type='application/json' id='dashboard-state'>",
-           _safe_json_for_script({"snapshot_id": snapshot.get("snapshot_id"),
-                                  "as_of": snapshot.get("as_of")}),
-           "</script></div></body></html>"]
-    return "".join(out)
+    metadata = (("Snapshot ID", _display(snapshot.get("snapshot_id"), "unknown", 128)),
+                ("Generated at", _display(snapshot.get("generated_at"), "unknown", 48)),
+                ("Schema version", _display(snapshot.get("schema_version"), "unknown", 24)))
+    return dashboard_shell.render(
+        page, PAGE_RENDERERS[page](data),
+        _display(snapshot.get("as_of"), "unknown", 48), metadata, DASHBOARD_CSS)
 
 
 def render_unavailable_html():
