@@ -611,9 +611,9 @@ h1 { margin: 0 0 16px; font-size: 2rem; line-height: 1.15; letter-spacing: -.035
 h2 { margin: 0 0 12px; font-size: 1.45rem; line-height: 1.3; }
 h3 { margin: 0 0 8px; font-size: 1.08rem; line-height: 1.35; }
 p { margin: 8px 0; }
-.snapshot-asof { margin: 0; color: var(--muted); font-size: .875rem; font-variant-numeric: tabular-nums; }
 .masthead .provenance { margin-top: 0; font-size: .875rem; }
 .masthead .provenance summary { color: var(--muted); }
+.masthead .provenance[open] { flex-basis: 100%; }
 .provenance dl { display: grid; grid-template-columns: minmax(0, 10rem) minmax(0, 1fr); gap: 4px 12px; margin: 8px 0; }
 .provenance dl div { display: contents; }
 .provenance dt { color: var(--muted); }
@@ -635,6 +635,10 @@ main { min-width: 0; padding-top: 12px; }
 .metric { padding: 14px; }
 .metric-label { display: block; font-size: .9rem; color: var(--muted); font-weight: 600; }
 .metric-value { display: block; margin-top: 4px; font-size: 1.45rem; line-height: 1.35; font-variant-numeric: tabular-nums; font-weight: 700; overflow-wrap: anywhere; }
+.today-strip { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 0 0 16px; }
+.today-strip div { min-width: 0; padding: 8px 0; border-bottom: 1px solid var(--border); }
+.today-strip dd { margin: 3px 0 0; color: var(--text); font-weight: 750; font-variant-numeric: tabular-nums; }
+.today-strip small { color: var(--muted); font-weight: 500; }
 .panel { margin-top: 16px; padding: 16px; }
 .panel > .intro, .panel > .meta { max-width: 70ch; }
 .source-list { display: grid; gap: 10px; }
@@ -655,6 +659,12 @@ main { min-width: 0; padding-top: 12px; }
 .application-list, .run-list { display: grid; gap: 10px; }
 .application-card, .run-card { padding: 14px; min-width: 0; }
 .explorer-views, .pagination, .explorer-filters { display: flex; flex-wrap: wrap; align-items: end; gap: 10px; margin: 12px 0; }
+.result-toolbar { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 4px 12px; }
+.result-toolbar > * { margin-block: 4px; }
+.application-controls { margin-top: 0; }
+.application-controls .explorer-filters { margin-block: 0 8px; }
+.application-controls label { min-width: 0; max-width: 100%; }
+.application-controls .explorer-filters input[type='search'] { width: min(20rem, 75vw); }
 .explorer-views a, .pagination a, .load-more, .detail-link, .explorer-filters button { min-height: 44px; display: inline-flex; align-items: center; padding: 8px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
 .explorer-views a[aria-current='page'] { background: var(--primary); color: white; }
 .explorer-filters label { display: grid; gap: 4px; font-weight: 600; }
@@ -668,6 +678,7 @@ main { min-width: 0; padding-top: 12px; }
 .load-more { margin-top: 10px; }
 .card-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; flex-wrap: wrap; }
 .card-title { font-weight: 700; font-size: 1.02rem; overflow-wrap: anywhere; }
+.card-title a, .run-card h3 a, th a, .chart-data td a { display: inline-flex; align-items: center; min-height: 24px; }
 .role { color: var(--muted); overflow-wrap: anywhere; }
 .badge { display: inline-block; padding: 3px 9px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface-muted); font-size: .88rem; font-weight: 650; }
 .details { margin-top: 8px; color: var(--muted); overflow-wrap: anywhere; }
@@ -711,6 +722,11 @@ a.chart-track:hover { background: var(--surface-muted); }
 .range-form input { width: 100%; min-width: 0; }
 .range-form button, .explorer-filters button { background: var(--primary); border-color: var(--primary); color: white; cursor: pointer; font-weight: 650; padding-inline: 14px; }
 .range-form button:hover, .explorer-filters button:hover { background: var(--text); }
+.range-options { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin-bottom: 10px; }
+.range-options a { display: inline-flex; min-height: 44px; align-items: center; padding: 4px 8px; border-radius: 5px; }
+.range-options a[aria-current='true'] { background: var(--surface-muted); font-weight: 700; }
+.report-disclosure { border-bottom: 1px solid var(--border); padding-bottom: 4px; }
+.report-disclosure > summary { font-size: 1.06rem; }
 .dimension-list { display: grid; gap: 6px; margin: 8px 0 0; padding: 0; list-style: none; }
 .dimension-list li { display: flex; justify-content: space-between; gap: 12px; padding: 7px 0; border-bottom: 1px solid var(--border); }
 .health-link { display: inline-flex; min-height: 44px; align-items: center; }
@@ -745,6 +761,7 @@ footer { margin-top: 32px; padding-top: 14px; border-top: 1px solid var(--border
   .board { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .cohorts, .quality-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .chart-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .today-strip { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 }
 @container (min-width: 26rem) {
   .chart-bars { grid-template-columns: repeat(var(--bins), minmax(0, 1fr)); }
@@ -756,6 +773,13 @@ footer { margin-top: 32px; padding-top: 14px; border-top: 1px solid var(--border
 }
 .bar-chart { container-type: inline-size; }
 @media (max-width: 47.999rem) {
+  .shell { padding-top: 6px; }
+  .masthead-row { align-items: center; }
+  .nav { padding-block: 4px; }
+  main { padding-top: 4px; }
+  .phone-cards .application-card { padding: 8px 12px; }
+  .phone-cards .card-title a { min-height: 44px; }
+  .phone-cards .details { margin-top: 3px; font-size: .875rem; }
   .explorer-table { display: none; }
   .phone-cards { display: grid; gap: 10px; }
   .range-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -1173,9 +1197,10 @@ def _render_sources(sources):
                    "</div><div class='source-meta'>Last observation: {}</div>".format(
                        _e(_display(name, "unknown", 80)), state, state_label,
                        _e(age)))
-        out.append("<p>{}</p><p><strong>Next step:</strong> {}</p>".format(
-            _e(impact), _e(next_step)))
-        out.append("<details><summary>Source provenance</summary><dl class='key-value'>")
+        if state != "fresh" or coverage in ("partial", "incomplete"):
+            out.append("<p>{}</p>".format(_e(impact)))
+        out.append("<details><summary>Source provenance</summary><p><strong>Next step:</strong> {}</p>"
+                   "<dl class='key-value'>".format(_e(next_step)))
         for label, key in (("Observed at", "observed_at"),
                            ("Collected", "collected_at"),
                            ("Last successful collection", "last_success_at"),
@@ -1245,15 +1270,12 @@ def _application_card(app, compact=False):
     out = ["<article class='application-card'><div class='card-top'><div class='card-title'>"
            "{}</div><span class='badge'>{}</span></div><div class='role'>{}</div>".format(
                title, _e(app.get("status", "Unknown / unmatched")), role)]
-    meta = "Source: {}".format(_e(app.get("source", "Unknown source")))
+    meta = _e(app.get("source", "Unknown source"))
     if app.get("applied_date"):
         meta += " · Submitted {}".format(_e(app["applied_date"]))
     out.append("<div class='details'>{}</div>".format(meta))
-    if app.get("attempt_summary"):
+    if not compact and app.get("attempt_summary"):
         out.append("<div class='details'>{}</div>".format(_e(app["attempt_summary"])))
-    if compact and app.get("application_key"):
-        out.append("<a class='detail-link' href='/jobs/applications/{}'>Application details</a>".format(
-            app["application_key"]))
     return "".join(out) + "</article>"
 
 
@@ -1267,34 +1289,47 @@ def _render_applications(applications, sankey, sources, state=None, selection_no
     if selection_note:
         out.append("<p class='result-count' role='status'>{}</p>".format(_e(selection_note)))
     if all(value == "unavailable" for value in app_source_status.values()):
-        out.append("<div class='empty' role='status'><strong>Application data unavailable.</strong> Tracker and queue are unavailable; cached status columns do not imply zero applications.</div>")
+        out.append("<p class='caveat' role='status'>Application data unavailable. <a href='/jobs/system-health/'>Source health</a></p>")
     elif any(value != "fresh" for value in app_source_status.values()):
         states = ", ".join("{}: {}".format(name, value)
                             for name, value in sorted(app_source_status.items()))
-        out.append("<div class='empty' role='status'><strong>Application source coverage is incomplete.</strong> {}. Rows show last-good cached facts when available.</div>".format(_e(states)))
+        out.append("<p class='caveat' role='status'>{} · <a href='/jobs/system-health/'>Source health</a></p>".format(_e(states.capitalize())))
     out.append("<nav class='explorer-views' aria-label='Application view'>")
     for view, label in (("table", "Table"), ("board", "Board")):
         current = " aria-current='page'" if state["view"] == view else ""
         out.append("<a{} href='{}'>{}</a>".format(current,
             _e(explorer.query_href(state, view=view, page=1)), label))
-    out.append("</nav><form class='explorer-filters' method='get' action='/jobs/applications/'>")
-    out.append("<label>Search applications <input type='search' name='q' maxlength='120' value='{}'></label>".format(_e(state["q"])))
+    active = sum(bool(value) for value in (state["q"], state["stage"] != "all"))
+    out.append("</nav><details class='application-controls'><summary>Filters{}</summary>"
+               "<form class='explorer-filters' method='get' action='/jobs/applications/'>".format(
+                   " ({})".format(active) if active else ""))
+    out.append("<label>Search <input type='search' name='q' maxlength='120' value='{}'></label>".format(_e(state["q"])))
     out.append("<label>Stage <select name='stage'>")
     for stage in ("all",) + explorer.STAGES:
         selected = " selected" if state["stage"] == stage else ""
         out.append("<option value='{}'{}>{}</option>".format(_e(stage), selected,
             "All stages" if stage == "all" else _e(stage)))
     out.append("</select></label><input type='hidden' name='view' value='{}'>".format(state["view"]))
-    out.append("<input type='hidden' name='sort' value='{}'><input type='hidden' name='dir' value='{}'>".format(state["sort"], state["dir"]))
-    out.append("<button type='submit'>Apply filters</button></form>")
+    for key in ("sort", "dir", "period", "start", "end", "metric", "from", "to", "company"):
+        if state.get(key):
+            out.append("<input type='hidden' name='{}' value='{}'>".format(key, _e(state[key])))
+    out.append("<button type='submit'>Apply filters</button></form></details>")
     if not rows:
         out.append("<p class='empty' role='status'>No applications match these filters.</p>")
     elif state["view"] == "table":
         start = (state["page"] - 1) * explorer.PAGE_SIZE
         page_rows = rows[start:start + explorer.PAGE_SIZE]
-        out.append("<p class='result-count' role='status'>{} matching applications · page {} of {}</p>".format(
-            len(rows), min(state["page"], max(1, (len(rows) + explorer.PAGE_SIZE - 1) // explorer.PAGE_SIZE)),
-            max(1, (len(rows) + explorer.PAGE_SIZE - 1) // explorer.PAGE_SIZE)))
+        pages = max(1, (len(rows) + explorer.PAGE_SIZE - 1) // explorer.PAGE_SIZE)
+        links = []
+        if state["page"] > 1:
+            links.append("<a href='{}'>Previous page</a>".format(_e(explorer.query_href(state, page=state["page"] - 1))))
+        if state["page"] < pages:
+            links.append("<a href='{}'>Next page</a>".format(_e(explorer.query_href(state, page=state["page"] + 1))))
+        out.append("<div class='result-toolbar'><p class='result-count' role='status'>{} applications · page {} of {}</p>".format(
+            len(rows), min(state["page"], pages), pages))
+        if links:
+            out.append("<nav class='pagination' aria-label='Application pages, top'>{}</nav>".format("".join(links)))
+        out.append("</div>")
         out.append("<div class='data-table-wrap explorer-table'><table><caption>Applications</caption><thead><tr>")
         for field, label in (("company", "Company"), ("role", "Role"), ("status", "Stage"), ("source", "Source"), ("applied_date", "Submitted")):
             direction = "desc" if state["sort"] == field and state["dir"] == "asc" else "asc"
@@ -1311,13 +1346,8 @@ def _render_applications(applications, sankey, sources, state=None, selection_no
         out.append("</tbody></table></div><div class='phone-cards'>")
         out.extend(_application_card(app, compact=True) for app in page_rows)
         out.append("</div>")
-        pages = max(1, (len(rows) + explorer.PAGE_SIZE - 1) // explorer.PAGE_SIZE)
-        out.append("<nav class='pagination' aria-label='Application pages'>")
-        if state["page"] > 1:
-            out.append("<a href='{}'>Previous page</a>".format(_e(explorer.query_href(state, page=state["page"] - 1))))
-        if state["page"] < pages:
-            out.append("<a href='{}'>Next page</a>".format(_e(explorer.query_href(state, page=state["page"] + 1))))
-        out.append("</nav>")
+        if links:
+            out.append("<nav class='pagination' aria-label='Application pages, bottom'>{}</nav>".format("".join(links)))
     else:
         grouped = {stage: [] for stage in explorer.STAGES}
         for app in rows:
@@ -1370,12 +1400,10 @@ def _render_application_detail(detail):
     return "".join(out)
 
 
-def _render_today(report, compact, confirmed_today=None, snapshot=None):
+def _render_today(report, confirmed_today=None, snapshot=None):
     goal = _as_dict(report.get("submission_goal"))
     buffer = _as_dict(report.get("ready_buffer"))
     attempts = _as_dict(report.get("attempts"))
-    sync = _as_dict(report.get("tracker_sync"))
-    gaps = _as_dict(report.get("snapshot_gaps"))
     blockers = _as_dict(report.get("blockers"))
     confirmed = goal.get("confirmed")
     coverage = _as_dict(goal.get("submissions")).get("coverage", "unknown")
@@ -1386,27 +1414,26 @@ def _render_today(report, compact, confirmed_today=None, snapshot=None):
         confirmed = exact if metric_coverage in ("complete", "stale") else (
             "≥ {}".format(observed) if observed else "Unknown")
         coverage = metric_coverage
-    out = ["<div class='metrics'>",
-           "<article class='metric'><span class='metric-label'>Daily submission goal · confirmed submissions · {}</span>"
-           "<span class='metric-value'>{} / {}</span><span class='meta'>Coverage: {}</span></article>".format(
-               _e(report.get("timezone", "unknown")), _e(_count(confirmed)),
-               _e(_count(goal.get("target"))), _e(coverage)),
-           "<article class='metric'><span class='metric-label'>Ready buffer</span>"
-           "<span class='metric-value'>{} / {}</span><span class='meta'>Gap: {}</span></article>".format(
-               _e(_count(buffer.get("queued"))), _e(_count(buffer.get("target"))),
-               _e(_count(buffer.get("gap")))),
-           "<article class='metric'><span class='metric-label'>Callback follow-up</span>"
-           "<span class='metric-value'>Unknown</span><span class='meta'>Cached callback history cannot establish whether action is still required.</span></article>"]
-    out.append("</div>")
+    freshness = " <small>{}</small>".format(_e(coverage)) if coverage != "complete" else ""
+    attention = [(label, attempts.get(key)) for label, key in (
+        ("Outcome unknown", "outcome_unknown"), ("Stalled", "stale_in_progress")) if attempts.get(key)]
+    attention_text = " · ".join("{} {}".format(count, label.lower()) for label, count in attention)
+    out = ["<dl class='today-strip'>",
+           "<div><dt class='metric-label'>Daily submission goal</dt><dd>{} / {}{}</dd></div>".format(
+               _e(_count(confirmed)), _e(_count(goal.get("target"))), freshness),
+           "<div><dt class='metric-label'>Ready buffer</dt><dd>{} / {}</dd></div>".format(
+               _e(_count(buffer.get("queued"))), _e(_count(buffer.get("target")))),
+           "<div><dt class='metric-label'>Callback follow-up</dt><dd>Unknown</dd></div>",
+           "<div><dt class='metric-label'><a href='/jobs/system-health/'>Queue attention</a></dt>"
+           "<dd>{}</dd></div></dl>".format(_e(attention_text or "Review source health"))]
     by_code = blockers.get("by_code")
     if by_code:
-        out.append("<section class='panel'><h3>Structured blockers</h3><ul class='reason-list'>")
+        out.append("<section><h2>Blockers</h2><ul class='reason-list'>")
         for code, count in sorted(by_code.items()):
-            out.append("<li><code>{}</code> · {}</li>".format(_e(code), _e(count)))
-        out.append("</ul><p class='meta'>Unclassified blockers: {}</p></section>".format(
-            _e(_count(blockers.get("unclassified")))))
-    out.append("<details class='panel'><summary>Compact cached summary</summary><pre class='compact'>{}</pre></details>".format(
-        _e(compact)))
+            out.append("<li>{} · {}</li>".format(_e(_stage_label(code)), _e(count)))
+        if blockers.get("unclassified"):
+            out.append("<li>Unclassified · {}</li>".format(_e(_count(blockers["unclassified"]))))
+        out.append("</ul></section>")
     return "".join(out)
 
 
@@ -1500,6 +1527,9 @@ def _render_metric_chart(report, snapshot, metric, title, state=None, *, limit=N
             return "".join(out)
     elif status == "stale":
         out.append("<p class='caveat' role='status'>The relevant cached source is stale; counts are last observed values.</p>")
+        if not observed_total:
+            out.append("</section>")
+            return "".join(out)
     elif complete_total == 0:
         out.append("<p class='meta' role='status'>Complete coverage · genuine zero observations in this period.</p>")
     if not items:
@@ -1580,24 +1610,30 @@ def _render_metric_chart(report, snapshot, metric, title, state=None, *, limit=N
 
 
 def _render_range_form(state):
-    out = ["<form class='range-form' method='get' action='/jobs/analytics/'>",
-           "<label>Time range <select name='period'>"]
+    out = ["<nav class='range-options' aria-label='Time range'>"]
     for value, label in (("last12weeks", "Last 12 weeks"), ("thisweek", "This week"),
                          ("thismonth", "This month"), ("last3months", "Last 3 months"),
-                         ("alltime", "All time"), ("custom", "Custom dates")):
-        selected = " selected" if state.get("period") == value else ""
-        out.append("<option value='{}'{}>{}</option>".format(value, selected, label))
-    out.append("</select></label><label>Start date <input type='date' name='start' value='{}'></label>".format(
+                         ("alltime", "All time")):
+        selected = " aria-current='true'" if state.get("period") == value else ""
+        out.append("<a href='/jobs/analytics/?period={}'{}>{}</a>".format(value, selected, label))
+    out.append("</nav><details{}><summary>Custom dates</summary>".format(
+        " open" if state.get("period") == "custom" else ""))
+    out.append("<form class='range-form' method='get' action='/jobs/analytics/'>"
+               "<input type='hidden' name='period' value='custom'>"
+               "<label>Start date <input type='date' name='start' required value='{}'></label>".format(
         _e(state.get("start") or "")))
-    out.append("<label>End date <input type='date' name='end' value='{}'></label>".format(
+    out.append("<label>End date <input type='date' name='end' required value='{}'></label>".format(
         _e(state.get("end") or "")))
-    out.append("<button type='submit'>Apply range</button></form>")
+    out.append("<button type='submit'>Apply range</button></form></details>")
     return "".join(out)
 
 
 def _render_company_analytics(view, state):
     company_view = view["companies"]
-    out = ["<section class='panel'><h3>Company classifications</h3><p class='meta'>Independent dimensions; each row reports unique catalogued companies and canonical applications in the selected reporting population. Unresolved applications: {}.</p>".format(
+    if not company_view.get("companies"):
+        return "<p class='meta'>No classified companies in this range. Unresolved applications: {}.</p>".format(
+            _e(company_view.get("unresolved_applications", 0)))
+    out = ["<section class='panel'><p class='meta'>Counts of companies and applications in the selected range. Unresolved applications: {}.</p>".format(
         _e(company_view.get("unresolved_applications", 0)))]
     labels = (("size", "Company size"), ("footprint", "Footprint"), ("industry", "Industry"))
     out.append("<div class='chart-grid'>")
@@ -1626,8 +1662,6 @@ def _render_company_analytics(view, state):
             _e(href), _e(row["label"]), _e(row["applications"])))
     if len(companies) > 20:
         out.append("<li>{} additional companies are omitted from this summary.</li>".format(len(companies) - 20))
-    if not companies:
-        out.append("<li>No catalogued companies in this population.</li>")
     out.append("</ul></section>")
     return "".join(out)
 
@@ -1845,16 +1879,12 @@ def _render_funnel(report):
 def _render_home(data):
     report = data["analytics"]["report"]
     today = data["today"]
-    blockers = _as_dict(today.get("blockers"))
-    attempts = _as_dict(today.get("attempts"))
-    total_blockers = sum(_as_dict(blockers.get("by_code")).values())
-    home = [_render_today(today, data["compact"], data.get("confirmed_today"),
-                          {"sources": data["sources"], "facts": {}}),
-            "<p class='meta'>Callback follow-up status is unknown; cached history cannot establish whether a reply still needs action. Queue attention: {} stale in-progress · {} outcome unknown · {} blockers. <a class='health-link' href='/jobs/system-health/'>Open system health</a></p>".format(
-                _e(_count(attempts.get("stale_in_progress"))),
-                _e(_count(attempts.get("outcome_unknown"))), _e(total_blockers))]
+    home = [_render_today(today, data.get("confirmed_today"),
+                          {"sources": data["sources"], "facts": {}})]
     home.append(_render_metric_chart(report, {"sources": data["sources"], "facts": {}},
                                      "confirmed_submissions", "Weekly confirmed submissions", limit=12))
+    home.append("<details class='report-disclosure'><summary>Activity and coverage</summary>")
+    home.append("<p class='meta'>Singapore dates. Callback history does not record whether a follow-up is still due.</p>")
     for metric, label in (("initial_tailoring", "Initial tailoring"),
                           ("retailoring", "Retailoring")):
         coverage = _as_dict(report.get("metrics")).get(metric)
@@ -1869,6 +1899,7 @@ def _render_home(data):
                    "coverage unknown; no observations recorded in the cache")
         home.append("<p class='meta'>{}: {} in the last 12 weeks.</p>".format(
             _e(label), _e(wording)))
+    home.append("<pre class='compact'>{}</pre></details>".format(_e(data["compact"])))
     return "".join(home)
 
 
@@ -1889,12 +1920,11 @@ def _render_analytics(data, snapshot, state):
     report = view["report"]
     population = _as_dict(report.get("applications"))
     out = [_render_range_form(state),
-           "<p class='intro'>Selected range: {} to {} · Asia/Singapore calendar · activity bars use dated cached evidence; current-stage counts cover all canonical applications in this snapshot.</p>".format(
+           "<p class='meta'>Selected range: {} to {} · Singapore</p>".format(
                _e(report.get("period", {}).get("start") or "earliest cached date"),
                _e(report.get("period", {}).get("end") or "unknown")),
-           _render_metric_chart(view["monthly"], snapshot, "confirmed_submissions",
-                                "Monthly confirmed submission trend · last 12 available months", state,
-                                limit=12, trend=True),
+           _render_metric_chart(report, snapshot, "confirmed_submissions", "Confirmed submissions", state),
+           "<details class='report-disclosure'><summary>Application stages</summary>",
            "<section class='panel'><h2>Current stages</h2><p class='meta'>{} canonical applications, across all dates.</p><div class='data-table-wrap'><table class='stage-table' aria-label='Current application stages'><thead><tr><th scope='col'>Stage</th><th scope='col' class='numeric'>Count</th><th scope='col' colspan='2' class='numeric'>Share</th></tr></thead><tbody>".format(
                _e(_count(population.get("canonical_count"))))]
     stage_counts = report.get("current_stage_counts", {})
@@ -1907,15 +1937,21 @@ def _render_analytics(data, snapshot, state):
                        "<td class='numeric'>{:.1f}%</td></tr>".format(_e(_stage_label(stage)), _e(count), share, share))
     else:
         out.append("<tr><td colspan='4'>No canonical applications are available.</td></tr>")
-    out.append("</tbody></table></div></section><h2 class='section-title'>Activity in selected range</h2><div class='chart-grid'>")
-    for metric, label in (("confirmed_submissions", "Confirmed submissions"),
-                          ("recorded_claims", "Recorded submission claims"),
+    out.append("</tbody></table></div></section></details>"
+               "<details class='report-disclosure'><summary>More activity</summary><div class='chart-grid'>")
+    for metric, label in (("recorded_claims", "Recorded submission claims"),
                           ("initial_tailoring", "Initial tailoring activity days"),
                           ("retailoring", "Retailoring activity days")):
         out.append(_render_metric_chart(report, snapshot, metric, label, state))
     out.append("</div>")
+    out.append(_render_metric_chart(view["monthly"], snapshot, "confirmed_submissions",
+                                    "Monthly confirmed submission trend · last 12 available months", state,
+                                    limit=12, trend=True))
+    out.append("</details><details class='report-disclosure'><summary>Company breakdown</summary>")
     out.append(_render_company_analytics(view, state))
+    out.append("</details><details class='report-disclosure'><summary>Hiring funnel</summary>")
     out.append(_render_funnel(data["funnel"]))
+    out.append("</details>")
     return "".join(out)
 
 
@@ -1928,9 +1964,7 @@ def _render_tailoring(data):
 
 
 def _render_system_health(data):
-    return ("<p class='intro'>Freshness and availability come from the latest cached snapshot. "
-            "Opening this page does not refresh or contact any source.</p>"
-            "<section class='panel'><h3>Source health</h3>{}</section>".format(
+    return ("<section><h2>Source health</h2>{}</section>".format(
                 _render_sources(data["sources"])))
 
 
@@ -1964,10 +1998,8 @@ def render_snapshot_html(snapshot, data=None, page="home", query_state=None,
             import dashboard_charts
             selected_rows, selection_note = dashboard_charts.filter_applications(
                 snapshot, data["applications"], state)
-            intro = ("<p class='intro'>Canonical applications from the last cached snapshot. "
-                     "Unknown stages remain unmatched; missing submission dates and next actions stay unknown.</p>")
-            content = intro + _render_applications(selected_rows, data["sankey"],
-                                                    data["sources"], state, selection_note)
+            content = _render_applications(selected_rows, data["sankey"],
+                                           data["sources"], state, selection_note)
         elif page == "analytics":
             state = query_state or explorer.parse_query("")
             content = _render_analytics(data, snapshot, state)

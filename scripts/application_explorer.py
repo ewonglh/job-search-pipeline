@@ -39,10 +39,10 @@ def parse_query(query):
     stage = values.get("stage", "all")
     if stage not in ("all",) + STAGES:
         raise ValueError("invalid stage")
-    sort = values.get("sort", "company")
+    sort = values.get("sort", "applied_date")
     if sort not in SORTS:
         raise ValueError("invalid sort")
-    direction = values.get("dir", "asc")
+    direction = values.get("dir", "desc" if sort == "applied_date" else "asc")
     if direction not in ("asc", "desc"):
         raise ValueError("invalid direction")
     page = _bounded_int(values.get("page", "1"), 1, MAX_PAGE)
