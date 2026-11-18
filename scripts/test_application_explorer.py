@@ -36,8 +36,12 @@ def test_search_sort_filter_and_paging_compose_for_late_records():
     state = explorer.parse_query("q=Company+269&stage=Unknown+%2F+unmatched&sort=role&dir=desc&page=9")
     matches = explorer.filtered_rows(data["applications"], state)
     assert [row["company"] for row in matches] == ["Company 269"]
-    late_page = explorer.filtered_rows(data["applications"], explorer.parse_query("page=11"))
+    late_page = explorer.filtered_rows(data["applications"], explorer.parse_query("sort=company&page=11"))
     assert late_page[(11 - 1) * 25]["company"] == "Company 250"
+    recent = explorer.filtered_rows(
+        [{"company": "A", "applied_date": "2026-11-10"}, {"company": "Z", "applied_date": "2026-11-12"}],
+        explorer.parse_query(""))
+    assert recent[0]["company"] == "Z"
     key = matches[0]["application_key"]
     detail = d._application_detail(snapshot, key)
     assert detail["company"] == "Company 269"
@@ -49,7 +53,8 @@ def test_first_render_and_independent_board_lanes_are_bounded():
     data = d.build_snapshot_data(snapshot)
     listing = d.render_snapshot_html(snapshot, data=data, page="applications")
     # The phone card carries its own detail link in addition to the title link.
-    assert len(re.findall(r"href='/jobs/applications/[0-9a-f]{64}'", listing)) == 75
+    assert len(re.findall(r"href='/jobs/applications/[0-9a-f]{64}'", listing)) == 50
+    assert listing.count("Next page</a>") == 2
     state = explorer.parse_query("view=board&load_applied=20")
     board = d.render_snapshot_html(snapshot, data=data, page="applications", query_state=state)
     assert len(re.findall(r"href='/jobs/applications/[0-9a-f]{64}'", board)) == 100
