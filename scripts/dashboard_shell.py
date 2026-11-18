@@ -31,13 +31,14 @@ def render(page, content, as_of, metadata, css):
             "<meta name='referrer' content='no-referrer'>"
             "<title>{} | Private jobs dashboard</title><style>{}</style></head><body>"
             "<a class='skip' href='#main'>Skip to dashboard content</a><div class='shell'>"
-            "<header class='masthead'><h1>Private jobs dashboard</h1>"
-            "<p class='snapshot-asof'>Snapshot as of {}</p>"
+            "<header class='masthead'><div class='masthead-row'>"
+            "<a class='wordmark' href='/jobs/'>Private jobs dashboard</a>"
+            "<p class='snapshot-asof'>Snapshot as of {}</p></div>"
             "<details class='provenance'><summary>Snapshot provenance</summary>"
             "<dl>{}</dl></details></header>"
             "<div class='workspace'><nav class='nav' aria-label='Dashboard pages'><ul>{}</ul></nav>"
-            "<main id='main' aria-labelledby='page-heading'><h2 id='page-heading'>{}</h2>{}</main>"
-            "</div><footer>Private local dashboard · read-only cached snapshot · viewing does not collect source data.</footer>"
+            "<main id='main' aria-labelledby='page-heading'><h1 id='page-heading'>{}</h1>{}</main>"
+            "</div><footer>Read-only cached snapshot</footer>"
             "</div></body></html>").format(
                 html.escape(label), css,
                 html.escape(str(as_of)),

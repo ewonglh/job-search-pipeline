@@ -583,53 +583,60 @@ SOURCE_COLORS = ("#2563eb", "#c2410c", "#0f766e", "#7c3aed", "#b42318",
 DASHBOARD_CSS = r"""
 :root {
   color-scheme: light;
-  --bg: #f8fafc; --surface: #fff; --surface-muted: #e9eff8;
-  --text: #1e293b; --muted: #475569; --border: #cbd5e1;
-  --primary: #2563eb; --success: #166534; --warning: #9a3412;
-  --danger: #b42318; --focus: #1d4ed8;
+  --bg: #f5f6f2; --surface: #fff; --surface-muted: #e7eeeb;
+  --text: #1d2a25; --muted: #4b5c53; --border: #cdd8d1;
+  --primary: #175c50; --success: #176145; --warning: #854410;
+  --danger: #a32623; --focus: #0b6e5b; --plot: #247d6b;
 }
 * { box-sizing: border-box; }
 html { scroll-behavior: auto; }
 body {
   margin: 0; background: var(--bg); color: var(--text);
-  font: 16px/1.55 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font: 16px/1.5 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
+::selection { background: var(--surface-muted); color: var(--primary); }
 a { color: var(--primary); text-decoration-thickness: .08em; text-underline-offset: .16em; }
 a:hover { text-decoration-thickness: .14em; }
-a:focus-visible, summary:focus-visible {
+a:focus-visible, summary:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible {
   outline: 3px solid var(--focus); outline-offset: 3px; border-radius: 4px;
 }
 .skip { position: absolute; left: -9999px; top: 8px; z-index: 1; padding: 10px 14px; background: var(--surface); }
 .skip:focus { left: 8px; }
 .shell { width: min(100%, 1440px); margin-inline: auto; padding: 16px 12px 40px; }
-.masthead { border-bottom: 1px solid var(--border); padding: 8px 0 18px; }
-h1 { margin: 0; font-size: clamp(1.7rem, 4vw, 2.35rem); line-height: 1.2; letter-spacing: -.025em; }
+.masthead { border-bottom: 1px solid var(--border); padding: 0 0 6px; }
+.masthead-row { display: flex; align-items: baseline; flex-wrap: wrap; gap: 2px 20px; justify-content: space-between; }
+.wordmark { font-size: 1.125rem; letter-spacing: -.02em; font-weight: 750; color: var(--text); text-decoration: none; padding-block: 9px; }
+.wordmark:hover { text-decoration: underline; }
+h1 { margin: 0 0 16px; font-size: 2rem; line-height: 1.15; letter-spacing: -.035em; }
 h2 { margin: 0 0 12px; font-size: 1.45rem; line-height: 1.3; }
 h3 { margin: 0 0 8px; font-size: 1.08rem; line-height: 1.35; }
 p { margin: 8px 0; }
-.snapshot-asof { margin: 10px 0 0; color: var(--muted); }
+.snapshot-asof { margin: 0; color: var(--muted); font-size: .875rem; font-variant-numeric: tabular-nums; }
+.masthead .provenance { margin-top: 0; font-size: .875rem; }
+.masthead .provenance summary { color: var(--muted); }
 .provenance dl { display: grid; grid-template-columns: minmax(0, 10rem) minmax(0, 1fr); gap: 4px 12px; margin: 8px 0; }
 .provenance dl div { display: contents; }
 .provenance dt { color: var(--muted); }
 .provenance dd { margin: 0; overflow-wrap: anywhere; font: .9rem/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; }
-.workspace { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; }
+.workspace { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; }
 .nav { padding: 12px 0; border-bottom: 1px solid var(--border); }
-.nav ul { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 0; padding: 0; list-style: none; }
+.nav ul { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; margin: 0; padding: 0; list-style: none; }
 .nav li { min-width: 0; }
-.nav a { display: flex; align-items: center; min-width: 0; min-height: 44px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); font-weight: 600; text-decoration: none; overflow-wrap: anywhere; }
+.nav a { display: flex; align-items: center; min-width: 0; min-height: 44px; padding: 6px 7px; border-radius: 6px; color: var(--text); font-size: .875rem; font-weight: 620; text-decoration: none; overflow-wrap: anywhere; }
 .nav a:hover { background: var(--surface-muted); }
-.nav a[aria-current='page'] { border-color: var(--primary); background: var(--primary); color: #fff; }
+.nav a[aria-current='page'] { background: var(--surface-muted); color: var(--primary); font-weight: 750; box-shadow: inset 0 -2px var(--primary); }
 .view { padding: 26px 0 10px; scroll-margin-top: 12px; }
-main { min-width: 0; padding-top: 22px; }
+main { min-width: 0; padding-top: 12px; }
 .intro { max-width: 72ch; color: var(--muted); margin: 0 0 16px; }
 .metrics { display: grid; grid-template-columns: 1fr; gap: 12px; }
 .metric, .panel, .source-card, .application-card, .run-card, .cohort {
-  border: 1px solid var(--border); border-radius: 12px; background: var(--surface);
+  border: 1px solid var(--border); border-radius: 8px; background: var(--surface);
 }
-.metric { padding: 16px; min-height: 110px; }
+.metric { padding: 14px; }
 .metric-label { display: block; font-size: .9rem; color: var(--muted); font-weight: 600; }
 .metric-value { display: block; margin-top: 4px; font-size: 1.45rem; line-height: 1.35; font-variant-numeric: tabular-nums; font-weight: 700; overflow-wrap: anywhere; }
 .panel { margin-top: 16px; padding: 16px; }
+.panel > .intro, .panel > .meta { max-width: 70ch; }
 .source-list { display: grid; gap: 10px; }
 .source-card { padding: 12px; min-width: 0; }
 .source-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px; }
@@ -674,20 +681,21 @@ main { min-width: 0; padding-top: 22px; }
 .chart text { fill: currentColor; font: 15px system-ui, sans-serif; }
 .chart .flow { fill: none; stroke-linecap: round; opacity: .42; }
 .chart .node { fill: var(--surface); stroke: var(--border); stroke-width: 1.5; }
-.bar-chart { min-width: 0; overflow: hidden; }
-.chart-bars { display: grid; gap: 4px; }
+.bar-chart { min-width: 0; }
+.chart-bars { display: grid; grid-template-columns: repeat(var(--mobile-bins), minmax(0, 1fr)); gap: 12px 4px; margin-top: 16px; }
 .trend-chart { display: block; width: 100%; height: auto; margin-top: 12px; color: var(--text); }
 .trend-chart text { fill: currentColor; font: 12px system-ui, sans-serif; }
-.trend-chart polyline { fill: none; stroke: #1d4ed8; stroke-width: 3; }
-.trend-chart circle { fill: #1d4ed8; stroke: var(--surface); stroke-width: 2; }
-.trend-chart a:focus circle { stroke: #111827; stroke-width: 4; }
-.chart-row { display: grid; grid-template-columns: minmax(7.5rem, 34%) minmax(0, 1fr); align-items: center; gap: 8px; }
-.chart-label { font-size: .88rem; line-height: 1.3; white-space: nowrap; font-variant-numeric: tabular-nums; }
-.chart-track { position: relative; display: block; min-width: 0; min-height: 28px; overflow: hidden; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-muted); text-decoration: none; }
-.chart-track:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
-.chart-fill { position: absolute; inset: 0 auto 0 0; min-width: 0; background: #2563eb; }
-.chart-fill.partial { background: repeating-linear-gradient(135deg, #b45309, #b45309 6px, #fcd34d 6px, #fcd34d 10px); }
-.chart-count { position: relative; z-index: 1; display: flex; width: max-content; min-height: 26px; align-items: center; margin: 2px; padding: 2px 8px; border-radius: 4px; background: var(--surface); color: var(--text); font-weight: 700; font-variant-numeric: tabular-nums; }
+.trend-chart polyline { fill: none; stroke: var(--plot); stroke-width: 3; }
+.trend-chart circle { fill: var(--plot); stroke: var(--surface); stroke-width: 2; }
+.trend-chart a:focus circle { stroke: var(--focus); stroke-width: 4; }
+.chart-track { display: grid; grid-template-rows: 1.35rem 3rem auto; gap: 3px; min-width: 0; text-align: center; color: var(--text); text-decoration: none; border-radius: 4px; }
+a.chart-track:hover { background: var(--surface-muted); }
+.chart-count { align-self: center; font: 700 .75rem/1.15 system-ui, sans-serif; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.chart-column { display: flex; min-width: 0; align-items: end; justify-content: center; border-bottom: 1px solid var(--border); }
+.chart-fill { width: min(64%, 2rem); height: var(--bar-height); background: var(--plot); border-radius: 3px 3px 0 0; }
+.chart-fill.partial { background: repeating-linear-gradient(135deg, var(--plot) 0 3px, var(--surface-muted) 3px 5px); }
+.chart-label { font-size: .75rem; line-height: 1.25; font-variant-numeric: tabular-nums; }
+.chart-label span { display: block; }
 .industry-bar { display: block; height: 10px; margin-top: 4px; border-radius: 5px; background: var(--surface-muted); }
 .industry-bar span { display: block; height: 100%; border-radius: inherit; background: var(--primary); }
 .dimension-list .industry-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 4px 10px; }
@@ -695,10 +703,14 @@ main { min-width: 0; padding-top: 22px; }
 .chart-data { margin-top: 12px; }
 .chart-data table { font-size: .92rem; }
 .chart-grid { display: grid; grid-template-columns: minmax(0, 1fr); align-items: start; gap: 12px; }
+.chart-grid > .panel { margin-top: 0; }
+.section-title { margin: 26px 0 10px; }
 .range-form { display: flex; flex-wrap: wrap; align-items: end; gap: 10px; margin: 12px 0 18px; }
 .range-form label { display: grid; gap: 4px; font-weight: 600; }
 .range-form select, .range-form input, .range-form button { min-height: 44px; max-width: 100%; padding: 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--text); font: inherit; }
-.range-form button { cursor: pointer; }
+.range-form input { width: 100%; min-width: 0; }
+.range-form button, .explorer-filters button { background: var(--primary); border-color: var(--primary); color: white; cursor: pointer; font-weight: 650; padding-inline: 14px; }
+.range-form button:hover, .explorer-filters button:hover { background: var(--text); }
 .dimension-list { display: grid; gap: 6px; margin: 8px 0 0; padding: 0; list-style: none; }
 .dimension-list li { display: flex; justify-content: space-between; gap: 12px; padding: 7px 0; border-bottom: 1px solid var(--border); }
 .health-link { display: inline-flex; min-height: 44px; align-items: center; }
@@ -708,6 +720,12 @@ th, td { padding: 9px 10px; border-bottom: 1px solid var(--border); text-align: 
 th { font-size: .92rem; }
 td { overflow-wrap: anywhere; }
 caption { padding: 0 0 8px; text-align: left; font-weight: 700; }
+.stage-table { max-width: 34rem; }
+.stage-table th, .stage-table td { padding-inline: 6px; }
+.stage-table .numeric { text-align: right; white-space: nowrap; }
+.stage-table .share-plot { width: clamp(2.5rem, 18vw, 9rem); padding-inline: 6px; vertical-align: middle; }
+.share-track { display: block; height: .375rem; border-radius: 3px; background: var(--surface-muted); }
+.share-track span { display: block; width: var(--stage-share); height: 100%; border-radius: inherit; background: var(--plot); }
 .cohorts, .quality-grid { display: grid; grid-template-columns: 1fr; gap: 12px; }
 .cohort { padding: 16px; min-width: 0; }
 .cohort h3 { font-size: 1.15rem; }
@@ -728,15 +746,35 @@ footer { margin-top: 32px; padding-top: 14px; border-top: 1px solid var(--border
   .cohorts, .quality-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .chart-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
+@container (min-width: 26rem) {
+  .chart-bars { grid-template-columns: repeat(var(--bins), minmax(0, 1fr)); }
+  .chart-track { grid-template-rows: 1.35rem 5rem auto; }
+}
+@container (max-width: 25.999rem) {
+  .trend-chart text { font-size: 27px; }
+  .trend-chart .dense-label { display: none; }
+}
+.bar-chart { container-type: inline-size; }
 @media (max-width: 47.999rem) {
   .explorer-table { display: none; }
   .phone-cards { display: grid; gap: 10px; }
+  .range-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .range-form label:first-child { grid-column: 1 / -1; }
+  .range-form button { justify-self: start; }
+}
+@media (max-width: 23rem) {
+  .nav a { font-size: .8125rem; padding-inline: 4px; }
+}
+@media (max-width: 19rem) {
+  .nav ul { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (min-width: 64rem) {
   .shell { padding-inline: 32px; }
-  .workspace { grid-template-columns: 220px minmax(0, 1fr); gap: 28px; align-items: start; }
+  .workspace { grid-template-columns: 168px minmax(0, 1fr); gap: 28px; align-items: start; }
   .nav { position: sticky; top: 16px; padding: 24px 0; border: 0; }
   .nav ul { grid-template-columns: minmax(0, 1fr); }
+  .nav a { padding-inline: 12px; }
+  .nav a[aria-current='page'] { box-shadow: inset 2px 0 var(--primary); }
   main { padding-top: 24px; }
   .board { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
@@ -1404,10 +1442,9 @@ def _chart_interval_label(item):
 
 def _short_interval_label(item):
     """Compact visible label such as '31 Aug – 6 Sep'; full ISO dates stay in aria/title."""
-    import datetime
     try:
-        start = datetime.date.fromisoformat(item.get("start") or "")
-        end = datetime.date.fromisoformat(item.get("end") or "")
+        start = dt.date.fromisoformat(item.get("start") or "")
+        end = dt.date.fromisoformat(item.get("end") or "")
     except ValueError:
         return _chart_interval_label(item)
     def fmt(day):
@@ -1415,6 +1452,17 @@ def _short_interval_label(item):
     if end == start:
         return fmt(start)
     return "{} \u2013 {}".format(fmt(start), fmt(end))
+
+
+def _column_label(item, granularity):
+    """Use the bin start on the axis and retain the precise interval in the link."""
+    try:
+        start = dt.date.fromisoformat(item["start"])
+    except (KeyError, TypeError, ValueError):
+        return "<span>Unknown date</span>"
+    if granularity == "month":
+        return "<span>{}</span><span>{}</span>".format(_e(start.strftime("%b")), start.year)
+    return "<span>{}</span><span>{}</span>".format(start.day, _e(start.strftime("%b")))
 
 
 def _stage_label(stage):
@@ -1432,10 +1480,10 @@ def _render_metric_chart(report, snapshot, metric, title, state=None, *, limit=N
     selected_population = _as_dict(report.get("applications")).get("selected_count", 0)
     observed_total = _as_dict(report.get("observed_totals")).get(metric, 0)
     complete_total = _as_dict(report.get("totals")).get(metric)
-    out = ["<section class='panel bar-chart' aria-labelledby='chart-{}'>".format(_e(metric)),
-           "<h3 id='chart-{}'>{}</h3>".format(_e(metric), _e(title)),
-           "<p class='meta'>Date basis: {} · population: canonical applications with dated cached evidence · timezone: Asia/Singapore.</p>".format(
-               _e(report.get("period", {}).get("granularity", "unknown")))]
+    granularity = report.get("period", {}).get("granularity", "unknown")
+    chart_id = "chart-{}{}".format(metric, "-trend" if trend else "")
+    out = ["<section class='panel bar-chart' aria-labelledby='{}'>".format(_e(chart_id)),
+           "<h2 id='{}'>{}</h2>".format(_e(chart_id), _e(title))]
     if status == "unavailable":
         out.append("<p class='empty' role='status'>This metric is unavailable in the cached snapshot; no zero is inferred.</p></section>")
         return "".join(out)
@@ -1457,7 +1505,8 @@ def _render_metric_chart(report, snapshot, metric, title, state=None, *, limit=N
     if not items:
         out.append("<p class='empty' role='status'>No dated observations are available for this chart.</p></section>")
         return "".join(out)
-    values = [item.get("observed_values", {}).get(metric, 0) for item in items]
+    plot_items = items if trend else items[-12:]
+    values = [item.get("observed_values", {}).get(metric, 0) for item in plot_items]
     max_value = max([value for value in values if isinstance(value, int)] + [1])
     if trend:
         plot = []
@@ -1470,19 +1519,28 @@ def _render_metric_chart(report, snapshot, metric, title, state=None, *, limit=N
         points = " ".join("{},{}".format(x, y) for x, y, _item, _value in plot)
         out.append("<svg class='trend-chart' role='img' aria-label='{} line chart; exact values and links are in the data table' viewBox='0 0 760 190' xmlns='http://www.w3.org/2000/svg'><polyline points='{}'/>".format(
             _e(title), points))
-        for x, y, item, value in plot:
+        for index, (x, y, item, value) in enumerate(plot):
             ids = dashboard_charts.metric_application_ids(report, metric, item.get("start"), item.get("end"))
             href = explorer.query_href(state, metric=metric, **{"from": item.get("start"), "to": item.get("end"), "page": 1, "company": None}) if ids else None
             month = item.get("key", "")[:7]
+            try:
+                month = dt.date.fromisoformat(month + "-01").strftime("%b %y")
+            except ValueError:
+                pass
             count = str(value) if status in ("complete", "stale") else "≥ {}".format(value)
-            point = "<circle cx='{}' cy='{}' r='6'/><text x='{}' y='{}'>{}</text><text x='{}' y='176'>{}</text>".format(
-                x, y, x + 8, max(15, y - 8), _e(count), x - 18, _e(month))
+            dense = " class='dense-label'" if len(plot) > 5 and index not in (0, len(plot) - 1) and index % 3 else ""
+            point = ("<circle cx='{}' cy='{}' r='6'/><text{} x='{}' y='{}' text-anchor='middle'>{}</text>"
+                     "<text{} x='{}' y='176' text-anchor='middle'>{}</text>").format(
+                         x, y, dense, x, max(26, y - 13), _e(count), dense, x, _e(month))
             out.append("<a href='{}' tabindex='0' aria-label='{}: {} applications; open matching applications'>{}</a>".format(
                 _e(href), _e(_chart_interval_label(item)), _e(len(ids)), point) if href else point)
         out.append("</svg>")
     else:
-        out.append("<div class='chart-bars' role='list' aria-label='{}'>".format(_e(title)))
-        for item in items:
+        if len(items) > len(plot_items):
+            out.append("<p class='meta'>Latest 12 intervals shown. Chart data covers the full range.</p>")
+        out.append("<div class='chart-bars' role='list' aria-label='{}' style='--bins:{};--mobile-bins:{}'>".format(
+            _e(title), len(plot_items), min(6, len(plot_items))))
+        for item in plot_items:
             value = item.get("observed_values", {}).get(metric, 0)
             value = value if isinstance(value, int) and not isinstance(value, bool) else 0
             label = _chart_interval_label(item)
@@ -1490,26 +1548,33 @@ def _render_metric_chart(report, snapshot, metric, title, state=None, *, limit=N
                 report, metric, item.get("start"), item.get("end")) if item.get("start") and item.get("end") else []
             href = explorer.query_href(state, metric=metric, **{"from": item.get("start"),
                  "to": item.get("end"), "page": 1, "company": None}) if app_ids else None
-            width_value = max(2, int(value / max_value * 100)) if value else 0
+            height = max(3, int(value / max_value * 100)) if value else 0
             count_label = str(value) if status in ("complete", "stale") else "≥ {} observed".format(value)
-            link_open = "<a class='chart-track' aria-label='{}: {}, open matching applications' href='{}'>".format(
-                _e(label), _e(count_label), _e(href)) if href else "<div class='chart-track'>"
+            description = "{}: {}".format(label, count_label)
+            link_open = ("<a class='chart-track' aria-label='{}, open matching applications' href='{}'>".format(
+                _e(description), _e(href)) if href else
+                "<div class='chart-track' role='img' aria-label='{}'>".format(_e(description)))
             link_close = "</a>" if href else "</div>"
-            out.append("<div class='chart-row' role='listitem'><span class='chart-label' title='{}'>{}</span>{}<span class='chart-fill{}' style='width:{}%'></span><span class='chart-count'>{}</span>{}</div>".format(
-                _e(label), _e(_short_interval_label(item)), link_open, " partial" if status in ("partial", "unknown") else "",
-                width_value, _e(count_label), link_close))
+            count = str(value) if status in ("complete", "stale") else "≥{}".format(value)
+            out.append("<div role='listitem' title='{}'>{}<span class='chart-count' aria-hidden='true'>{}</span>"
+                       "<span class='chart-column' aria-hidden='true'><span class='chart-fill{}' style='--bar-height:{}%'></span></span>"
+                       "<span class='chart-label' aria-hidden='true'>{}</span>{}</div>".format(
+                           _e(description), link_open, _e(count),
+                           " partial" if status in ("partial", "unknown") else "", height,
+                           _column_label(item, granularity), link_close))
         out.append("</div>")
-    out.append("<details class='chart-data'><summary>View chart data and keyboard links</summary><div class='data-table-wrap'><table><caption>{}</caption><thead><tr><th scope='col'>Interval</th><th scope='col'>Observed</th><th scope='col'>Coverage</th><th scope='col'>Applications</th></tr></thead><tbody>".format(_e(title)))
+    out.append("<details class='chart-data'><summary>Chart data</summary><div class='data-table-wrap'><table><caption>{} · Singapore dates</caption><thead><tr><th scope='col'>Interval</th><th scope='col'>Observed</th><th scope='col'>Coverage</th><th scope='col'>Applications</th></tr></thead><tbody>".format(_e(title)))
     for item in items:
         value = item.get("observed_values", {}).get(metric, 0)
         ids = dashboard_charts.metric_application_ids(report, metric, item.get("start"), item.get("end"))
         link = explorer.query_href(state, metric=metric, **{"from": item.get("start"),
              "to": item.get("end"), "page": 1, "company": None}) if ids else None
-        label = _chart_interval_label(item)
+        label = _short_interval_label(item)
         app_count = len(ids)
         app_html = "<a href='{}'>{} applications</a>".format(_e(link), app_count) if link else "{} applications".format(app_count)
-        out.append("<tr><th scope='row'>{}</th><td>{}{}</td><td>{}</td><td>{}</td></tr>".format(
-            _e(label), "≥ " if status not in ("complete", "stale") else "", _e(value), _e(status), app_html))
+        out.append("<tr><th scope='row' title='{}'>{}</th><td>{}{}</td><td>{}</td><td>{}</td></tr>".format(
+            _e(_chart_interval_label(item)), _e(label), "≥ " if status not in ("complete", "stale") else "",
+            _e(value), _e(status), app_html))
     out.append("</tbody></table></div></details></section>")
     return "".join(out)
 
@@ -1830,18 +1895,19 @@ def _render_analytics(data, snapshot, state):
            _render_metric_chart(view["monthly"], snapshot, "confirmed_submissions",
                                 "Monthly confirmed submission trend · last 12 available months", state,
                                 limit=12, trend=True),
-           "<section class='panel'><h3>Current stages</h3><p class='meta'>Population: {} canonical applications · denominator includes current stages only; this is not a transition funnel.</p><div class='data-table-wrap'><table><caption>Current application stages</caption><thead><tr><th scope='col'>Stage</th><th scope='col'>Applications</th><th scope='col'>Share</th></tr></thead><tbody>".format(
+           "<section class='panel'><h2>Current stages</h2><p class='meta'>{} canonical applications, across all dates.</p><div class='data-table-wrap'><table class='stage-table' aria-label='Current application stages'><thead><tr><th scope='col'>Stage</th><th scope='col' class='numeric'>Count</th><th scope='col' colspan='2' class='numeric'>Share</th></tr></thead><tbody>".format(
                _e(_count(population.get("canonical_count"))))]
     stage_counts = report.get("current_stage_counts", {})
     stage_total = sum(value for value in stage_counts.values() if isinstance(value, int))
     if stage_counts:
-        for stage, count in stage_counts.items():
-            share = "{:.1f}%".format(count / stage_total * 100) if stage_total else "Unavailable"
-            out.append("<tr><th scope='row'>{}</th><td>{}</td><td>{}</td></tr>".format(
-                _e(_stage_label(stage)), _e(count), _e(share)))
+        for stage, count in sorted(stage_counts.items(), key=lambda item: (-item[1], item[0])):
+            share = count / stage_total * 100 if stage_total else 0
+            out.append("<tr><th scope='row'>{}</th><td class='numeric'>{}</td>"
+                       "<td class='share-plot' aria-hidden='true'><span class='share-track'><span style='--stage-share:{:.1f}%'></span></span></td>"
+                       "<td class='numeric'>{:.1f}%</td></tr>".format(_e(_stage_label(stage)), _e(count), share, share))
     else:
-        out.append("<tr><td colspan='3'>No canonical applications are available.</td></tr>")
-    out.append("</tbody></table></div></section><h3>Activity in selected range</h3><div class='chart-grid'>")
+        out.append("<tr><td colspan='4'>No canonical applications are available.</td></tr>")
+    out.append("</tbody></table></div></section><h2 class='section-title'>Activity in selected range</h2><div class='chart-grid'>")
     for metric, label in (("confirmed_submissions", "Confirmed submissions"),
                           ("recorded_claims", "Recorded submission claims"),
                           ("initial_tailoring", "Initial tailoring activity days"),

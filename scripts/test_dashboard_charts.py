@@ -24,6 +24,9 @@ def test_metric_bins_use_singapore_dates_canonical_ids_and_render_exact_rows():
     analytics = dashboard.render_snapshot_html(
         snapshot, page="analytics", query_state=application_explorer.parse_query("period=alltime"))
     assert "<polyline" in analytics
+    assert analytics.count("id='chart-confirmed_submissions'") == 1
+    assert analytics.count("id='chart-confirmed_submissions-trend'") == 1
+    assert "--bar-height:100%" in analytics
 
 
 def test_company_dimensions_count_independent_denominators_and_filter_by_key():
