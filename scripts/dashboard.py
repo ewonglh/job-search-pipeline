@@ -582,11 +582,19 @@ SOURCE_COLORS = ("#2563eb", "#c2410c", "#0f766e", "#7c3aed", "#b42318",
 
 DASHBOARD_CSS = r"""
 :root {
-  color-scheme: light;
-  --bg: #f5f6f2; --surface: #fff; --surface-muted: #e7eeeb;
-  --text: #1d2a25; --muted: #4b5c53; --border: #cdd8d1;
-  --primary: #175c50; --success: #176145; --warning: #854410;
-  --danger: #a32623; --focus: #0b6e5b; --plot: #247d6b;
+  color-scheme: light dark;
+  --bg: #f4f6fa; --surface: #fff; --surface-muted: #ebf0fb;
+  --text: #182433; --muted: #4c6178; --border: #d3dce7;
+  --primary: #2056a3; --on-primary: #fff; --success: #176145; --warning: #854410;
+  --danger: #a32623; --focus: #215eb6; --plot: #377ac4;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #101721; --surface: #172331; --surface-muted: #22334a;
+    --text: #eaf0f8; --muted: #aabbd0; --border: #394a60;
+    --primary: #9fc7ff; --on-primary: #101b2a; --success: #83d7b1; --warning: #f1c27a;
+    --danger: #ffadac; --focus: #a2cdff; --plot: #75b6fc;
+  }
 }
 * { box-sizing: border-box; }
 html { scroll-behavior: auto; }
@@ -602,6 +610,7 @@ a:focus-visible, summary:focus-visible, button:focus-visible, input:focus-visibl
 }
 .skip { position: absolute; left: -9999px; top: 8px; z-index: 1; padding: 10px 14px; background: var(--surface); }
 .skip:focus { left: 8px; }
+.ui-icon { flex: none; display: inline-block; vertical-align: middle; }
 .shell { width: min(100%, 1440px); margin-inline: auto; padding: 16px 12px 40px; }
 .masthead { border-bottom: 1px solid var(--border); padding: 0 0 6px; }
 .masthead-row { display: flex; align-items: baseline; flex-wrap: wrap; gap: 2px 20px; justify-content: space-between; }
@@ -612,7 +621,10 @@ h2 { margin: 0 0 12px; font-size: 1.45rem; line-height: 1.3; }
 h3 { margin: 0 0 8px; font-size: 1.08rem; line-height: 1.35; }
 p { margin: 8px 0; }
 .masthead .provenance { margin-top: 0; font-size: .875rem; }
-.masthead .provenance summary { color: var(--muted); }
+.masthead .provenance summary { display: flex; align-items: center; gap: 5px; color: var(--muted); }
+.masthead .provenance summary::-webkit-details-marker { display: none; }
+.masthead .provenance summary .ui-icon { width: 16px; height: 16px; }
+.masthead .provenance summary:hover { color: var(--primary); }
 .masthead .provenance[open] { flex-basis: 100%; }
 .provenance dl { display: grid; grid-template-columns: minmax(0, 10rem) minmax(0, 1fr); gap: 4px 12px; margin: 8px 0; }
 .provenance dl div { display: contents; }
@@ -622,7 +634,7 @@ p { margin: 8px 0; }
 .nav { padding: 12px 0; border-bottom: 1px solid var(--border); }
 .nav ul { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; margin: 0; padding: 0; list-style: none; }
 .nav li { min-width: 0; }
-.nav a { display: flex; align-items: center; min-width: 0; min-height: 44px; padding: 6px 7px; border-radius: 6px; color: var(--text); font-size: .875rem; font-weight: 620; text-decoration: none; overflow-wrap: anywhere; }
+.nav a { display: flex; align-items: center; gap: 8px; min-width: 0; min-height: 44px; padding: 6px 7px; border-radius: 6px; color: var(--text); font-size: .875rem; font-weight: 620; text-decoration: none; overflow-wrap: anywhere; }
 .nav a:hover { background: var(--surface-muted); }
 .nav a[aria-current='page'] { background: var(--surface-muted); color: var(--primary); font-weight: 750; box-shadow: inset 0 -2px var(--primary); }
 .view { padding: 26px 0 10px; scroll-margin-top: 12px; }
@@ -635,9 +647,10 @@ main { min-width: 0; padding-top: 12px; }
 .metric { padding: 14px; }
 .metric-label { display: block; font-size: .9rem; color: var(--muted); font-weight: 600; }
 .metric-value { display: block; margin-top: 4px; font-size: 1.45rem; line-height: 1.35; font-variant-numeric: tabular-nums; font-weight: 700; overflow-wrap: anywhere; }
-.today-strip { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 0 0 16px; }
-.today-strip div { min-width: 0; padding: 8px 0; border-bottom: 1px solid var(--border); }
+.today-strip { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px; margin: 0 0 16px; background: var(--border); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.today-strip div { min-width: 0; padding: 10px 12px; background: var(--surface); }
 .today-strip dd { margin: 3px 0 0; color: var(--text); font-weight: 750; font-variant-numeric: tabular-nums; }
+.today-strip .today-primary dd { font-size: 1.2rem; }
 .today-strip small { color: var(--muted); font-weight: 500; }
 .panel { margin-top: 16px; padding: 16px; }
 .panel > .intro, .panel > .meta { max-width: 70ch; }
@@ -666,7 +679,7 @@ main { min-width: 0; padding-top: 12px; }
 .application-controls label { min-width: 0; max-width: 100%; }
 .application-controls .explorer-filters input[type='search'] { width: min(20rem, 75vw); }
 .explorer-views a, .pagination a, .load-more, .detail-link, .explorer-filters button { min-height: 44px; display: inline-flex; align-items: center; padding: 8px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
-.explorer-views a[aria-current='page'] { background: var(--primary); color: white; }
+.explorer-views a[aria-current='page'] { background: var(--primary); color: var(--on-primary); }
 .explorer-filters label { display: grid; gap: 4px; font-weight: 600; }
 .explorer-filters input, .explorer-filters select { min-height: 44px; max-width: 100%; padding: 8px; border: 1px solid var(--border); border-radius: 6px; font: inherit; }
 .explorer-filters input[type='search'] { width: min(28rem, 80vw); }
@@ -720,8 +733,8 @@ a.chart-track:hover { background: var(--surface-muted); }
 .range-form label { display: grid; gap: 4px; font-weight: 600; }
 .range-form select, .range-form input, .range-form button { min-height: 44px; max-width: 100%; padding: 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--text); font: inherit; }
 .range-form input { width: 100%; min-width: 0; }
-.range-form button, .explorer-filters button { background: var(--primary); border-color: var(--primary); color: white; cursor: pointer; font-weight: 650; padding-inline: 14px; }
-.range-form button:hover, .explorer-filters button:hover { background: var(--text); }
+.range-form button, .explorer-filters button { background: var(--primary); border-color: var(--primary); color: var(--on-primary); cursor: pointer; font-weight: 650; padding-inline: 14px; }
+.range-form button:hover, .explorer-filters button:hover { filter: brightness(.88); }
 .range-options { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin-bottom: 10px; }
 .range-options a { display: inline-flex; min-height: 44px; align-items: center; padding: 4px 8px; border-radius: 5px; }
 .range-options a[aria-current='true'] { background: var(--surface-muted); font-weight: 700; }
@@ -776,6 +789,8 @@ footer { margin-top: 32px; padding-top: 14px; border-top: 1px solid var(--border
   .shell { padding-top: 6px; }
   .masthead-row { align-items: center; }
   .nav { padding-block: 4px; }
+  .nav a { flex-direction: column; justify-content: center; gap: 3px; padding-inline: 3px; text-align: center; }
+  .nav .ui-icon { width: 16px; height: 16px; }
   main { padding-top: 4px; }
   .phone-cards .application-card { padding: 8px 12px; }
   .phone-cards .card-title a { min-height: 44px; }
@@ -1419,13 +1434,13 @@ def _render_today(report, confirmed_today=None, snapshot=None):
         ("Outcome unknown", "outcome_unknown"), ("Stalled", "stale_in_progress")) if attempts.get(key)]
     attention_text = " · ".join("{} {}".format(count, label.lower()) for label, count in attention)
     out = ["<dl class='today-strip'>",
-           "<div><dt class='metric-label'>Daily submission goal</dt><dd>{} / {}{}</dd></div>".format(
+           "<div class='today-primary'><dt class='metric-label' title='Daily submission goal'>Submitted today</dt><dd>{} / {}{}</dd></div>".format(
                _e(_count(confirmed)), _e(_count(goal.get("target"))), freshness),
-           "<div><dt class='metric-label'>Ready buffer</dt><dd>{} / {}</dd></div>".format(
+           "<div><dt class='metric-label'>Ready to send</dt><dd>{} / {}</dd></div>".format(
                _e(_count(buffer.get("queued"))), _e(_count(buffer.get("target")))),
-           "<div><dt class='metric-label'>Callback follow-up</dt><dd>Unknown</dd></div>",
-           "<div><dt class='metric-label'><a href='/jobs/system-health/'>Queue attention</a></dt>"
-           "<dd>{}</dd></div></dl>".format(_e(attention_text or "Review source health"))]
+           "<div><dt class='metric-label'>Follow-ups</dt><dd>Unknown</dd></div>",
+           "<div><dt class='metric-label'><a href='/jobs/system-health/'>Queue health</a></dt>"
+           "<dd>{}</dd></div></dl>".format(_e(attention_text or "View status"))]
     by_code = blockers.get("by_code")
     if by_code:
         out.append("<section><h2>Blockers</h2><ul class='reason-list'>")
@@ -1512,7 +1527,7 @@ def _render_metric_chart(report, snapshot, metric, title, state=None, *, limit=N
     out = ["<section class='panel bar-chart' aria-labelledby='{}'>".format(_e(chart_id)),
            "<h2 id='{}'>{}</h2>".format(_e(chart_id), _e(title))]
     if status == "unavailable":
-        out.append("<p class='empty' role='status'>This metric is unavailable in the cached snapshot; no zero is inferred.</p></section>")
+        out.append("<p class='empty' role='status'>This metric is unavailable; no zero is inferred.</p></section>")
         return "".join(out)
     if selected_population == 0 and not (report.get("period", {}).get("name") == "alltime"
                                          and snapshot.get("facts", {}).get("applications")):
@@ -1521,17 +1536,17 @@ def _render_metric_chart(report, snapshot, metric, title, state=None, *, limit=N
     if status in ("partial", "unknown"):
         if observed_total:
             label = "Partial" if status == "partial" else "Unknown"
-            out.append("<p class='caveat' role='status'>{} coverage: values below are observed counts, not complete totals.</p>".format(label))
+            out.append("<p class='caveat' role='status'>{} coverage · observed counts only.</p>".format(label))
         else:
-            out.append("<p class='empty' role='status'>No observations appear in the cache; {} coverage means this is not a confirmed zero.</p></section>".format(status))
+            out.append("<p class='empty' role='status'>{} coverage · no observations (not a confirmed zero).</p></section>".format(status.capitalize()))
             return "".join(out)
     elif status == "stale":
-        out.append("<p class='caveat' role='status'>The relevant cached source is stale; counts are last observed values.</p>")
+        out.append("<p class='caveat' role='status'>Stale data · last observed values.</p>")
         if not observed_total:
             out.append("</section>")
             return "".join(out)
     elif complete_total == 0:
-        out.append("<p class='meta' role='status'>Complete coverage · genuine zero observations in this period.</p>")
+        out.append("<p class='meta' role='status'>Complete coverage · genuine zero observations.</p>")
     if not items:
         out.append("<p class='empty' role='status'>No dated observations are available for this chart.</p></section>")
         return "".join(out)
@@ -1832,7 +1847,7 @@ def _render_quality(quality):
 
 
 def _render_funnel(report):
-    out = ["<p class='intro'>Outcome types are independent observations, not a sequence of workflow stages. Only mature cohorts are included; missing evidence is not counted as a confirmed non-response.</p><div class='cohorts'>"]
+    out = ["<p class='intro'>Observed outcomes can overlap.</p><div class='cohorts'>"]
     for cohort in report.get("mature_cohorts", []):
         window = cohort.get("window_days", "?")
         coverage = _as_dict(cohort.get("coverage"))
@@ -1866,10 +1881,10 @@ def _render_funnel(report):
                 _e(_count(ledger.get("complete"))),
                 _e(_display(ledger.get("observed_at"), "unknown", 48)),
                 _e(_display(ledger.get("last_scan_at"), "unknown", 48))))
-        out.append("</details><p class='caveat'>{}</p></article>".format(
+        out.append("<p class='caveat'>{}</p></details></article>".format(
             _e(cohort.get("coverage_caveat", "Coverage unknown."))))
     out.append("</div>")
-    out.append("<section class='panel'><h3>Data quality notes</h3><p>Identity conflicts: {}</p><p>{}</p><p>{}</p></section>".format(
+    out.append("<details><summary>Data quality notes</summary><p>Identity conflicts: {}</p><p>{}</p><p>{}</p></details>".format(
         _e(_count(_as_dict(report.get("identity_diagnostics")).get("identity_conflict_count"))),
         _e(report.get("human_callback_rule", "Human callback origin is not established.")),
         _e(report.get("grouping_caveat", "Grouped rates are descriptive only."))))
