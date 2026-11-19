@@ -8,9 +8,11 @@ partial coverage remains visibly unknown.
 """
 from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta, timezone
+import re
 
 import company_catalog
 import report_snapshot
+import summary
 
 
 TZ_NAME = "Asia/Singapore"
@@ -288,8 +290,12 @@ def build_report(snapshot, period="last12weeks", *, start=None, end=None,
     stage_counts = Counter()
     for app in apps.values():
         row = app.get("row") if isinstance(app.get("row"), dict) else {}
-        stage = row.get("stage") or row.get("status") or "unknown"
-        stage_counts[str(stage)] += 1
+        stage = summary.row_stage(row)
+        if stage is None:
+            # Operational statuses such as failed and skipped remain visible.
+            raw_status = summary.norm_text(row.get("stage")) or summary.norm_text(row.get("status"))
+            stage = re.sub(r"[\s_-]+", "_", raw_status).strip("_") or "unknown"
+        stage_counts[stage.casefold()] += 1
 
     if catalog is None:
         catalog = facts.get("company_catalog")
