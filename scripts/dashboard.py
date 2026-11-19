@@ -1934,7 +1934,8 @@ def _render_analytics(data, snapshot, state):
             share = count / stage_total * 100 if stage_total else 0
             out.append("<tr><th scope='row'>{}</th><td class='numeric'>{}</td>"
                        "<td class='share-plot' aria-hidden='true'><span class='share-track'><span style='--stage-share:{:.1f}%'></span></span></td>"
-                       "<td class='numeric'>{:.1f}%</td></tr>".format(_e(_stage_label(stage)), _e(count), share, share))
+                       "<td class='numeric'>{:.1f}%</td></tr>".format(
+                           _e(s.canonical_stage(stage) or _stage_label(stage)), _e(count), share, share))
     else:
         out.append("<tr><td colspan='4'>No canonical applications are available.</td></tr>")
     out.append("</tbody></table></div></section></details>"

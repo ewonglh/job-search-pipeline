@@ -66,6 +66,24 @@ assert report["totals"]["retailoring"] == 2
 assert report["current_stage_counts"] == {"applied": 1, "tailored": 1}
 assert report["series"][1]["application_ids"]["confirmed_submissions"] == ["pr:1"]
 
+# Group tracker/queue spellings before counting, while retaining operational
+# statuses that are not part of the recruitment stage vocabulary.
+stage_snapshot = _snapshot()
+stage_snapshot["facts"]["applications"] = [
+    _app("pr:{}".format(index), "Fixture Co", [], status)
+    for index, status in enumerate(
+        ("Rejected", "rejected", "Applied", "submitted", "Failed", "failed",
+         "skipped", "outcome_unknown", "online_assessment"), 20)
+]
+stage_snapshot["facts"]["applications"][3]["row"]["stage"] = "unknown"
+stage_snapshot["facts"]["applications"][0]["row"].update(stage="Rejected", status="applied")
+stage_report = activity_analytics.build_report(stage_snapshot)
+assert stage_report["current_stage_counts"] == {
+    "applied": 2, "failed": 2, "oa": 1, "outcome_unknown": 1,
+    "rejected": 2, "skipped": 1,
+}
+assert sum(stage_report["current_stage_counts"].values()) == stage_report["applications"]["canonical_count"]
+
 # Singapore midnight changes the Monday weekly bin exactly at 16:00 UTC Sunday.
 edge = _snapshot()
 edge["facts"]["activities"] = [
