@@ -42,7 +42,7 @@ def make_remote(root, tracker, name="resume"):
     """Local synthetic origin plus a clone of it holding ``tracker`` on main."""
     origin = os.path.join(root, name + "-origin.git")
     clone = os.path.join(root, name)
-    subprocess.run(GIT + ["init", "--bare", "-q", origin], check=True)
+    subprocess.run(GIT + ["init", "--bare", "-q", "-b", "main", origin], check=True)
     subprocess.run(GIT + ["init", "-q", "-b", "main", clone], check=True)
     git(clone, "remote", "add", "origin", origin)
     publish_tracker(clone, tracker)
@@ -649,7 +649,7 @@ try:
     _git = ["git", "-c", "user.name=Test", "-c", "user.email=t@example.com",
             "-c", "commit.gpgsign=false"]
     import subprocess as _sp
-    _sp.run(_git + ["init", "--bare", "-q", _origin], check=True)
+    _sp.run(_git + ["init", "--bare", "-q", "-b", "main", _origin], check=True)
     _sp.run(_git + ["clone", "-q", _origin, _clone], check=True)
     with open(os.path.join(_clone, q.TRACKER_PATH), "w", encoding="utf-8") as fh:
         fh.write("# tracker\n")
