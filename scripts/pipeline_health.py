@@ -184,12 +184,14 @@ def build_report(snapshot, *, timezone_name, weekday_goal, weekend_goal,
     snapshot_ages = _age_summary(snapshot_backlog_rows,
                                  ("snapshot_prepared_at", "submitted_at"), reference, zone)
     sync_ages = _age_summary(sync_backlog_rows,
-                             ("tracker_sync_started_at", "tracker_sync_failed_at", "submitted_at"),
+                             ("tracker_sync_pending_at", "tracker_sync_started_at",
+                              "tracker_sync_failed_at", "submitted_at"),
                              reference, zone)
     active_attempts = [row for row in queue_rows if row.get("status") == "in_progress"]
     browser_owners, browser_released, browser_unknown = [], 0, 0
     for row in active_attempts:
-        released_at = _local_datetime(row.get("browser_released_at"), zone)
+        released_at = _local_datetime(
+            row.get("browser_owner_released_at") or row.get("browser_released_at"), zone)
         runner_id, session_ref = row.get("runner_id"), row.get("session_ref")
         if released_at:
             browser_released += 1

@@ -22,7 +22,6 @@ Usage:
 those rows share this lane's role filter, location filter and store dedupe.
 """
 import argparse
-import intake_reporting
 import html as html_mod
 import json
 import os
@@ -34,6 +33,9 @@ import urllib.error
 import urllib.request
 from datetime import date, datetime, timedelta
 from urllib.parse import urljoin, urlsplit
+
+import intake_reporting
+
 from application_identity import (
     enrich_posting, identity_evidence, normalize_posting_url, requisition_key, same_posting,
 )
@@ -411,13 +413,24 @@ def _collect_page(url, parser, kind, coverage, log):
         coverage.append(status)
     try:
         body = fetch(url)
+    except urllib.error.HTTPError as exc:
+        try:
+            body = exc.read()
+        except Exception:
+            body = b""
+        status["fetch"] = "failed"
+        if intake_reporting.is_challenge_response(body):
+            status["parse"] = "challenge"
+            log("discover: challenge_page " + status["source_id"])
+            return [], ["challenge_page"]
+        log("discover: source_unavailable " + status["source_id"])
+        return [], ["source_unavailable"]
     except Exception:
         status["fetch"] = "failed"
         log("discover: source_unavailable " + status["source_id"])
         return [], ["source_unavailable"]
     status["fetch"] = "ok"
-    if re.search(r"cf-chl-|challenge-platform|verify (?:that )?you are human|"
-                 r"just a moment|captcha|access denied|checking your browser", body, re.I):
+    if intake_reporting.is_challenge_response(body):
         status["parse"] = "challenge"
         log("discover: challenge_page " + status["source_id"])
         return [], ["challenge_page"]
@@ -493,13 +506,18 @@ def collect_boards(today, log=lambda *a: None, coverage=None):
                 row["_coverage_id"] = status["source_id"]
                 raw.append(row)
             log("board: %s %s processed=%s" % (status["source_id"], status["parse"], len(rows)))
+        elif label == "CHALLENGE":
+            status.update(fetch="failed", parse="challenge")
+            log("board-error: challenge_page " + status["source_id"])
+            errors.append("challenge_page")
+        elif label == "PARSE-FAILED":
+            status.update(fetch="ok", parse="failed")
+            log("board-error: parse_failed " + status["source_id"])
+            errors.append("parse_failed")
         else:
-            challenge = bool(re.search(r"captcha|challenge|access.denied|blocked", str(label) + " " + str(detail), re.I))
-            status.update(fetch="ok" if challenge else "failed",
-                          parse="challenge" if challenge else "not_attempted")
-            code = "challenge_page" if challenge else "source_unavailable"
-            log("board-error: " + code + " " + status["source_id"])
-            errors.append(code)
+            status.update(fetch="failed", parse="not_attempted")
+            log("board-error: source_unavailable " + status["source_id"])
+            errors.append("source_unavailable")
     return raw, errors
 
 
@@ -784,7 +802,7 @@ def main(argv=None):
     summary = {"outcome": "total_failure" if not successful else "partial_failure" if failed
                else "healthy" if filtered else "healthy_empty",
                "counts": {"processed": sum(row["processed"] for row in coverage),
-                          "accepted": len(filtered), "added": 0},
+                          "accepted": sum(row["accepted"] for row in coverage), "added": 0},
                "reasons": {code: errors.count(code) for code in set(errors)}, "sources": coverage}
     if not successful:
         _report_intake(summary, args.dry_run, log)

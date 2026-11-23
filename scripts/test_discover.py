@@ -4,11 +4,15 @@
 No network. Run: python3 test_discover.py
 """
 from datetime import date
+import io
+import json
 from pathlib import Path
 import tempfile
 from unittest import mock
 
 import discover as d
+import intake_reporting
+import probe_boards
 
 TODAY = date(2026, 10, 6)
 
@@ -333,11 +337,14 @@ import sys
 import types
 fake = types.ModuleType("probe_boards")
 fake.BOARDS = [{"name": "Good", "ats": "x"}, {"name": "Broken", "ats": "y"},
-               {"name": "Quiet", "ats": "z"}]
+               {"name": "Quiet", "ats": "z"}, {"name": "Challenged", "ats": "c"},
+               {"name": "Bad JSON", "ats": "p"}]
 fake.probe = lambda cfg: {
     "Good": ("PROBED", [board_rows[0]], "1 rows, 1 Singapore"),
     "Broken": ("BAD-TENANT", [], "HTTP 422 from api"),
     "Quiet": ("PROBED 0", [], "40 rows, 0 Singapore"),
+    "Challenged": ("CHALLENGE", [], "challenge response"),
+    "Bad JSON": ("PARSE-FAILED", [], "response was not valid JSON"),
 }[cfg["name"]]
 _saved = sys.modules.get("probe_boards")
 sys.modules["probe_boards"] = fake
@@ -351,16 +358,33 @@ finally:
     else:
         sys.modules["probe_boards"] = _saved
 assert [p["company"] for p in got] == ["Acme Corp"], got
-assert errs == ["source_unavailable"], errs
-assert len(coverage) == 3 and coverage[0]["parse"] == "ok", coverage
+assert len(coverage) == 5 and coverage[0]["parse"] == "ok", coverage
 assert coverage[1]["fetch"] == "failed" and coverage[1]["parse"] == "not_attempted", coverage
 assert coverage[2]["parse"] == "empty", coverage
+assert coverage[3]["fetch"] == "failed" and coverage[3]["parse"] == "challenge", coverage
+assert coverage[4]["fetch"] == "ok" and coverage[4]["parse"] == "failed", coverage
+assert errs == ["source_unavailable", "challenge_page", "parse_failed"], errs
 assert any("board-error: source_unavailable" in line for line in lines), lines
 assert any("board: " in line and "empty processed=0" in line for line in lines), lines
 assert not any("BAD-TENANT" in line or "HTTP 422" in line for line in lines), lines
 
+# Board fetches keep HTTP challenges distinct from response parse failures.
+for status, body, expected in (
+        (403, "<title>Just a moment...</title> challenge-platform", "CHALLENGE"),
+        (200, "<html>captcha</html>", "CHALLENGE"),
+        (200, "not json", "PARSE-FAILED")):
+    try:
+        probe_boards._json_or_raise(status, body, "synthetic endpoint")
+    except probe_boards.BoardError as exc:
+        assert exc.label == expected, (status, body, exc.label)
+    else:
+        raise AssertionError("board error response should be classified")
+
 # a board whose probe() raises (incompatible module) is one line, not a crash
-fake.probe = lambda cfg: (_ for _ in ()).throw(RuntimeError("boom")) if cfg["name"] == "Broken" else ("PROBED", [board_rows[0]], "1 rows")
+fake.probe = lambda cfg: (
+    (_ for _ in ()).throw(RuntimeError("boom")) if cfg["name"] == "Broken" else
+    ("PROBED", [board_rows[0]], "1 rows") if cfg["name"] in ("Good", "Quiet") else
+    ("PROBED 0", [], "0 rows"))
 _saved = sys.modules.get("probe_boards")
 sys.modules["probe_boards"] = fake
 lines = []
@@ -408,6 +432,18 @@ with mock.patch.object(d, "fetch", side_effect=RuntimeError("PRIVATE-CANARY")):
 assert rows == [] and errors == ["source_unavailable"]
 assert coverage[0]["fetch"] == "failed" and "PRIVATE-CANARY" not in " ".join(lines)
 
+coverage = []
+lines = []
+http_error = d.urllib.error.HTTPError(
+    "https://private.invalid/careers", 403, "Forbidden", {},
+    io.BytesIO(b"<title>Just a moment</title> challenge-platform"))
+with mock.patch.object(d, "fetch", side_effect=http_error):
+    rows, errors = d._collect_page("https://private.invalid/careers", lambda _: [],
+                                   "company", coverage, lines.append)
+assert rows == [] and errors == ["challenge_page"]
+assert coverage[0]["fetch"] == "failed" and coverage[0]["parse"] == "challenge"
+assert "private.invalid" not in " ".join(lines)
+
 
 print("test_discover: all assertions passed")
 
@@ -425,6 +461,22 @@ print("  ok: --boards + --import-json refused with rc=2")
 assert "--boards" in d.build_parser().format_help(), (
     "--boards must be documented in the parser help")
 print("  ok: --boards present in parser help")
+
+# Aggregate accepted counts use the same pre-deduplication definition as each
+# source row; added remains the unique count after coalescing.
+with tempfile.TemporaryDirectory(prefix="discover-source-counts-") as temp:
+    source = Path(temp) / "import.json"
+    posting = {"company": "Count Co", "role": "Software Engineer Intern",
+               "link": "https://jobs.example.invalid/123", "location": "Singapore"}
+    source.write_text(json.dumps([posting, posting]), encoding="utf-8")
+    reports = []
+    with mock.patch.object(d, "_report_intake",
+                           side_effect=lambda summary, *_args: reports.append(summary)):
+        assert d.main(["--import-json", str(source), "--repo", str(Path(temp) / "repo"),
+                       "--dry-run"]) == 0
+    assert reports[0]["counts"]["accepted"] == 2, reports[0]
+    assert reports[0]["sources"][0]["accepted"] == 2, reports[0]
+    assert reports[0]["counts"]["added"] == 1, reports[0]
 
 # Total failure records diagnostics and exits before opening or changing the
 # valid posting store.

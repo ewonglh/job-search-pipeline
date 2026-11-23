@@ -2,6 +2,7 @@
 import hashlib
 import json
 import os
+import re
 import tempfile
 from datetime import datetime, timezone
 
@@ -24,6 +25,9 @@ KINDS = {"internsg", "company", "board", "import"}
 HISTORY_LIMIT = 40
 MAX_SOURCES_PER_RUN = 500
 MAX_HISTORY_BYTES = 5 * 1024 * 1024
+CHALLENGE_PAGE_RE = re.compile(
+    r"cf-chl-|challenge-platform|verify (?:that )?you are human|just a moment|"
+    r"captcha|access denied|checking your browser", re.I)
 
 
 def history_path(lane, directory=None):
@@ -36,6 +40,13 @@ def history_path(lane, directory=None):
 
 def source_id(kind, key):
     return kind + ":" + hashlib.sha256(str(key).encode("utf-8")).hexdigest()[:16]
+
+
+def is_challenge_response(body):
+    """Recognize common anti-bot challenge pages without retaining their text."""
+    if isinstance(body, bytes):
+        body = body.decode("utf-8", "replace")
+    return isinstance(body, str) and bool(CHALLENGE_PAGE_RE.search(body))
 
 
 def _counts(value, allowed):

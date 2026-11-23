@@ -622,6 +622,11 @@ with tempfile.TemporaryDirectory(prefix="synthetic-projection-i11-") as temp:
          "status": "in_progress", "attempt_id": "attempt-102",
          "claimed_at": "2026-11-16T01:00:00Z", "runner_id": "runner-a",
          "session_ref": "session:owner-102"},
+        {"company": "Released Co", "role": "Released Intern", "pr_number": 106,
+         "status": "in_progress", "attempt_id": "attempt-106",
+         "claimed_at": "2026-11-15T06:00:00Z", "runner_id": "runner-b",
+         "session_ref": "session:owner-106",
+         "browser_owner_released_at": "2026-11-16T02:00:00Z"},
         {"company": "Blocked Co", "role": "Blocked Intern", "pr_number": 103,
          "status": "blocked", "blocker_code": "eligibility_hold",
          "blocked_at": "2026-11-13T06:00:00Z"},
@@ -632,6 +637,7 @@ with tempfile.TemporaryDirectory(prefix="synthetic-projection-i11-") as temp:
         {"company": "Submitted Co", "role": "Submitted Intern", "pr_number": 105,
          "status": "submitted", "attempt_id": "attempt-105",
          "submitted_at": "2026-11-15T06:00:00Z",
+         "tracker_sync_pending_at": "2026-11-14T06:00:00Z",
          "tracker_sync": "pending", "snapshot_provenance": "complete",
          "snapshot_id": "a" * 64},
     ])
@@ -675,13 +681,14 @@ with tempfile.TemporaryDirectory(prefix="synthetic-projection-i11-") as temp:
     assert health["attempts"]["oldest_blocked_age_seconds"] == 3 * 86400
     assert health["attempts"]["oldest_unknown_age_seconds"] == 6 * 3600
     assert health["browser_ownership"]["active"] == 1
+    assert health["browser_ownership"]["released"] == 1
     assert health["browser_ownership"]["owners"] == [{
         "runner_id": "runner-a", "session_ref": "session:owner-102",
         "attempt_age_seconds": 5 * 3600}]
     assert health["snapshot_gaps"]["known"] == 1
     assert health["snapshot_gaps"]["oldest_age_seconds"] == 86400
     assert health["tracker_sync"]["pending_or_error"] == 1
-    assert health["tracker_sync"]["oldest_age_seconds"] == 86400
+    assert health["tracker_sync"]["oldest_age_seconds"] == 2 * 86400
     assert "pending metadata 1" in pipeline_health.render_text(health)
     exported_health = json.dumps(health)
     assert "private@example.invalid" not in exported_health

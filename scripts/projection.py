@@ -49,7 +49,8 @@ TRACKER_FIELDS = ("company", "role", "link", "pr", "pr_number", "source",
 QUEUE_FIELDS = ("company", "role", "link", "pr", "pr_number", "source",
                 "status", "submitted_at", "claimed_at", "enqueued_at", "approved_at",
                 "failed_at", "blocked_at", "updated_at", "outcome_unknown_at",
-                "browser_released_at", "tracker_sync_started_at",
+                "browser_released_at", "browser_owner_released_at",
+                "tracker_sync_pending_at", "tracker_sync_started_at",
                 "tracker_sync_failed_at", "tracker_synced_at", "snapshot_prepared_at",
                 "snapshot_finalized_at", "runner_id", "session_ref", "attempt_id",
                 "tracker_sync", "snapshot_id", "prepared_snapshot_id",
@@ -226,7 +227,8 @@ def _compatible_rows(rows, fields, *, queue_statuses=None, tracker_statuses=None
                         raise _InvalidSource()
                 elif key in ("submitted_at", "claimed_at", "enqueued_at", "approved_at",
                              "failed_at", "blocked_at", "updated_at", "outcome_unknown_at",
-                             "browser_released_at", "tracker_sync_started_at",
+                             "browser_released_at", "browser_owner_released_at",
+                             "tracker_sync_pending_at", "tracker_sync_started_at",
                              "tracker_sync_failed_at", "tracker_synced_at",
                              "snapshot_prepared_at", "snapshot_finalized_at"):
                     value = (_timestamp(value) or _day(value)) if isinstance(value, str) else None

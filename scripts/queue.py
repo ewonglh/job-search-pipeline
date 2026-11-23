@@ -1784,7 +1784,7 @@ def _read_claim_validation_inputs(args, item, queue_items, posting, revision):
 # ---------------------------------------------------------------- cli actions
 ENQUEUE_COUNT_KEYS = ("processed", "accepted", "added", "rejected", "duplicates",
                       "limited", "observed", "owner_merged", "closed_history",
-                      "active_work")
+                      "active_work", "pending_metadata")
 
 
 
@@ -1796,6 +1796,11 @@ def _new_enqueue_report():
 def _count_reason(report, code, amount=1):
     reasons = report["reasons"]
     reasons[code] = reasons.get(code, 0) + amount
+
+
+def _count_pending_metadata(report):
+    report["counts"]["pending_metadata"] += 1
+    _count_reason(report, "metadata_unavailable")
 
 
 def _intake_skip_code(reason):
@@ -1823,9 +1828,8 @@ def _emit_intake_report(report, log, allow_seam=True, emit_stdout=True):
         if intake_reporting is not None:
             try:
                 intake_reporting.record_run("enqueue", report)
-                return True
-            except Exception as exc:  # noqa: BLE001 - reporting must not block intake
-                log("queue: intake reporting failed: " + str(exc))
+            except Exception:  # noqa: BLE001 - reporting must not block intake
+                log("queue: intake reporting failed")
     if emit_stdout:
         print(json.dumps({"intake_run": report}, ensure_ascii=False))
     return False
@@ -2029,7 +2033,7 @@ def _process_pending_intake(args, log, report, revision):
                 (number, ", ".join(missing_metadata)))
             _set_intake_outcome(args.queue, number, "pending", "metadata_unavailable",
                                 "authoritative merge or PR identity metadata is incomplete")
-            _count_reason(report, "metadata_unavailable")
+            _count_pending_metadata(report)
             failures = True
             continue
         if not is_app_branch(pr.get("headRefName")):
@@ -2046,7 +2050,7 @@ def _process_pending_intake(args, log, report, revision):
                 log("queue: pending #%s changed-file metadata is unavailable" % number)
                 _set_intake_outcome(args.queue, number, "pending", "metadata_unavailable",
                                     "changed-file metadata is unavailable; retry required")
-                _count_reason(report, "metadata_unavailable")
+                _count_pending_metadata(report)
                 failures = True
                 continue
             _set_intake_outcome(args.queue, number, "pending", "unknown",
@@ -2057,7 +2061,7 @@ def _process_pending_intake(args, log, report, revision):
                                                for file in files)):
             _set_intake_outcome(args.queue, number, "pending", "metadata_unavailable",
                                 "changed-file metadata is malformed; retry required")
-            _count_reason(report, "metadata_unavailable")
+            _count_pending_metadata(report)
             failures = True
             continue
         pr["files"] = files
