@@ -50,12 +50,12 @@ assert not t.branch_matches_company("feature/sea-thing", "sea")
 # ---------------------------------------------------------------- partition
 sel = t.assign_slugs([
     {"company": "Sea", "role": "Product Engineer Intern - Backend Focused",
-     "link": "u1"},
-    {"company": "Klook", "role": "Backend Engineer (Internship)", "link": "u2"},
-    {"company": "Brand New Co", "role": "Software Intern", "link": "u3"},
+     "link": "https://jobs.example/u1"},
+    {"company": "Klook", "role": "Backend Engineer (Internship)", "link": "https://jobs.example/u2"},
+    {"company": "Brand New Co", "role": "Software Intern", "link": "https://jobs.example/u3"},
 ])
 # Klook is in flight because its open-PR branch tracker carried the link
-links = {t.normalize_url("u2").lower()}
+links = {t.normalize_url("https://jobs.example/u2")}
 names = {t.norm_text("Sea").lower() + "|" + t.norm_text(
     "Product Engineer Intern - Backend Focused").lower()}
 ready, skipped = t.partition_inflight(sel, links, names)
