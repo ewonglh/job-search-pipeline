@@ -986,6 +986,18 @@ def write_work_item(work_dir, slug, item):
     return path
 
 
+def retain_eligibility_decision(work_dir, slug, posting, decision):
+    """Keep one record per posting decision as policy and evidence change."""
+    from application_identity import application_id
+    record = {"application_id": application_id(posting), "decision": decision}
+    encoded = json.dumps(record, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    digest = _digest_bytes(encoded)
+    relative = os.path.join("_eligibility", slug, digest + ".json")
+    if not os.path.isfile(os.path.join(work_dir, relative)):
+        write_work_item(os.path.join(work_dir, "_eligibility", slug), digest, record)
+    return relative.replace(os.sep, "/")
+
+
 def write_needs_jd(work_dir, pending):
     """Write the legacy hold-list path with explicit review-required status."""
     os.makedirs(work_dir, exist_ok=True)
@@ -1205,6 +1217,9 @@ def main(argv=None):
 
         eligibility_result = eligibility_mod.evaluate(
             guarded_posting, profile, jd["jd_text"], profile_source)
+        decision_ref = None
+        if not args.dry_run:
+            decision_ref = retain_eligibility_decision(args.work, slug, p, eligibility_result)
         if eligibility_result.get("status") != "eligible":
             eligibility_status = eligibility_result.get("status", "unknown")
             eligibility_conflict = eligibility_status == "ineligible"
@@ -1216,7 +1231,8 @@ def main(argv=None):
                             "status": "hold", "category": "eligibility",
                             "reason": code, "code": code,
                             "eligibility_status": eligibility_status,
-                            "eligibility": eligibility_result})
+                            "eligibility": eligibility_result,
+                            "eligibility_decision_ref": decision_ref})
             log(f"tailor: hold      {guarded_posting.get('company')} · "
                 f"{guarded_posting.get('role')} "
                 f"({code})")
@@ -1225,6 +1241,7 @@ def main(argv=None):
         item = build_work_item(p, slug, jd, profile, profile_source,
                                master_source, eligibility_result, guarded_posting)
         item["jd_guard"] = jd_guard
+        item["eligibility_decision_ref"] = decision_ref
         items.append(item)
         if not args.dry_run:
             created.append(write_work_item(args.work, slug, item))
