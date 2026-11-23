@@ -18,6 +18,7 @@ import intake_reporting
 import pipeline_health
 import projection
 import review_contract
+import submission_snapshot
 
 
 NOW = datetime(2026, 11, 16, 6, 0, tzinfo=timezone.utc)
@@ -180,10 +181,23 @@ def _db_bytes(db):
 
 with tempfile.TemporaryDirectory(prefix="synthetic-projection-i11-") as temp:
     root = Path(temp)
+    tracker_compat_paths = _fixture(root / "tracker-compat", tracker_text="""- company: Compat Co
+  role: Software Intern
+  status: 'Interview'
+  applied_date: 2026-11-23
+  notes: |-
+    Complete synthetic note: line one
+    Complete synthetic note: line two
+""")
+    tracker_compat = projection._read_tracker(tracker_compat_paths["tracker"])
+    assert tracker_compat["record_count"] == 1
+    assert tracker_compat["records"][0]["status"] == "Interview"
+    assert tracker_compat["records"][0]["applied_date"] == "2026-11-23"
+    assert "notes" not in tracker_compat["records"][0]
     paths = _fixture(root,
         tracker=[{"company": "Example Co", "role": "Software Intern",
                   "status": "Applied", "applied_date": "2026-11-16",
-                  "notes": CANARY, "raw_nested": {"private": CANARY}}],
+                  "notes": CANARY}],
         queue=[{"company": "Example Co", "role": "Software Intern",
                 "status": "queued", "pr_number": 41,
                 "notes": CANARY}],
@@ -388,16 +402,22 @@ with tempfile.TemporaryDirectory(prefix="synthetic-projection-i11-") as temp:
         "attempt_id": "attempt-41"}]), encoding="utf-8")
     manifest_db = root / "manifest-db" / "index.sqlite3"
     _collect(manifest_db, manifest_paths)
-    assert projection.read_snapshot(str(manifest_db))["facts"]["applications"][0]["resume_hash"] == "a" * 64
-    original_json_read = projection._read_json
-    def unreadable_manifest(path):
-        if Path(path) == manifest_path:
+    manifest_snapshot = projection.read_snapshot(str(manifest_db))
+    assert manifest_snapshot["facts"]["applications"][0]["resume_hash"] is None
+    legacy = manifest_snapshot["facts"]["legacy_snapshots"][0]
+    assert legacy["resume_hash"] == "a" * 64
+    assert legacy["attempt_id"] is None
+    assert legacy["attempt_provenance"] == "unknown"
+    original_manifest_read = submission_snapshot.read_snapshot_manifest
+    def unreadable_manifest(snapshot_root, snapshot_id):
+        if snapshot_id == manifest_id:
             raise PermissionError("synthetic manifest I/O failure")
-        return original_json_read(path)
-    with mock.patch.object(projection, "_read_json", side_effect=unreadable_manifest):
+        return original_manifest_read(snapshot_root, snapshot_id)
+    with mock.patch.object(submission_snapshot, "read_snapshot_manifest",
+                           side_effect=unreadable_manifest):
         _collect(manifest_db, manifest_paths)
     retained = projection.read_snapshot(str(manifest_db))
-    assert retained["facts"]["applications"][0]["resume_hash"] == "a" * 64
+    assert retained["facts"]["legacy_snapshots"][0]["resume_hash"] == "a" * 64
     assert retained["sources"]["snapshots"]["status"] == "stale"
     assert retained["sources"]["snapshots"]["error_code"] == "source_unreadable"
     assert CANARY not in json.dumps(retained)
@@ -406,7 +426,54 @@ with tempfile.TemporaryDirectory(prefix="synthetic-projection-i11-") as temp:
     _collect(manifest_db, manifest_paths)
     deleted_manifest = projection.read_snapshot(str(manifest_db))
     assert deleted_manifest["facts"]["applications"][0]["resume_hash"] is None
+    assert deleted_manifest["facts"]["legacy_snapshots"] == []
     assert deleted_manifest["sources"]["snapshots"]["empty"] is True
+
+    full_legacy_paths = _fixture(root / "full-legacy-manifest", tracker_text="""- company: Legacy Snapshot Co
+  role: Software Intern
+  link: https://jobs.example/role/43
+  status: Applied
+  applied_date: 2026-11-16
+""")
+    full_legacy_root = Path(full_legacy_paths["snapshot_root"])
+    (full_legacy_root / "manifests").mkdir()
+    legacy_pdf = b"%PDF-1.7\nsynthetic legacy report artifact\n"
+    legacy_answers = b'{"availability":"synthetic term"}\n'
+    legacy_pdf_hash = hashlib.sha256(legacy_pdf).hexdigest()
+    legacy_answers_hash = hashlib.sha256(legacy_answers).hexdigest()
+    (full_legacy_root / "pdf").mkdir()
+    (full_legacy_root / "answers").mkdir()
+    (full_legacy_root / "pdf" / (legacy_pdf_hash + ".pdf")).write_bytes(legacy_pdf)
+    (full_legacy_root / "answers" / (legacy_answers_hash + ".json")).write_bytes(legacy_answers)
+    legacy_manifest = {
+        "schema_version": 1,
+        "captured_at": "2026-11-16T05:00:00Z",
+        "posting": {"id": "link:https://jobs.example/role/43",
+                    "url": "https://jobs.example/role/43"},
+        "pr_number": 43,
+        "variant": "variants/legacy-synthetic",
+        "artifacts": {"resume_pdf": {"sha256": legacy_pdf_hash},
+                      "answers_json": {"sha256": legacy_answers_hash}},
+        "submitted_date": "2026-11-16",
+        "submission_recorded_at": "2026-11-16T05:05:00Z",
+        "confirmation_evidence": "Synthetic historical confirmation.",
+        "provenance": {"kind": "synthetic"},
+    }
+    legacy_encoded = json.dumps(legacy_manifest, sort_keys=True, ensure_ascii=False,
+                                separators=(",", ":"))
+    legacy_id = hashlib.sha256(legacy_encoded.encode("utf-8")).hexdigest()
+    (full_legacy_root / "manifests" / (legacy_id + ".json")).write_text(
+        legacy_encoded, encoding="utf-8")
+    full_legacy_db = root / "full-legacy-db" / "index.sqlite3"
+    _collect(full_legacy_db, full_legacy_paths)
+    full_legacy_snapshot = projection.read_snapshot(str(full_legacy_db))
+    legacy_fact = full_legacy_snapshot["facts"]["legacy_snapshots"][0]
+    assert legacy_fact["application_id"] == "link:https://jobs.example/role/43"
+    assert legacy_fact["attempt_id"] is None
+    assert legacy_fact["attempt_provenance"] == "unknown"
+    assert legacy_fact["artifact_provenance"] == "hash_verified"
+    assert legacy_fact["answers_hash"] == legacy_answers_hash
+    assert full_legacy_snapshot["facts"]["applications"][0]["resume_hash"] is None
 
     # Arbitrary query values never enter storage. Job IDs remain distinct.
     assert projection._safe_url("https://jobs.example/job?job_id=41#" + CANARY) == "https://jobs.example/job?job_id=41"
@@ -442,7 +509,7 @@ with tempfile.TemporaryDirectory(prefix="synthetic-projection-i11-") as temp:
         {"company": label + "=" + CANARY, "role": "Intern", "pr_number": 70 + i}
         for i, label in enumerate(labels)] + [
             {"company": "Safe Peer", "role": "Intern", "pr_number": 80,
-             "source": '"access_token":' + CANARY}])
+             "source": "note with access_token: " + CANARY}])
     credential_db = root / "credential-db" / "index.sqlite3"
     _collect(credential_db, credential_paths)
     credential_snapshot = projection.read_snapshot(str(credential_db))

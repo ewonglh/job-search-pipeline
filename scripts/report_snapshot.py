@@ -428,6 +428,7 @@ def normalize_snapshot(tracker_rows, queue_rows, event_doc, ingestion_state,
         "applications": applications,
         "confirmed_submissions": confirmed_submissions,
         "attempts": attempts,
+        "legacy_snapshots": _legacy_snapshot_facts(snapshot_facts),
         "identity_conflicts": [{"reason": item["reason"],
                                 "row_refs": item.get("row_refs", [])}
                                for item in resolved["conflicts"]],
@@ -454,6 +455,51 @@ def normalize_snapshot(tracker_rows, queue_rows, event_doc, ingestion_state,
     return {"schema_version": SCHEMA_VERSION, "snapshot_id": digest,
             "generated_at": _iso_now(generated_at), "as_of": _day(as_of),
             "sources": safe_sources, "facts": facts}
+
+
+def _legacy_snapshot_facts(snapshot_facts):
+    """Keep legacy snapshot metadata visible without binding it to an attempt."""
+    if not isinstance(snapshot_facts, dict):
+        return []
+    records = []
+    for manifest_id, manifest in sorted(snapshot_facts.items(), key=lambda pair: str(pair[0])):
+        if (not isinstance(manifest, dict)
+                or not str(manifest.get("snapshot_kind", "")).startswith("legacy")
+                or manifest.get("attempt_provenance") != "unknown"):
+            continue
+        application_id = manifest.get("application_id")
+        if (not isinstance(application_id, str) or len(application_id) > 2048
+                or any(ord(char) < 32 for char in application_id)):
+            application_id = None
+        snapshot_id = manifest_id if isinstance(manifest_id, str) else None
+        if not isinstance(snapshot_id, str) or not re.fullmatch(r"[0-9a-f]{64}", snapshot_id):
+            snapshot_id = None
+        resume_hash = manifest.get("resume_hash")
+        if not isinstance(resume_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", resume_hash):
+            resume_hash = None
+        answers_hash = manifest.get("answers_hash")
+        if not isinstance(answers_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", answers_hash):
+            answers_hash = None
+        pr_number = manifest.get("pr_number")
+        if type(pr_number) is not int or pr_number <= 0:
+            pr_number = None
+        record = {
+            "snapshot_id": snapshot_id,
+            "application_id": application_id,
+            "attempt_id": None,
+            "attempt_provenance": "unknown",
+            "artifact_provenance": (manifest.get("artifact_provenance")
+                                     if manifest.get("artifact_provenance")
+                                     in ("hash_verified", "manifest_only") else "unknown"),
+            "confirmation_status": manifest.get("confirmation_status"),
+            "submitted_at": _day(manifest.get("submitted_at")),
+            "recorded_at": _timestamp(manifest.get("recorded_at")),
+            "resume_hash": resume_hash,
+            "answers_hash": answers_hash,
+            "pr_number": pr_number,
+        }
+        records.append(record)
+    return records
 
 
 def collect_snapshot(*, tracker_path, queue_path, ledger_path, ingestion_path,

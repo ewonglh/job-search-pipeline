@@ -44,6 +44,53 @@ def _write(path, data):
     return path
 
 
+def legacy_fixture(root, *, hash_only=False, pretty=False):
+    os.makedirs(root, exist_ok=True)
+    manifests = os.path.join(root, "manifests")
+    os.makedirs(manifests, exist_ok=True)
+    pdf = b"%PDF-1.7\nsynthetic legacy resume\n"
+    answers = b'{"availability":"synthetic summer term"}\n'
+    if not hash_only:
+        os.makedirs(os.path.join(root, "pdf"), exist_ok=True)
+        os.makedirs(os.path.join(root, "answers"), exist_ok=True)
+        _write(os.path.join(root, "pdf", snapshots.sha256(pdf) + ".pdf"), pdf)
+        _write(os.path.join(root, "answers", snapshots.sha256(answers) + ".json"), answers)
+        manifest = {
+            "schema_version": 1,
+            "captured_at": "2026-11-22T10:00:00Z",
+            "posting": {"id": "link:https://fixture.invalid/jobs/13",
+                        "url": "https://fixture.invalid/jobs/13"},
+            "pr_number": 13,
+            "variant": "variants/synthetic-role",
+            "artifacts": {
+                "resume_pdf": {"sha256": snapshots.sha256(pdf)},
+                "answers_json": {"sha256": snapshots.sha256(answers)},
+            },
+            "submitted_date": "2026-11-22",
+            "submission_recorded_at": "2026-11-22T10:05:00Z",
+            "confirmation_evidence": "Synthetic receipt confirmed.",
+            "provenance": {"kind": "synthetic"},
+        }
+    else:
+        manifest = {
+            "schema_version": 1,
+            "captured_at": "2026-11-22T10:00:00Z",
+            "canonical_application_id": "pr:13",
+            "attempt_id": "legacy-attempt-13",
+            "confirmation": {"submitted_at": "2026-11-22",
+                             "evidence": "Synthetic receipt confirmed."},
+            "artifacts": {"resume_pdf": {"sha256": snapshots.sha256(pdf),
+                                           "path": "ignored legacy location"}},
+        }
+    canonical = snapshots._manifest_bytes(manifest)
+    manifest_id = snapshots.sha256(canonical)
+    data = (json.dumps(manifest, sort_keys=True, ensure_ascii=False,
+                       indent=2).encode("utf-8") + b"\n"
+            if pretty else canonical)
+    _write(os.path.join(manifests, manifest_id + ".json"), data)
+    return manifest_id, manifest, pdf, answers
+
+
 with tempfile.TemporaryDirectory() as temp:
     public = os.path.join(temp, "public-checkout")
     private = os.path.join(temp, "private-checkout")
@@ -82,6 +129,16 @@ with tempfile.TemporaryDirectory() as temp:
     assert prepared["answers_sha256"] == snapshots.sha256(open(answers_file, "rb").read())
     manifest = snapshots.verify_snapshot(root, prepared["snapshot_id"], APP,
                                          ATTEMPT, pdf_file, answers_file)
+    manifest_path = os.path.join(root, "manifests", prepared["snapshot_id"] + ".json")
+    canonical_manifest = open(manifest_path, "rb").read()
+    _write(manifest_path, json.dumps(manifest, sort_keys=True, indent=2).encode("utf-8"))
+    expect_error(lambda: snapshots.verify_snapshot(root, prepared["snapshot_id"],
+                                                    APP, ATTEMPT), "encoding")
+    _write(manifest_path, canonical_manifest)
+    current_facts = snapshots.read_snapshot_manifest(root, prepared["snapshot_id"])
+    assert current_facts["snapshot_kind"] == "current"
+    assert current_facts["attempt_id"] == ATTEMPT
+    assert current_facts["attempt_provenance"] == "verified"
     assert manifest["canonical_application_id"] == APP
     assert manifest["attempt_id"] == ATTEMPT
     assert manifest["confirmation"] == {"submitted_at": None, "evidence": None}
@@ -186,5 +243,46 @@ with tempfile.TemporaryDirectory() as temp:
         stream.write(b"corrupt")
     expect_error(lambda: snapshots.verify_snapshot(root, prepared["snapshot_id"],
                                                      APP, ATTEMPT), "retained snapshot bytes")
+
+with tempfile.TemporaryDirectory() as temp:
+    root = os.path.join(temp, "legacy-snapshots")
+    manifest_id, raw, pdf, answers = legacy_fixture(root)
+    facts = snapshots.read_snapshot_manifest(root, manifest_id)
+    assert facts["snapshot_kind"] == "legacy"
+    assert facts["application_id"] == "link:https://fixture.invalid/jobs/13"
+    assert facts["attempt_id"] is None
+    assert facts["attempt_provenance"] == "unknown"
+    assert facts["artifact_provenance"] == "hash_verified"
+    assert facts["resume_hash"] == snapshots.sha256(pdf)
+    assert facts["answers_hash"] == snapshots.sha256(answers)
+    assert facts["submitted_at"] == "2026-11-22"
+    expect_error(lambda: snapshots.verify_snapshot(root, manifest_id,
+                                                    facts["application_id"], "legacy-13"),
+                 "attempt provenance is unknown")
+    _write(os.path.join(root, "answers", facts["answers_hash"] + ".json"), b"corrupt")
+    expect_error(lambda: snapshots.read_snapshot_manifest(root, manifest_id),
+                 "retained legacy snapshot bytes")
+
+with tempfile.TemporaryDirectory() as temp:
+    root = os.path.join(temp, "legacy-hash-only")
+    manifest_id, _raw, pdf, _answers = legacy_fixture(root, hash_only=True)
+    facts = snapshots.read_snapshot_manifest(root, manifest_id)
+    assert facts["snapshot_kind"] == "legacy_hash_only"
+    assert facts["application_id"] == "pr:13"
+    assert facts["attempt_id"] is None
+    assert facts["attempt_provenance"] == "unknown"
+    assert facts["artifact_provenance"] == "manifest_only"
+    assert facts["resume_hash"] == snapshots.sha256(pdf)
+    expect_error(lambda: snapshots.verify_snapshot(root, manifest_id, "pr:13",
+                                                    "legacy-attempt-13"),
+                 "attempt provenance is unknown")
+
+with tempfile.TemporaryDirectory() as temp:
+    root = os.path.join(temp, "legacy-formatted-snapshots")
+    manifest_id, _raw, _pdf, _answers = legacy_fixture(root, pretty=True)
+    facts = snapshots.read_snapshot_manifest(root, manifest_id)
+    assert facts["snapshot_kind"] == "legacy"
+    assert facts["attempt_provenance"] == "unknown"
+    assert facts["artifact_provenance"] == "hash_verified"
 
 print("test_submission_snapshot: prepare, binding, retained bytes, current materials, and rejection cases passed")

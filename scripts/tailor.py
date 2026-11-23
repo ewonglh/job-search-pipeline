@@ -442,7 +442,9 @@ def load_repo(repo_dir):
     apps = []
     if os.path.isfile(tracker_path):
         with open(tracker_path, encoding="utf-8") as fh:
-            apps = parse_yaml_list(fh.read())
+            import tracker_compat
+            apps = tracker_compat.parse_application_tracker(
+                fh.read(), allow_comment_only=True)
     return postings, profile, apps
 
 
@@ -483,7 +485,9 @@ def load_repo_inputs(repo_dir):
     apps = []
     if os.path.isfile(tracker_path):
         with open(tracker_path, encoding="utf-8") as fh:
-            apps = parse_yaml_list(fh.read())
+            import tracker_compat
+            apps = tracker_compat.parse_application_tracker(
+                fh.read(), allow_comment_only=True)
     return postings, profile, apps, profile_source, master_source, errors
 
 
@@ -866,7 +870,9 @@ def branch_tracker_entries(repo_dir, branch, log=lambda *a: None):
     if proc.returncode != 0:
         return None
     try:
-        return parse_yaml_list(proc.stdout)
+        import tracker_compat
+        return tracker_compat.parse_application_tracker(
+            proc.stdout, allow_comment_only=True)
     except Exception:  # noqa: BLE001
         return None
 

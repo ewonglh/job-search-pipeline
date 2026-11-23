@@ -58,6 +58,7 @@ import sys
 from datetime import date
 
 import summary as s
+import tracker_compat
 from config import default_runtime_path, path_setting
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -178,17 +179,15 @@ def split_records(lines):
 
 
 def record_scalar(lines, rec, key):
-    """Read a scalar out of a record the same way ``summary.parse_yaml_list``
-    would: inline value plus folded continuation lines joined by a space."""
-    field = rec["fields"].get(key)
-    if not field:
+    """Read one field with the same strict YAML semantics as ``read_apps``."""
+    if key not in rec["fields"]:
         return None
-    m = KEY_RE.match(lines[field["line"]])
-    parts = [m.group(3).strip()] if m and m.group(3).strip() else []
-    for j in range(field["line"] + 1, field["last"] + 1):
-        parts.append(lines[j].strip())
-    text = " ".join(p for p in parts if p)
-    return s._unq(text) if text else None
+    row_text = "\n".join(lines[rec["start"]:rec["end"]])
+    rows = tracker_compat.parse_application_tracker(row_text)
+    if len(rows) != 1:
+        raise tracker_compat.TrackerCompatibilityError(
+            "tracker row boundaries are ambiguous")
+    return rows[0].get(key)
 
 
 def read_apps(path):
@@ -196,13 +195,13 @@ def read_apps(path):
     with open(path, encoding="utf-8") as fh:
         text = fh.read()
     lines = text.splitlines()
-    out = []
-    for rec in split_records(lines):
-        row = {}
-        for key in rec["fields"]:
-            row[key] = record_scalar(lines, rec, key)
-        out.append({"record": rec, "row": row})
-    return lines, out
+    rows = tracker_compat.parse_application_tracker(text, allow_comment_only=True)
+    records = split_records(lines)
+    if len(records) != len(rows):
+        raise tracker_compat.TrackerCompatibilityError(
+            "tracker row boundaries are ambiguous")
+    return lines, [{"record": record, "row": row}
+                   for record, row in zip(records, rows)]
 
 
 def stage_of(row):

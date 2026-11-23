@@ -77,10 +77,10 @@ try:
     assert apps[0]["row"]["notes"].endswith("prior interview No."), \
         apps[0]["row"]["notes"]
     assert "Student Pass Holder" in apps[0]["row"]["notes"]
-    # summary's minimal parser drops folded continuation lines (it skips any
-    # line without a colon); stages.py joins them, which is what the file means
+    # The shared YAML parser folds continuation lines into the complete scalar.
     assert s.parse_yaml_list(TRACKER)[0]["notes"] == \
-        "Workday ATS (req JR005033); availability Jan-Jun 2027; work authorisation"
+        "Workday ATS (req JR005033); availability Jan-Jun 2027; work authorisation " \
+        "Student Pass Holder; commitment Full Time; prior interview No."
     assert apps[0]["row"]["company"] == s.parse_yaml_list(TRACKER)[0]["company"]
     # the comment line is inside no field
     assert all("#" not in k for a in apps for k in a["row"])
