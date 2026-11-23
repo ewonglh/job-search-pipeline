@@ -157,25 +157,50 @@ Read back the complete installed configuration while disabled, after editing,
 and again after enabling. Require exactly one matching job and a complete
 listing. Do not print a payload that may contain private values.
 
-For the current OpenClaw adapter, [#55](https://github.com/ewonglh/job-search-pipeline/issues/55)
-is still in progress on branch `feat/55-openclaw-runner`. Its proposed readback
-example is pending that merge and parent finalization; it is not a command
-supported by this release branch:
+The merged [#55](https://github.com/ewonglh/job-search-pipeline/issues/55)
+OpenClaw runner is supported by this release. Follow the
+[runner host setup](openclaw-runner.md#host-setup). Before the first claim, set
+the absolute OpenClaw binary path and the claim-pinned ownership verifier
+command, then run the adapter from the release root:
+
+```sh
+export JOBSEARCH_OPENCLAW_BIN="/absolute/path/to/openclaw"
+export JOBSEARCH_BROWSER_OWNERSHIP_VERIFIER="/absolute/path/to/scripts/openclaw_ownership.py --openclaw-bin /absolute/path/to/openclaw"
+export JOBSEARCH_OPENCLAW_AGENT=main
+python3 scripts/openclaw_drain.py run --max-attempts 1
+```
+
+The verifier setting is the exact command
+`/absolute/path/to/scripts/openclaw_ownership.py --openclaw-bin /absolute/path/to/openclaw`.
+The queue invokes it with claim-bound request JSON on stdin during
+`finish-attempt`. Keep both paths absolute and fixed so the queue can pin the
+helper command and executable digest at claim time. This adapter relies on
+`sessions.abort` and the built-in Browser Gateway honoring the turn's abort
+signal; a detached browser worker or plugin cannot use this ownership proof.
+The supported OpenClaw version and abort behavior are documented in the
+[runner ownership verifier notes](openclaw-runner.md#browser-ownership-verifier).
+
+For scheduler read-back, build `$EXPECTED_DIGESTS_FILE` from the intended
+configuration with the `expected_digests()` helper in
+[`scripts/openclaw_drain.py`](../scripts/openclaw_drain.py). Include SHA-256
+digests for `schedule`, `payload`, and `enabled`, plus `agentId`,
+`sessionTarget`, and `delivery` when they are part of the intended configuration.
+Run the supported checker with the complete cron listing:
 
 ```sh
 openclaw cron list --all --json --timeout 10000 |
   python3 scripts/openclaw_drain.py verify-readback \
-    --job-id "$JOB_ID" --expected "$EXPECTED_DIGESTS"
+    --job-id "$JOB_ID" --expected "$EXPECTED_DIGESTS_FILE"
 ```
 
-The in-progress checker covers the full `schedule`, `payload`, and `enabled`
-fields, and can check `agentId`, `sessionTarget`, and `delivery`. The parent must
-finalize how the selected scheduler exposes any separate trigger, timezone,
-working directory, timeout, and tool scope before using this example.
-Independently record the installed release revision and hashes of the effective
-entry point and verifier files; a branch name or intended revision does not
-prove what the job executes. Any unexplained payload, trigger, schedule,
-enabled-state, or code mismatch is a stop.
+The checker requires exactly one matching job and a complete listing, compares
+the configured digests, and prints only a pass result or mismatch codes. It
+does not display the payload. Independently read back any installed fields not
+represented by these JSON fields, including effective working directory,
+runtime bindings, timeout, or tool scope. Record the installed release revision
+and hashes of the effective entry point and verifier files; a branch name or
+intended revision does not prove what the job executes. Any unexplained payload,
+trigger, schedule, enabled-state, or code mismatch is a stop.
 
 ## Activate writers and verify the browser gate
 
@@ -194,12 +219,15 @@ enabled-state, or code mismatch is a stop.
    runner can prevent a previous attempt from making browser actions. Use only a
    fake portal. Hold a browser action in flight, interrupt the runner, and prove
    a second claim is refused while the owner is unresolved. Then prove the old
-   action has terminated, or that the boundary rejects both new and in-flight
-   actions from the fenced session. Verify the queue releases ownership only
-   after that evidence and permits the next distinct application while the first
-   outcome remains unresolved. On a route with an enforceable submit hook,
-   assert the submission-started marker is durable before the fake portal
-   receives the submit action.
+   action has terminated, or that the built-in Browser Gateway boundary rejects
+   both new and in-flight actions from the aborted session. Verify the queue
+   releases ownership only after that evidence and permits the next distinct
+   application while the first outcome remains unresolved. On a route with an
+   enforceable submit hook, assert the submission-started marker is durable
+   before the fake portal receives the submit action. The offline integration
+   is in [`scripts/test_openclaw_drain.py`](../scripts/test_openclaw_drain.py);
+   its fake portal holds an action across abort and checks that it cannot submit
+   after owner release.
 
 Lease expiry, an agent turn’s exit, or a best-effort stop request alone fails
 the browser gate. If termination or fencing cannot be observed, keep the slot
