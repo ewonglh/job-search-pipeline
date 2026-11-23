@@ -187,22 +187,35 @@ def build_report(snapshot, *, timezone_name, weekday_goal, weekend_goal,
                              ("tracker_sync_pending_at", "tracker_sync_started_at",
                               "tracker_sync_failed_at", "submitted_at"),
                              reference, zone)
-    active_attempts = [row for row in queue_rows if row.get("status") == "in_progress"]
     browser_owners, browser_released, browser_unknown = [], 0, 0
-    for row in active_attempts:
-        released_at = _local_datetime(
-            row.get("browser_owner_released_at") or row.get("browser_released_at"), zone)
-        runner_id, session_ref = row.get("runner_id"), row.get("session_ref")
-        if released_at:
+    from report_snapshot import queue_owner_projection
+    for row in queue_rows:
+        if "browser_ownership_status" in row:
+            ownership_status = row.get("browser_ownership_status")
+            ownership_legacy = row.get("browser_ownership_legacy") == "true"
+            if ownership_status not in {"active", "released", "unknown", "none"}:
+                ownership_status = "unknown"
+        else:
+            ownership = queue_owner_projection(row)
+            ownership_status = ownership["status"]
+            ownership_legacy = ownership["legacy"]
+        if ownership_status == "released":
             browser_released += 1
-        elif runner_id or session_ref:
+        elif ownership_status == "active":
             claimed_at = _local_datetime(row.get("claimed_at"), zone)
-            browser_owners.append({
-                "runner_id": runner_id, "session_ref": session_ref,
+            safe_owner = {
+                "application_status": row.get("status"),
                 "attempt_age_seconds": (max(0, int((reference - claimed_at).total_seconds()))
                                         if reference and claimed_at else None),
-            })
-        else:
+                "legacy": ownership_legacy,
+            }
+            pr_number = row.get("pr_number")
+            if isinstance(pr_number, str) and pr_number.isdigit():
+                pr_number = int(pr_number)
+            if type(pr_number) is int and pr_number > 0:
+                safe_owner["pr_number"] = pr_number
+            browser_owners.append(safe_owner)
+        elif ownership_status == "unknown":
             browser_unknown += 1
     intake_source = sources.get("intake", {})
     intake_facts = facts.get("intake", {})

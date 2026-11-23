@@ -196,9 +196,11 @@ midnight_snapshot = report_snapshot.normalize_snapshot(
          "tracker_sync": "pending", "snapshot_provenance": "incomplete"},
         {"company": "Stale", "role": "Intern", "link": "https://jobs.example/stale",
          "status": "in_progress", "claimed_at": "2026-06-02T00:00:00Z",
+         "runner_id": "runner-stale",
          "blocker_code": "portal_timeout", "notes": "SYNTHETIC FREE TEXT MUST NOT LEAK"},
         {"company": "Fresh", "role": "Intern", "link": "https://jobs.example/fresh",
-         "status": "in_progress", "claimed_at": "2026-06-02T23:30:00Z"},
+         "status": "in_progress", "claimed_at": "2026-06-02T23:30:00Z",
+         "session_ref": "session-fresh"},
         {"company": "Unknown", "role": "Intern", "link": "https://jobs.example/unknown",
          "status": "outcome_unknown"},
         {"company": "Ready", "role": "Intern", "link": "https://jobs.example/ready",
@@ -230,6 +232,8 @@ assert health["browser_ownership"]["unknown"] == 2
 assert health["blockers"]["by_code"] == {"portal_timeout": 1}
 assert health["blockers"]["unclassified"] == 1
 assert "SYNTHETIC FREE TEXT MUST NOT LEAK" not in json.dumps(midnight_snapshot)
+assert "runner-stale" not in json.dumps(midnight_snapshot)
+assert "session-fresh" not in json.dumps(midnight_snapshot)
 assert "Daily pipeline health" in pipeline_health.render_text(health)
 
 weekend = pipeline_health.build_report(
