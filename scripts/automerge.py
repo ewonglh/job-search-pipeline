@@ -6,6 +6,11 @@ job description, profile, and artifact hashes. It rejects incomplete reviewer
 findings and unavailable or malformed duplicate, skip, queue, tracker, and cap
 inputs. Narrative approval remains owner-only at the drain.
 
+Main-branch reads (master resume, profile, tracker) come from the commit
+returned by one successful ``origin/main`` fetch. A failed fetch blocks
+readiness even when a cached copy is readable. A missing queue is reported with
+the ``queue.py init`` command and is never treated as an empty queue.
+
 The script performs no GitHub writes and never enqueues. A direct owner merge
 is observed later by ``queue.py enqueue`` as the authorization event.
 
@@ -321,15 +326,19 @@ def preflight_candidate(pr, review, work_item=None, queue_module=None,
         repo = repo_dir or q.REPO_DIR
         if not os.path.isdir(repo) or not os.path.exists(os.path.join(repo, ".git")):
             return False, "resume repository clone is unavailable"
-        fetched = q._git(repo, "fetch", "--quiet", "--no-tags", "origin", "main")
-        if fetched.returncode != 0:
-            return False, "current resume repository state is unavailable"
-        master_blob = _git_output(repo, "rev-parse", "origin/main:master/resume.tex")
+        # One successful refresh pins every main read below to the fetched
+        # commit. A failed refresh blocks readiness even if a cached copy exists.
+        try:
+            main_revision = q.refresh_main_tracker(repo, log)
+        except q.QueueStateError as exc:
+            return False, "current resume repository state is unavailable: " + str(exc)
+        main_commit = main_revision.commit
+        master_blob = _git_output(repo, "rev-parse", main_commit + ":master/resume.tex")
         source_blob = _git_output(
             repo, "rev-parse", provenance["master_commit"] + ":master/resume.tex")
         if master_blob != provenance["master_resume_blob"] or source_blob != master_blob:
             return False, "master resume provenance is stale or mismatched"
-        profile_text = _git_output(repo, "show", "origin/main:" + tailor.PROFILE_PATH)
+        profile_text = _git_output(repo, "show", main_commit + ":" + tailor.PROFILE_PATH)
         current_profile = tailor.parse_yaml_map(profile_text)
         if canonical_sha256(current_profile) != provenance["profile_sha256"]:
             return False, "current profile differs from the reviewed profile"
@@ -351,11 +360,14 @@ def preflight_candidate(pr, review, work_item=None, queue_module=None,
 
         qfile = queue_file or q.QUEUE_FILE
         gfile = gates_file or tailor.GATE_FILE
-        if not os.path.isfile(qfile):
-            return False, "queue snapshot is unavailable"
-        with open(qfile, encoding="utf-8") as fh:
-            queue_text = fh.read()
-        queue_items = _strict_rows(queue_text, "queue", q)
+        # A missing queue is a source error with the init command, never an
+        # empty queue; a malformed one is named as malformed.
+        try:
+            queue_items = q.load_queue(qfile)
+        except q.QueueMissingError as exc:
+            return False, "queue is unavailable: " + str(exc)
+        except q.QueueStateError as exc:
+            return False, "queue is malformed or unreadable: " + str(exc)
         queue_keys = set()
         for item in queue_items:
             if item.get("status") not in q.STATUSES:
@@ -413,11 +425,7 @@ def preflight_candidate(pr, review, work_item=None, queue_module=None,
             if item.get("status") in unfinished and q.active_key(item) == active:
                 return False, "posting already has an active queue item"
 
-        try:
-            tracker_text = _git_output(repo, "show", "origin/main:" + q.TRACKER_PATH)
-        except Exception:
-            return False, "current applications tracker is unavailable"
-        tracker = _strict_rows(tracker_text, "current applications tracker", q)
+        tracker = _strict_rows(main_revision.text, "current applications tracker", q)
         tracker_links = set()
         for item in tracker:
             link = normalize_url(item.get("link", ""))

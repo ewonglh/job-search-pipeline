@@ -92,6 +92,15 @@ def status_args(case, status="submitted"):
 # allows exactly one durable attempt marker to win.
 with tempfile.TemporaryDirectory() as directory:
     case = make_case(directory)
+    origin = os.path.join(directory, "origin.git")
+    subprocess.run(["git", "init", "--bare", "-q", origin], check=True)
+    git = ["git", "-C", case["repo"]]
+    subprocess.run(git + ["init", "-q"], check=True)
+    subprocess.run(git + ["add", "applications.yaml"], check=True)
+    subprocess.run(git + ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                          "commit", "-qm", "Tracker fixture"], check=True)
+    subprocess.run(git + ["remote", "add", "origin", origin], check=True)
+    subprocess.run(git + ["push", "-q", "origin", "HEAD:main"], check=True)
     worker = os.path.join(directory, "claim_worker.py")
     with open(worker, "w", encoding="utf-8") as fh:
         fh.write("""import os, sys, time

@@ -193,7 +193,7 @@ def test_provenance_preflight_and_cap():
         os.makedirs(os.path.join(repo, "data"))
         os.makedirs(os.path.join(repo, "variants", "synthetic-role"))
         origin = os.path.join(root, "origin.git")
-        subprocess.run(["git", "init", "--bare", "-q", origin], check=True)
+        subprocess.run(["git", "init", "--bare", "-q", "-b", "main", origin], check=True)
         with open(os.path.join(repo, "master", "resume.tex"), "w", encoding="utf-8") as fh:
             fh.write("Synthetic resume source.\n")
         with open(os.path.join(repo, "data", "profile.yaml"), "w", encoding="utf-8") as fh:
@@ -204,7 +204,7 @@ def test_provenance_preflight_and_cap():
             fh.write("Synthetic tailored resume.\n")
         with open(os.path.join(repo, "variants", "synthetic-role", "resume.pdf"), "wb") as fh:
             fh.write(b"synthetic pdf bytes")
-        subprocess.run(["git", "-C", repo, "init", "-q"], check=True)
+        subprocess.run(["git", "-C", repo, "init", "-q", "-b", "main"], check=True)
         subprocess.run(["git", "-C", repo, "add", "master/resume.tex", "data/profile.yaml",
                         "applications.yaml"], check=True)
         subprocess.run(["git", "-C", repo, "-c", "user.name=Synthetic", "-c",
@@ -235,20 +235,40 @@ def test_provenance_preflight_and_cap():
         item = work_item()
         entry = review(item=item, master_commit=commit, master_blob=blob,
                        head=head, artifacts=artifacts)
-        with mock.patch.object(queue_module, "read_main_tracker", return_value="[]\n"):
-            allowed, reason = am.preflight_candidate(
-                pr(head=head), entry, item, queue_module=queue_module,
-                tailor_module=tailor_module, queue_file=queue_file,
-                gates_file=gates_file, repo_dir=repo)
-            assert allowed, reason
+        allowed, reason = am.preflight_candidate(
+            pr(head=head), entry, item, queue_module=queue_module,
+            tailor_module=tailor_module, queue_file=queue_file,
+            gates_file=gates_file, repo_dir=repo)
+        assert allowed, reason
 
-            with open(gates_file, "w", encoding="utf-8") as fh:
-                fh.write("- company_aliases: [Synthetic Co]\n  gate_until: 2099-01-01\n")
-            allowed, reason = am.preflight_candidate(
-                pr(head=head), entry, item, queue_module=queue_module,
-                tailor_module=tailor_module, queue_file=queue_file,
-                gates_file=gates_file, repo_dir=repo)
-            assert not allowed and "cap" in reason, reason
+        with open(gates_file, "w", encoding="utf-8") as fh:
+            fh.write("- company_aliases: [Synthetic Co]\n  gate_until: 2099-01-01\n")
+        allowed, reason = am.preflight_candidate(
+            pr(head=head), entry, item, queue_module=queue_module,
+            tailor_module=tailor_module, queue_file=queue_file,
+            gates_file=gates_file, repo_dir=repo)
+        assert not allowed and "cap" in reason, reason
+
+        # Another lane records the tracker through its own clone of the origin.
+        # The preflight's clone has never fetched it, so a pass here would mean
+        # the tracker was read from a stale ref or the working tree.
+        lane = os.path.join(root, "lane")
+        subprocess.run(["git", "clone", "-q", "--branch", "main", origin, lane], check=True,
+                       capture_output=True)
+        published = ["[]\n"]
+
+        def publish(text):
+            if published[-1] == text:
+                return
+            with open(os.path.join(lane, "applications.yaml"), "w", encoding="utf-8") as fh:
+                fh.write(text)
+            subprocess.run(["git", "-C", lane, "add", "applications.yaml"], check=True)
+            subprocess.run(["git", "-C", lane, "-c", "user.name=Synthetic", "-c",
+                            "user.email=synthetic@example.invalid", "commit", "-qm",
+                            "tracker %d" % len(published)], check=True)
+            subprocess.run(["git", "-C", lane, "push", "-q", "origin", "HEAD:main"],
+                           check=True, capture_output=True)
+            published.append(text)
 
         tracker_row = ("- company: Synthetic Co\n  role: Software Intern\n"
                        "  link: " + LINK + "\n  status: Applied\n")
@@ -258,9 +278,9 @@ def test_provenance_preflight_and_cap():
         # changes one input while the review remains internally consistent.
         cases = [
             ("artifact", {}, {}, True, "[]\n", "[]\n", "[]\n", "artifact hash mismatch"),
-            ("master", {}, {("rev-parse", "origin/main:master/resume.tex"): "0" * 40},
+            ("master", {}, {("rev-parse", "master/resume.tex"): "0" * 40},
              False, "[]\n", "[]\n", "[]\n", "master"),
-            ("profile", {}, {("show", "origin/main:data/profile.yaml"): "name: Changed Candidate"},
+            ("profile", {}, {("show", "data/profile.yaml"): "name: Changed Candidate"},
              False, "[]\n", "[]\n", "[]\n", "profile"),
             ("JD", {"jd_text": "A revised job description."}, {}, False,
              "[]\n", "[]\n", "[]\n", "job description"),
@@ -270,24 +290,36 @@ def test_provenance_preflight_and_cap():
             ("submitted tracker", {}, {}, False, "[]\n", "[]\n", tracker_row, "already submitted"),
             ("missing cap", {}, {}, False, "[]\n", None, "[]\n", "unavailable"),
             ("malformed cap", {}, {}, False, "[]\n", "- unknown: value\n", "[]\n", "unknown field"),
+            ("missing queue", {}, {}, False, None, "[]\n", "[]\n", "queue.py init --queue"),
+            ("unreadable queue", {}, {}, False, "dir", "[]\n", "[]\n", "malformed or unreadable"),
         ]
         git_output = am._git_output
         blob_digest = am._git_blob_sha256
         for name, updates, git_overrides, bad_artifact, qtext, gtext, tracker, expected in cases:
-            with open(queue_file, "w", encoding="utf-8") as fh:
-                fh.write(qtext)
+            if os.path.isdir(queue_file):
+                os.rmdir(queue_file)
+            elif os.path.exists(queue_file):
+                os.remove(queue_file)
+            if qtext == "dir":
+                os.mkdir(queue_file)
+            elif qtext is not None:
+                with open(queue_file, "w", encoding="utf-8") as fh:
+                    fh.write(qtext)
             if gtext is None:
-                os.remove(gates_file)
+                if os.path.exists(gates_file):
+                    os.remove(gates_file)
             else:
                 with open(gates_file, "w", encoding="utf-8") as fh:
                     fh.write(gtext)
+            publish(tracker)
             current_item = dict(item, **updates)
 
-            def observed_git(path, *args):
-                if args == ("show", "origin/main:applications.yaml"):
-                    return tracker
-                if args in git_overrides:
-                    return git_overrides[args]
+            def observed_git(path, *args, git_overrides=git_overrides):
+                # Match on command and path so overrides apply to whichever
+                # commit the preflight pinned its main reads to.
+                key = (args[0], args[1].split(":", 1)[-1]) if len(args) > 1 else None
+                if key in git_overrides:
+                    return git_overrides[key]
                 return git_output(path, *args)
 
             def observed_digest(path, revision, artifact):
@@ -302,6 +334,33 @@ def test_provenance_preflight_and_cap():
                     tailor_module=tailor_module, queue_file=queue_file,
                     gates_file=gates_file, repo_dir=repo)
             assert not allowed and expected in reason, (name, allowed, reason)
+
+        # Back to a clean, valid state: readiness passes.
+        if os.path.isdir(queue_file):
+            os.rmdir(queue_file)
+        for path in (queue_file, gates_file):
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("[]\n")
+        publish("[]\n")
+        args = (pr(head=head), entry, item)
+        kwargs = dict(queue_module=queue_module, tailor_module=tailor_module,
+                      queue_file=queue_file, gates_file=gates_file, repo_dir=repo)
+        allowed, reason = am.preflight_candidate(*args, **kwargs)
+        assert allowed, reason
+
+        # A failed refresh blocks readiness even though the clone still holds a
+        # readable cached tracker, master resume, and profile.
+        cached = subprocess.check_output(
+            ["git", "-C", repo, "show", "origin/main:applications.yaml"], text=True)
+        assert cached.strip() == "[]"
+        subprocess.run(["git", "-C", repo, "remote", "set-url", "origin",
+                        "file://" + os.path.join(root, "gone-remote.git")], check=True)
+        allowed, reason = am.preflight_candidate(*args, **kwargs)
+        assert not allowed, reason
+        assert "tracker refresh failed" in reason and "cached data was not used" in reason, reason
+        refs = subprocess.check_output(
+            ["git", "-C", repo, "for-each-ref", "refs/jobsearch"], text=True)
+        assert refs == "", refs
 
 
 test_main_reports_ready_without_merge()
