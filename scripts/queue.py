@@ -1537,7 +1537,10 @@ def refresh_main_tracker(repo, log=lambda *a: None, timeout=60):
             detail = _redact(fetched.stderr) or str(fetched.returncode)
             # Concurrent fetches can invalidate Git's expected old value for
             # origin/main. Refresh the unique pin again against the latest ref.
-            if "incorrect old value provided" not in detail or attempt == 2:
+            ref_race = ("incorrect old value provided" in detail
+                        or ("cannot lock ref 'refs/remotes/origin/main'" in detail
+                            and "but expected" in detail))
+            if not ref_race or attempt == 2:
                 log("queue: tracker refresh failed: " + detail)
                 raise TrackerRefreshError(hint)
         try:
