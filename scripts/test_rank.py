@@ -107,10 +107,10 @@ assert ("Skipped Co", "Frontend Intern") not in names, names
 assert ("InFlight Co", "Backend Intern") not in names, names
 assert ("GoodFit Pte Ltd", "Software Engineer Intern") in names, names
 assert ("WeakFit Pte Ltd", "Software Engineer Intern") in names, names
-# company|role matching works when the link differs
+# A title match alone does not establish a duplicate posting.
 ghost = [{"company": "Tracked Co", "role": "Backend Intern",
           "link": "https://example.com/other"}]
-assert r.select_candidates(ghost, apps, [], set()) == [], "company|role key"
+assert r.select_candidates(ghost, apps, [], set()) == ghost
 
 # ---------------------------------------------------------------- digest line
 line = r.format_line({"score": 82, "company": "Acme",

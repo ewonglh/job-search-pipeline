@@ -8,7 +8,9 @@ import io
 import json
 import os
 import shutil
+import subprocess
 import tempfile
+import threading
 from unittest import mock
 
 import queue as q
@@ -21,14 +23,69 @@ with open(os.path.join(FIX, "merged_prs.json"), encoding="utf-8") as fh:
 with open(os.path.join(FIX, "applications_merged.yaml"), encoding="utf-8") as fh:
     TRACKER = fh.read()
 
+GIT = ["git", "-c", "user.name=Synthetic", "-c", "user.email=synthetic@example.invalid",
+       "-c", "commit.gpgsign=false"]
 
-def live_enqueue(queue_path, prs=PRS):
-    # Inject the authenticated GitHub/read-main boundary, never a writable
-    # fixture CLI flag. Real calls still require the observed owner's merge.
+
+def git(repo, *args):
+    done = subprocess.run(GIT + ["-C", repo, *args], capture_output=True, text=True)
+    assert done.returncode == 0, (args, done.stderr)
+    return done.stdout.strip()
+
+
+def remove_readonly(func, path, exc_info):
+    os.chmod(path, 0o700)
+    func(path)
+
+
+def make_remote(root, tracker, name="resume"):
+    """Local synthetic origin plus a clone of it holding ``tracker`` on main."""
+    origin = os.path.join(root, name + "-origin.git")
+    clone = os.path.join(root, name)
+    subprocess.run(GIT + ["init", "--bare", "-q", origin], check=True)
+    subprocess.run(GIT + ["init", "-q", "-b", "main", clone], check=True)
+    git(clone, "remote", "add", "origin", origin)
+    publish_tracker(clone, tracker)
+    return clone
+
+
+def publish_tracker(clone, text):
+    """Commit a new tracker on the clone's main and push it to origin."""
+    with open(os.path.join(clone, q.TRACKER_PATH), "w", encoding="utf-8") as fh:
+        fh.write(text)
+    git(clone, "add", q.TRACKER_PATH)
+    git(clone, "commit", "-q", "-m", "tracker")
+    git(clone, "push", "-q", "origin", "main")
+    return git(clone, "rev-parse", "HEAD")
+
+
+def other_lane(clone, root):
+    """A second clone of the same origin, standing in for another lane."""
+    other = os.path.join(root, "other-lane")
+    if not os.path.isdir(other):
+        subprocess.run(GIT + ["clone", "-q", "--branch", "main", git(clone, "remote", "get-url", "origin"),
+                              other], check=True, capture_output=True)
+    git(other, "pull", "-q", "--ff-only", "origin", "main")
+    return other
+
+
+def live_enqueue(queue_path, repo, prs=PRS, extra=()):
+    # Inject the authenticated GitHub boundary, never a writable fixture CLI
+    # flag. The tracker is read through the real refresh from a local origin.
+    # Real calls still require the observed owner's merge.
     with mock.patch.object(q, "gh_merged_prs", return_value=prs), \
-            mock.patch.object(q, "read_main_tracker", return_value=TRACKER), \
             mock.patch.object(q, "GH_REPO", "demo-user/resume"):
-        return q.main(["enqueue", "--queue", queue_path])
+        return q.main(["enqueue", "--queue", queue_path, "--repo", repo, *extra])
+
+
+def quiet(func, *args, **kwargs):
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        return func(*args, **kwargs)
+
+
+def read_bytes(path):
+    with open(path, "rb") as fh:
+        return fh.read()
 
 # ---------------------------------------------------------------- yaml subset
 obj = [{"company": "Acme: Inc", "role": "SWE #1", "notes": "x | y",
@@ -157,7 +214,7 @@ orion_pr = {
     "headRefName": "app/orion-games", "mergedAt": "2026-11-02T15:32:44Z",
     "url": "https://github.com/demo-user/resume/pull/272",
     "mergedBy": {"login": "demo-user"},
-    "body": "https://www.linkedin.com/jobs/view/3999000001",
+    "body": "https://www.linkedin.com/jobs/view/3999000002",
     "files": [{"path": "variants/orion-games-game-programmer-intern/resume.tex"}],
 }
 assert q.extract_entry(orion_pr, TRACKER_TWO_ROWS) is None, \
@@ -165,6 +222,10 @@ assert q.extract_entry(orion_pr, TRACKER_TWO_ROWS) is None, \
 _, g_added, g_skipped = q.enqueue([], [dict(orion_pr, _tracker=TRACKER_TWO_ROWS)])
 assert [it["pr_number"] for it in g_added] == [272], (g_added, g_skipped)
 assert g_skipped == [], g_skipped
+# A second PR carrying the already submitted posting is a different case.
+duplicate = dict(orion_pr, body="https://www.linkedin.com/jobs/view/3999000001")
+_, duplicate_rows, duplicate_skips = q.enqueue([], [dict(duplicate, _tracker=TRACKER_TWO_ROWS)])
+assert not duplicate_rows and duplicate_skips == [(272, "already submitted in tracker")]
 # the row that really is this PR's still skips (same PR, submitted)
 same = dict(orion_pr, number=196, url="https://github.com/demo-user/resume/pull/196",
             headRefName="app/orion-games-ai-engineer-intern")
@@ -195,6 +256,43 @@ original_snapshot_root = q.SNAPSHOT_ROOT
 try:
     q.SNAPSHOT_ROOT = os.path.join(tmp, "private-snapshots")
     qfile = os.path.join(tmp, "queue.yaml")
+    repo = make_remote(tmp, TRACKER)
+
+    # A missing queue is a source error, never an empty queue. Every command
+    # that would read or write it stops, names the init command, and creates
+    # nothing.
+    for argv in (["list"], ["next"], ["release-stale"],
+                 ["status", "--pr", "12", "--status", "failed", "--notes", "x"],
+                 ["claim", "--pr", "12", "--repo", repo],
+                 ["enqueue", "--repo", repo],
+                 ["enqueue", "--dry-run", "--repo", repo]):
+        err = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            with mock.patch.object(q, "gh_merged_prs", return_value=PRS) as gh:
+                rc = q.main([argv[0], "--queue", qfile] + argv[1:])
+        assert rc in (1, 2), (argv, rc)
+        assert "queue.py init --queue" in err.getvalue(), (argv, err.getvalue())
+        assert not os.path.exists(qfile), argv
+        gh.assert_not_called()
+    try:
+        q.load_queue(qfile)
+        raise AssertionError("missing queue loaded")
+    except q.QueueMissingError as exc:
+        assert "queue.py init --queue" in str(exc)
+
+    # Offline metadata cannot mint authorization or write even an empty store.
+    for flags in (["--prs", os.path.join(FIX, "merged_prs.json")],
+                  ["--tracker", os.path.join(FIX, "applications_merged.yaml")]):
+        assert q.main(["enqueue", "--queue", qfile] + flags) == 2
+        assert not os.path.exists(qfile)
+
+    # init creates the empty store once and never overwrites a valid one.
+    assert quiet(q.main, ["init", "--queue", qfile]) == 0
+    assert q.load_queue(qfile) == []
+    created = read_bytes(qfile)
+    assert quiet(q.main, ["init", "--queue", qfile]) == 0
+    assert read_bytes(qfile) == created
+
     # dry-run: adds to stdout, writes nothing
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
@@ -202,34 +300,31 @@ try:
                      "--tracker", os.path.join(FIX, "applications_merged.yaml"),
                      "--queue", qfile, "--dry-run"])
     assert rc == 0
-    assert not os.path.exists(qfile), "--dry-run must not write the store"
+    assert read_bytes(qfile) == created, "--dry-run must not write the store"
     out = buf.getvalue()
     assert out.count("queued:") == 2, repr(out)
     assert "Quantum Co" in out and "Ghost Co" in out, out
 
-    # Offline metadata cannot mint authorization or write even an empty store.
-    for flags in (["--prs", os.path.join(FIX, "merged_prs.json")],
-                  ["--tracker", os.path.join(FIX, "applications_merged.yaml")]):
-        assert q.main(["enqueue", "--queue", qfile] + flags) == 2
-        assert not os.path.exists(qfile)
     # A non-owner merge and missing merge time are not enqueue authorization.
     for bad in ([dict(pr, mergedBy={"login": "untrusted-fixture"}) for pr in PRS],
                 [dict(pr, mergedAt=None) for pr in PRS]):
-        assert live_enqueue(qfile, bad) == 0
+        assert live_enqueue(qfile, repo, bad) == 0
         assert q.load_queue(qfile) == []
 
     # real run writes the store
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
-        rc = live_enqueue(qfile)
+        rc = live_enqueue(qfile, repo)
     assert rc == 0 and os.path.exists(qfile)
     store = q.load_queue(qfile)
     assert [it["pr_number"] for it in store] == [12, 14], store
+    # the temporary fetch ref never outlives the call
+    assert git(repo, "for-each-ref", "refs/jobsearch") == ""
 
     # re-run: silent (nothing new) but exit 0
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
-        rc = live_enqueue(qfile)
+        rc = live_enqueue(qfile, repo)
     assert rc == 0 and buf.getvalue() == "", repr(buf.getvalue())
 
     # next -> oldest queued (PR 12)
@@ -342,15 +437,203 @@ try:
         q.main(["list", "--queue", qfile, "--json", "--status", "submitted"])
     assert [it["pr_number"] for it in json.loads(buf.getvalue())] == [12]
 
-    # empty queue -> next is silent
+    # initialised empty queue -> next is silent
     empty = os.path.join(tmp, "empty.yaml")
+    assert quiet(q.main, ["init", "--queue", empty]) == 0
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         rc = q.main(["next", "--queue", empty])
     assert rc == 0 and buf.getvalue() == "", repr(buf.getvalue())
 finally:
     q.SNAPSHOT_ROOT = original_snapshot_root
-    shutil.rmtree(tmp)
+    shutil.rmtree(tmp, onerror=remove_readonly)
+
+
+# ---------------------------------------------------------------- queue formats
+# Valid empty and valid legacy stores load; malformed stores stop every write
+# and are left byte-for-byte intact. None of these is "missing".
+with tempfile.TemporaryDirectory() as root:
+    repo = make_remote(root, TRACKER)
+    path = os.path.join(root, "queue.yaml")
+    assert quiet(q.main, ["init", "--queue", path]) == 0
+    for text in ("", "# a truncated tracker\n"):
+        revision = q.TrackerRevision("a" * 40, text, q.hashlib.sha256(text.encode()).hexdigest())
+        with mock.patch.object(q, "gh_merged_prs", return_value=PRS), \
+                mock.patch.object(q, "refresh_main_tracker", return_value=revision), \
+                mock.patch.object(q, "gh_pr_files") as metadata:
+            assert quiet(q.main, ["enqueue", "--repo", repo, "--queue", path]) != 0
+            assert q.load_queue(path) == []
+            metadata.assert_not_called()
+    for label, text in (("explicit empty", "[]\n"),
+                        ("generated empty", q.dump_queue([])),
+                        ("comment-only header then empty", "# header\n\n[]\n")):
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        assert q.load_queue(path) == [], label
+    legacy = q.load_queue(os.path.join(FIX, "queue_existing.yaml"))
+    assert [row["pr_number"] for row in legacy] == [12]
+    shutil.copy(os.path.join(FIX, "queue_existing.yaml"), path)
+    assert quiet(q.main, ["init", "--queue", path]) == 0, "init keeps a valid legacy queue"
+    assert q.load_queue(path) == legacy
+    assert quiet(q.main, ["list", "--queue", path]) == 0
+
+    for label, text in (("zero bytes", ""), ("prose", "not a list\n"),
+                        ("unknown status", "- pr_number: 3\n  status: bogus\n"),
+                        ("duplicate PR", "- pr_number: 3\n- pr_number: 3\n"),
+                        ("empty marker plus rows", "[]\n- pr_number: 3\n")):
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        before = read_bytes(path)
+        try:
+            q.load_queue(path)
+            raise AssertionError(label + " loaded")
+        except q.QueueMissingError:
+            raise AssertionError(label + " reported as missing")
+        except q.QueueStateError:
+            pass
+        with mock.patch.object(q, "gh_merged_prs", return_value=PRS):
+            assert quiet(q.main, ["enqueue", "--queue", path, "--repo", repo]) == 1, label
+        assert quiet(q.main, ["init", "--queue", path]) == 2, label
+        assert quiet(q.main, ["claim", "--queue", path, "--repo", repo, "--pr", "3"]) == 2, label
+        assert read_bytes(path) == before, label
+
+
+# ---------------------------------------------------------------- fresh tracker revision
+# The tracker comes from the commit that a successful origin/main fetch
+# returned: not the working tree, not a stale origin/main ref.
+with tempfile.TemporaryDirectory() as root:
+    repo = make_remote(root, "[]\n")
+    cached_head = git(repo, "rev-parse", "origin/main")
+    lane = other_lane(repo, root)
+    submitted = TRACKER
+    new_head = publish_tracker(lane, submitted)
+    # The clone knows nothing of the new commit; its working tree is stale too.
+    assert git(repo, "rev-parse", "origin/main") == cached_head
+    revision = q.refresh_main_tracker(repo)
+    assert revision.commit == new_head and revision.text == submitted
+    assert revision.sha256 == __import__("hashlib").sha256(submitted.encode()).hexdigest()
+    assert git(repo, "rev-parse", "origin/main") == new_head
+    assert git(repo, "for-each-ref", "refs/jobsearch") == ""
+    q.verify_tracker_revision(repo, revision)
+
+    # Enqueue skips PR 9 because the fresh tracker shows it submitted, even
+    # though the clone's own cached copy and working tree have no such row.
+    path = os.path.join(root, "queue.yaml")
+    assert quiet(q.main, ["init", "--queue", path]) == 0
+    with open(os.path.join(repo, q.TRACKER_PATH), "w", encoding="utf-8") as fh:
+        fh.write("[]\n")
+    err = io.StringIO()
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+        assert live_enqueue(path, repo, extra=("--json",)) == 0
+    assert "skip #9: already submitted in tracker" in err.getvalue(), err.getvalue()
+    assert "pinned to origin/main " + new_head[:12] in err.getvalue()
+
+
+# ---------------------------------------------------------------- failed refresh, cached data
+# A readable cached copy must not stand in for a refresh that failed: enqueue
+# stops before any PR file lookup or write, and says what to do.
+with tempfile.TemporaryDirectory() as root:
+    repo = make_remote(root, TRACKER)
+    path = os.path.join(root, "queue.yaml")
+    assert quiet(q.main, ["init", "--queue", path]) == 0
+    before = read_bytes(path)
+    assert git(repo, "show", "origin/main:" + q.TRACKER_PATH) == TRACKER.strip()  # cache is readable
+    git(repo, "remote", "set-url", "origin",
+        "file://" + os.path.join(root, "gone-remote.git"))
+    assert "secret" not in q._redact(
+        "fatal: unable to access 'https://user:secret@host.example/x.git/': no route")
+    prs = [dict(pr, files=None) for pr in PRS]
+    for dry in ((), ("--dry-run",)):
+        err = io.StringIO()
+        with mock.patch.object(q, "gh_pr_files") as files, \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            assert live_enqueue(path, repo, prs, extra=dry) == 1
+        files.assert_not_called()
+        assert "tracker refresh failed" in err.getvalue(), err.getvalue()
+        assert "cached data was not used" in err.getvalue()
+        assert "secret" not in err.getvalue(), "credentials must not reach logs"
+        assert read_bytes(path) == before
+    try:
+        q.refresh_main_tracker(repo)
+        raise AssertionError("refresh succeeded against an unreachable remote")
+    except q.TrackerRefreshError:
+        pass
+    assert git(repo, "for-each-ref", "refs/jobsearch") == ""
+    # No clone at all is also a refresh failure, not an empty tracker.
+    try:
+        q.refresh_main_tracker(os.path.join(root, "not-a-clone"))
+        raise AssertionError("refresh succeeded without a clone")
+    except q.TrackerRefreshError:
+        pass
+
+
+# ---------------------------------------------------------------- pinned recheck under lock
+# Another lane lands a newer tracker after our refresh but before our write.
+# The locked recheck must refuse the write rather than trust the old revision.
+with tempfile.TemporaryDirectory() as root:
+    repo = make_remote(root, TRACKER)
+    lane = other_lane(repo, root)
+    path = os.path.join(root, "queue.yaml")
+    assert quiet(q.main, ["init", "--queue", path]) == 0
+    before = read_bytes(path)
+    real_refresh = q.refresh_main_tracker
+    races = []
+
+    def refresh_then_race(clone, log=lambda *a: None, **kw):
+        revision = real_refresh(clone, log, **kw)
+        races.append(1)
+        publish_tracker(lane, TRACKER + "- company: Racer %d\n  role: Intern\n"
+                        "  link: https://example.com/jobs/racer-%d\n  status: applied\n"
+                        % (len(races), len(races)))
+        git(clone, "fetch", "-q", "origin", "main")  # another lane's fetch
+        return revision
+
+    err = io.StringIO()
+    with mock.patch.object(q, "refresh_main_tracker", side_effect=refresh_then_race), \
+            contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+        assert live_enqueue(path, repo) == 1
+    assert "tracker changed on origin/main after it was refreshed" in err.getvalue(), err.getvalue()
+    assert read_bytes(path) == before
+    # A dry run writes nothing, so it does not need the recheck.
+    with mock.patch.object(q, "refresh_main_tracker", side_effect=refresh_then_race), \
+            contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        assert live_enqueue(path, repo, extra=("--dry-run",)) == 0
+    # The next run, with a fresh refresh, succeeds.
+    assert live_enqueue(path, repo) == 0
+    assert [row["pr_number"] for row in q.load_queue(path)] == [12, 14]
+
+
+# ---------------------------------------------------------------- concurrent same-identity writes
+# Two enqueues for different PRs of one application race through the lock:
+# at most one active item results.
+with tempfile.TemporaryDirectory() as root:
+    repo = make_remote(root, "[]\n")
+    path = os.path.join(root, "queue.yaml")
+    assert quiet(q.main, ["init", "--queue", path]) == 0
+    lists = {"first": [prA], "second": [prB]}
+    gate = threading.Barrier(2)
+
+    def per_thread_prs(log):
+        gate.wait(timeout=20)
+        return lists[threading.current_thread().name]
+
+    results = {}
+
+    def worker():
+        results[threading.current_thread().name] = q.main(
+            ["enqueue", "--queue", path, "--repo", repo])
+
+    with mock.patch.object(q, "gh_merged_prs", side_effect=per_thread_prs), \
+            mock.patch.object(q, "GH_REPO", "demo-user/resume"), \
+            contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        threads = [threading.Thread(target=worker, name=name) for name in lists]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=60)
+    assert results == {"first": 0, "second": 0}, results
+    rows = q.load_queue(path)
+    assert len(rows) == 1 and rows[0]["status"] == "queued", rows
 
 
 # ---------------------------------------------------------------- tracker write-back

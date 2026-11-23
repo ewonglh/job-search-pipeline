@@ -32,7 +32,10 @@ import sys
 import urllib.error
 import urllib.request
 from datetime import date, datetime, timedelta
-from urllib.parse import urljoin, urlsplit, urlunsplit
+from urllib.parse import urljoin, urlsplit
+from application_identity import (
+    enrich_posting, identity_evidence, normalize_posting_url, requisition_key, same_posting,
+)
 from config import (default_repo_dir, float_setting, github_repo_setting,
                     int_setting, path_setting, value_setting)
 
@@ -101,13 +104,7 @@ def norm_text(s):
 
 
 def normalize_url(url):
-    """Strip query/fragment and trailing slashes so the same job dedups."""
-    url = (url or "").strip()
-    if not url:
-        return ""
-    parts = urlsplit(url)
-    path = parts.path.rstrip("/")
-    return urlunsplit((parts.scheme, parts.netloc, path, "", ""))
+    return normalize_posting_url(url)
 
 
 def is_intern_role(role):
@@ -178,11 +175,8 @@ def is_generic_link(link):
 
 
 def dedup_key(p):
-    return "|".join((
-        norm_text(p.get("company", "")).lower(),
-        norm_text(p.get("role", "")).lower(),
-        normalize_url(p.get("link", "")).lower(),
-    ))
+    link = normalize_url(p.get("link"))
+    return requisition_key(p) or ("link:" + link if link else "")
 
 
 # ---------------------------------------------------------------- parsing
@@ -496,6 +490,7 @@ def normalize(p, source=None, today=None):
     else:
         posted_iso = None
     return {
+        **identity_evidence(p),
         "company": norm_text(p.get("company", "")),
         "role": norm_text(p.get("role", "")),
         "link": normalize_url(p.get("link", "")),
@@ -524,18 +519,17 @@ def filter_postings(postings, today, days=30, assume_sg=False, log=lambda *a: No
 def coalesce(postings):
     """Collapse same-key candidates from one run, keeping the richest fields.
     Never touches the store; only the incoming batch."""
-    by, order = {}, []
+    merged = []
     for p in postings:
-        k = dedup_key(p)
-        if k not in by:
-            by[k] = dict(p)
-            order.append(k)
+        cur = next((row for row in merged if same_posting(p, row)), None)
+        if cur is None:
+            merged.append(dict(p))
             continue
-        cur = by[k]
         for f in ("location", "posted", "company", "role"):
             if not cur.get(f) and p.get(f):
                 cur[f] = p[f]
-    return [by[k] for k in order]
+        enrich_posting(cur, p)
+    return merged
 
 
 def role_filter_split(postings):
@@ -547,41 +541,23 @@ def role_filter_split(postings):
     return kept, rejected
 
 
-def company_role_key(p):
-    """Secondary dedupe: same company and role title is the same opening even
-    when the URL differs (reposts, /jobs/view/<id> vs generic search URLs)."""
-    return "|".join((
-        norm_text(p.get("company", "")).lower(),
-        norm_text(p.get("role", "")).lower(),
-    ))
-
-
-def merge_postings(existing, incoming, today):
-    """Append only postings whose normalised key is not already present.
-    Existing entries are never modified or removed. A posting whose
-    company+role pair already exists is treated as a duplicate too, so the
-    same opening reposted under a different URL is never stored twice.
-    Symmetrically, a URL already stored under a different role title
-    (re-scraped reposts with tweaked titles) is also a duplicate."""
-    seen = set()
-    seen_cr = set()
-    seen_link = set()
-    for p in existing:
-        seen.add(p.get("key") or dedup_key(p))
-        seen_cr.add(company_role_key(p))
-        seen_link.add(normalize_url(p.get("link", "")).lower())
-    merged, new = list(existing), []
+def merge_postings(existing, incoming, today, limit=0):
+    """Append new requisitions and retain stronger evidence across runs."""
+    merged, new = [dict(row) for row in existing], []
     for p in incoming:
-        k = p.get("key") or dedup_key(p)
-        if (not k.strip("|") or k in seen or company_role_key(p) in seen_cr
-                or normalize_url(p.get("link", "")).lower() in seen_link):
+        k = dedup_key(p)
+        if not k:
+            continue
+        matches = [row for row in merged if same_posting(p, row)]
+        if matches:
+            if len(matches) == 1:
+                enrich_posting(matches[0], p)
+            continue
+        if limit > 0 and len(new) >= limit:
             continue
         entry = dict(p)
         entry["key"] = k
         entry.setdefault("added", today.isoformat())
-        seen.add(k)
-        seen_cr.add(company_role_key(p))
-        seen_link.add(normalize_url(p.get("link", "")).lower())
         merged.append(entry)
         new.append(entry)
     return merged, new
@@ -750,12 +726,9 @@ def main(argv=None):
         ensure_repo(args.repo, log)
         existing = read_store(args.repo)
 
-    merged, new = merge_postings(existing, filtered, today)
-    if args.limit and args.limit > 0:
-        new = new[:args.limit]
-        merged = list(existing) + new
+    merged, new = merge_postings(existing, filtered, today, args.limit)
 
-    if not args.dry_run and new:
+    if not args.dry_run and merged != existing:
         write_store(args.repo, merged)
         commit_and_push(args.repo, len(new), log)
     elif not args.dry_run and not new:
