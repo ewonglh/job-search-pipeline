@@ -976,6 +976,12 @@ def refresh_main_tracker(repo, log=lambda *a: None, timeout=60):
         text = blob.decode("utf-8")
     except UnicodeError:
         raise TrackerRefreshError("tracker at %s is not valid UTF-8" % commit[:12])
+    try:
+        rows = parse_queue(text, status_values=None)
+    except QueueStateError as exc:
+        raise TrackerRefreshError("tracker is malformed: " + str(exc)) from exc
+    if not rows and not any(line.strip() == "[]" for line in text.splitlines()):
+        raise TrackerRefreshError("tracker needs entries or an explicit empty-list marker")
     return TrackerRevision(commit, text, hashlib.sha256(blob).hexdigest())
 
 
@@ -1616,7 +1622,9 @@ def cmd_enqueue(args, log):
         tracker_text = revision.text
         log("queue: tracker pinned to origin/main %s" % revision.commit[:12])
     try:
-        parse_queue(tracker_text, status_values=None)
+        tracker_rows = parse_queue(tracker_text, status_values=None)
+        if not tracker_rows and not any(line.strip() == "[]" for line in tracker_text.splitlines()):
+            raise QueueStateError("tracker needs entries or an explicit empty-list marker")
     except QueueStateError as exc:
         log("queue: current tracker is malformed; enqueue stopped: " + str(exc))
         return 1

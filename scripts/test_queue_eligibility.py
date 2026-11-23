@@ -35,7 +35,7 @@ def other_lane(case):
     """A second clone of the same origin, standing in for another lane."""
     other = os.path.join(case["root"], "other-lane")
     if not os.path.isdir(other):
-        subprocess.run(GIT + ["clone", "-q", git(case["repo"], "remote", "get-url", "origin"),
+        subprocess.run(GIT + ["clone", "-q", "--branch", "main", git(case["repo"], "remote", "get-url", "origin"),
                               other], check=True, capture_output=True)
     git(other, "pull", "-q", "--ff-only", "origin", "main")
     return other

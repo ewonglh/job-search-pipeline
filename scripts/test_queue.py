@@ -33,6 +33,11 @@ def git(repo, *args):
     return done.stdout.strip()
 
 
+def remove_readonly(func, path, exc_info):
+    os.chmod(path, 0o700)
+    func(path)
+
+
 def make_remote(root, tracker, name="resume"):
     """Local synthetic origin plus a clone of it holding ``tracker`` on main."""
     origin = os.path.join(root, name + "-origin.git")
@@ -58,7 +63,7 @@ def other_lane(clone, root):
     """A second clone of the same origin, standing in for another lane."""
     other = os.path.join(root, "other-lane")
     if not os.path.isdir(other):
-        subprocess.run(GIT + ["clone", "-q", git(clone, "remote", "get-url", "origin"),
+        subprocess.run(GIT + ["clone", "-q", "--branch", "main", git(clone, "remote", "get-url", "origin"),
                               other], check=True, capture_output=True)
     git(other, "pull", "-q", "--ff-only", "origin", "main")
     return other
@@ -441,7 +446,7 @@ try:
     assert rc == 0 and buf.getvalue() == "", repr(buf.getvalue())
 finally:
     q.SNAPSHOT_ROOT = original_snapshot_root
-    shutil.rmtree(tmp)
+    shutil.rmtree(tmp, onerror=remove_readonly)
 
 
 # ---------------------------------------------------------------- queue formats
@@ -450,6 +455,15 @@ finally:
 with tempfile.TemporaryDirectory() as root:
     repo = make_remote(root, TRACKER)
     path = os.path.join(root, "queue.yaml")
+    assert quiet(q.main, ["init", "--queue", path]) == 0
+    for text in ("", "# a truncated tracker\n"):
+        revision = q.TrackerRevision("a" * 40, text, q.hashlib.sha256(text.encode()).hexdigest())
+        with mock.patch.object(q, "gh_merged_prs", return_value=PRS), \
+                mock.patch.object(q, "refresh_main_tracker", return_value=revision), \
+                mock.patch.object(q, "gh_pr_files") as metadata:
+            assert quiet(q.main, ["enqueue", "--repo", repo, "--queue", path]) != 0
+            assert q.load_queue(path) == []
+            metadata.assert_not_called()
     for label, text in (("explicit empty", "[]\n"),
                         ("generated empty", q.dump_queue([])),
                         ("comment-only header then empty", "# header\n\n[]\n")):

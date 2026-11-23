@@ -253,7 +253,7 @@ def test_provenance_preflight_and_cap():
         # The preflight's clone has never fetched it, so a pass here would mean
         # the tracker was read from a stale ref or the working tree.
         lane = os.path.join(root, "lane")
-        subprocess.run(["git", "clone", "-q", origin, lane], check=True,
+        subprocess.run(["git", "clone", "-q", "--branch", "main", origin, lane], check=True,
                        capture_output=True)
         published = ["[]\n"]
 

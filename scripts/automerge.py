@@ -363,14 +363,11 @@ def preflight_candidate(pr, review, work_item=None, queue_module=None,
         # A missing queue is a source error with the init command, never an
         # empty queue; a malformed one is named as malformed.
         try:
-            q.load_queue(qfile)
+            queue_items = q.load_queue(qfile)
         except q.QueueMissingError as exc:
             return False, "queue is unavailable: " + str(exc)
         except q.QueueStateError as exc:
             return False, "queue is malformed or unreadable: " + str(exc)
-        with open(qfile, encoding="utf-8") as fh:
-            queue_text = fh.read()
-        queue_items = _strict_rows(queue_text, "queue", q)
         queue_keys = set()
         for item in queue_items:
             if item.get("status") not in q.STATUSES:
