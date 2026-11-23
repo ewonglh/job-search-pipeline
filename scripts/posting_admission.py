@@ -81,9 +81,10 @@ def owner_control_exclusion(posting, skipped=(), gates=(), today=None):
 
 
 def admission_exclusion(posting, skipped=(), gates=(), explicitly_closed=False,
-                        today=None):
+                        today=None, max_age_days=None):
     """Shared final admission check for freshness, owner controls and closure."""
-    reason = freshness_exclusion(posting, today=today)
+    reason = freshness_exclusion(posting, today=today,
+                                 max_age_days=max_age_days)
     if reason:
         return reason
     reason = owner_control_exclusion(posting, skipped, gates, today=today)
