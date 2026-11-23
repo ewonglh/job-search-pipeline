@@ -131,9 +131,11 @@ with tempfile.TemporaryDirectory() as temp:
                                          ATTEMPT, pdf_file, answers_file)
     manifest_path = os.path.join(root, "manifests", prepared["snapshot_id"] + ".json")
     canonical_manifest = open(manifest_path, "rb").read()
+    os.chmod(manifest_path, 0o600)
     _write(manifest_path, json.dumps(manifest, sort_keys=True, indent=2).encode("utf-8"))
     expect_error(lambda: snapshots.verify_snapshot(root, prepared["snapshot_id"],
                                                     APP, ATTEMPT), "encoding")
+    os.chmod(manifest_path, 0o600)
     _write(manifest_path, canonical_manifest)
     current_facts = snapshots.read_snapshot_manifest(root, prepared["snapshot_id"])
     assert current_facts["snapshot_kind"] == "current"
