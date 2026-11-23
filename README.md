@@ -40,6 +40,10 @@ answers stays an owner decision during the drain.
 | Email ingest | `email_ingest.py` (optional managed adapter) | yes | Bounded read-only IMAP history ingestion into the private evidence ledger |
 | Track | `application_identity.py` `recruitment_evidence.py` `outcomes.py` `stages.py` `summary.py` `dashboard.py` | mostly | Canonical joins, private evidence ledger, verified stage machine, digests, local board |
 
+The queue's OpenClaw runner and host ownership verifier are documented in
+[`docs/openclaw-runner.md`](docs/openclaw-runner.md). It uses the queue's shared
+`claim --next` selector and leaves installed schedule read-back to the owner.
+
 Four of these are pure mechanics. Tailoring and submission need judgement, so
 those are where an agent earns its place or you spend your own time.
 
