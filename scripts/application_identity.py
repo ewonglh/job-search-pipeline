@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from datetime import date
+import json
 import re
 from typing import Optional
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -71,8 +72,46 @@ def pr_number(row: dict) -> int:
     return next(iter(numbers), 0)
 
 
+def requisition_key(row: dict) -> str:
+    """Use a requisition ID supplied with evidence from the employer or ATS."""
+    company = " ".join(str(row.get("company") or "").split()).casefold()
+    requisition = str(row.get("requisition_id") or "").strip()
+    evidence = str(row.get("requisition_evidence") or "").strip()
+    if not (company and requisition and evidence):
+        return ""
+    return "requisition:" + json.dumps([company, requisition], separators=(",", ":"))
+
+
+def posting_keys(row: dict) -> set[str]:
+    """Return the verified requisition and listing identifiers for admission."""
+    keys = {requisition_key(row)}
+    keys.update(
+        "link:" + link for value in (row.get("link"), row.get("apply_url")
+                                     if row.get("apply_url_evidence") else None)
+        if (link := normalize_posting_url(value))
+    )
+    keys.discard("")
+    return keys
+
+
+def same_posting(left: dict, right: dict) -> bool:
+    """Match verified requisitions, or a shared route when an ID is missing."""
+    a, b = requisition_key(left), requisition_key(right)
+    return a == b if a and b else bool(posting_keys(left) & posting_keys(right))
+
+
+def identity_evidence(row: dict) -> dict:
+    """Fields carried between discovery, work items, and local submissions."""
+    return {key: row[key] for key in ("requisition_id", "requisition_evidence",
+                                      "apply_url", "apply_url_evidence")
+            if row.get(key)}
+
+
 def application_id(row: dict) -> str:
     """Return the preferred deterministic ID for a single tracker/queue row."""
+    requisition = requisition_key(row)
+    if requisition:
+        return requisition
     link = normalize_posting_url(row.get("link"))
     if link:
         return "link:" + link
@@ -113,10 +152,7 @@ def _submission_dates(rows: list[dict], side: str) -> set[date]:
 
 
 def _row_aliases(row: dict) -> set[str]:
-    aliases = set()
-    link = normalize_posting_url(row.get("link"))
-    if link:
-        aliases.add("link:" + link)
+    aliases = posting_keys(row)
     aliases.update("pr:" + str(number) for number in _pr_numbers(row))
     identity = _identity_alias(row)
     if identity:
@@ -168,7 +204,7 @@ def resolve_applications(tracker_rows: list[dict], queue_rows: list[dict],
     strong_owners = defaultdict(set)
     for index, record in enumerate(records):
         for alias in record["aliases"]:
-            if alias.startswith(("link:", "pr:")):
+            if alias.startswith(("link:", "pr:", "requisition:")):
                 strong_owners[alias].add(index)
     for index, record in enumerate(records):
         if index in consumed or len(_pr_numbers(record["row"])) < 2:
@@ -244,15 +280,31 @@ def resolve_applications(tracker_rows: list[dict], queue_rows: list[dict],
 
     # Link identity groups are definitive only when each source contributes
     # one distinct row. Multiple rows with the same link can be contradictory.
-    by_link = defaultdict(list)
+    by_link = defaultdict(set)
     for index, record in enumerate(records):
         if index in consumed:
             continue
-        link_ids = [alias for alias in record["aliases"] if alias.startswith("link:")]
-        if len(link_ids) == 1:
-            by_link[link_ids[0]].append(index)
-    for link_id, indexes in by_link.items():
-        if len(indexes) < 2:
+        for key in posting_keys(record["row"]):
+            by_link[key].add(index)
+    for index, record in enumerate(records):
+        if index in consumed:
+            continue
+        connected, pending = set(), [index]
+        while pending:
+            current = pending.pop()
+            if current in connected:
+                continue
+            connected.add(current)
+            for key in posting_keys(records[current]["row"]):
+                pending.extend(by_link[key] - connected)
+        if len(connected) < 2:
+            continue
+        indexes = sorted(connected)
+        requisitions = {requisition_key(records[i]["row"]) for i in indexes} - {""}
+        link_id = next(iter(requisitions), application_id(record["row"]))
+        if len(requisitions) > 1:
+            emit_conflict("conflicting_requisitions", indexes, requisitions,
+                          "A verified route belongs to different requisition IDs.")
             continue
         tracker = [i for i in indexes if records[i]["source"] == "tracker"]
         queue = [i for i in indexes if records[i]["source"] == "queue"]
@@ -325,7 +377,7 @@ def resolve_applications(tracker_rows: list[dict], queue_rows: list[dict],
         if index in consumed:
             continue
         identity = _identity_alias(record["row"])
-        if identity:
+        if identity and not requisition_key(record["row"]):
             by_identity[identity].append(index)
     for identity, indexes in by_identity.items():
         if len(indexes) == 1:
