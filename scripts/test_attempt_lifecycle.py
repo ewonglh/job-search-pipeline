@@ -47,7 +47,7 @@ def make_case(directory, rows=None):
 
 
 def claim_patches(barrier=None):
-    def inputs(args, item, items, log):
+    def inputs(args, item, items, max_age_days, run_date, log):
         if barrier is not None:
             barrier.wait(timeout=5)
         return {
@@ -58,6 +58,7 @@ def claim_patches(barrier=None):
             "profile_path": "/synthetic/profile.yaml",
             "profile_sha256": "p" * 64,
             "postings_sha256": "j" * 64,
+            "posting_revision": "a" * 40,
             "tracker_revision": q.TrackerRevision(
                 "a" * 40, "[]\n", "t" * 64),
             "tracker_sha256": "t" * 64,
@@ -67,7 +68,8 @@ def claim_patches(barrier=None):
             "application_id": q._canonical_queue_identity(item),
         }
 
-    def recheck(args, item, items, posting, revision):
+    def recheck(args, item, items, posting, revision, postings_sha256,
+                max_age_days, run_date):
         return ("p" * 64, "j" * 64, "t" * 64, "s" * 64, "g" * 64)
 
     return mock.patch.object(q, "_read_claim_inputs", side_effect=inputs), \
@@ -338,7 +340,7 @@ with tempfile.TemporaryDirectory() as directory:
             spec = importlib.util.spec_from_file_location("job_queue", os.path.join(scripts, "queue.py"))
             q = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(q)
-            def inputs(args, item, items, log):
+            def inputs(args, item, items, max_age_days, run_date, log):
                 open(os.path.join(barrier, runner + ".ready"), "w").close()
                 deadline = time.time() + 15
                 while len([name for name in os.listdir(barrier) if name.endswith(".ready")]) < 2:
@@ -350,13 +352,14 @@ with tempfile.TemporaryDirectory() as directory:
                     "apply_url": "https://apply.example.invalid/%s" % item["pr_number"],
                     "decision": {"status": "eligible", "reason_codes": [], "provenance": {}},
                     "profile_path": "/synthetic/profile.yaml", "profile_sha256": "p" * 64,
-                    "postings_sha256": "j" * 64,
+                    "postings_sha256": "j" * 64, "posting_revision": "a" * 40,
                     "tracker_revision": q.TrackerRevision("a" * 40, "[]\\n", "t" * 64),
                     "tracker_sha256": "t" * 64, "skip_sha256": "s" * 64,
                     "gate_sha256": "g" * 64, "jd_sha256": "d" * 64,
                     "application_id": q._canonical_queue_identity(item),
                 }
-            def recheck(args, item, items, posting, revision):
+            def recheck(args, item, items, posting, revision, postings_sha256,
+                        max_age_days, run_date):
                 return ("p" * 64, "j" * 64, "t" * 64, "s" * 64, "g" * 64)
             with mock.patch.object(q, "_read_claim_inputs", side_effect=inputs), \\
                     mock.patch.object(q, "_read_claim_validation_inputs", side_effect=recheck):
