@@ -424,7 +424,7 @@ def preflight_candidate(pr, review, work_item=None, queue_module=None,
                     and candidate_keys & posting_keys(item)):
                 return False, "posting already has an active queue item"
 
-        tracker = _strict_rows(main_revision.text, "current applications tracker", q)
+        tracker = q.parse_application_tracker(main_revision.text, "current applications tracker")
         tracker_links = set()
         for item in tracker:
             link = normalize_url(item.get("link", ""))

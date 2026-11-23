@@ -347,7 +347,9 @@ def test_provenance_preflight_and_cap():
                            "  requisition_evidence: synthetic ATS record\n")
         tracker_row = ("- company: Synthetic Co\n  role: Software Intern\n"
                        "  link: " + alias_link + "\n" + identity_fields +
-                       "  status: Applied\n")
+                       "  status: Applied\n  notes: |-\n"
+                       "    Confirmed: synthetic receipt\n"
+                       "    Preserve this second line.\n")
         active_queue = ("- company: Synthetic Co\n  role: Software Intern\n"
                         "  link: " + alias_link + "\n" + identity_fields +
                         "  status: queued\n  pr_number: 12\n")
@@ -440,6 +442,21 @@ def test_provenance_preflight_and_cap():
         args = (pr(head=head), entry, item)
         kwargs = dict(queue_module=queue_module, tailor_module=tailor_module,
                       queue_file=queue_file, gates_file=gates_file, repo_dir=repo)
+        with mock.patch.object(tailor_module, "fetch_jd",
+                               return_value={"jd_text": item["jd_text"]}):
+            allowed, reason = am.preflight_candidate(*args, **kwargs)
+        assert allowed, reason
+
+        publish("- company: Other Synthetic Co\n  role: Software Intern\n"
+                "  link: https://example.invalid/jobs/other-role\n"
+                "  status: Applied\n  notes: |-\n"
+                "    Confirmed: unrelated synthetic receipt\n"
+                "    Preserve this second line.\n")
+        with mock.patch.object(tailor_module, "fetch_jd",
+                               return_value={"jd_text": item["jd_text"]}):
+            allowed, reason = am.preflight_candidate(*args, **kwargs)
+        assert allowed, reason
+        publish("[]\n")
         with mock.patch.object(tailor_module, "fetch_jd",
                                return_value={"jd_text": item["jd_text"]}):
             allowed, reason = am.preflight_candidate(*args, **kwargs)
