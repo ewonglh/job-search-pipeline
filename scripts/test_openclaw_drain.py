@@ -217,7 +217,7 @@ def test_openclaw_adapter_uses_exact_session_and_owner_tuple():
     assert "attempt_id: attempt-23" in observed["prompt"]
     assert "runner_id: runner-a" in observed["prompt"]
     assert "session_ref: " + SESSION in observed["prompt"]
-    assert "skills/job-queue-drain/SKILL.md" in observed["prompt"]
+    assert os.path.join("skills", "job-queue-drain", "SKILL.md") in observed["prompt"]
     assert observed["kwargs"]["capture_output"] is True
     assert observed["kwargs"]["check"] is False
 
