@@ -232,13 +232,30 @@ with tempfile.TemporaryDirectory() as directory:
                     "title": "app(fixture-co): tailored resume - Software Engineering Intern",
                     "body": "Posting: https://fixture.invalid/jobs/13",
                     "url": "https://github.com/example/resume/pull/13",
+                    "headRefOid": "fixture-head-13",
                     "mergedAt": "2026-01-01T00:00:00Z",
+                    "mergeCommit": {"oid": "fixture-merge-13"},
                     "mergedBy": {"login": "example"},
                     "files": [{"path": "variants/fixture-co-swe/resume.tex"}]}]
+    inside_enqueue = {"active": False}
     def fetch_then_enqueue(_posting):
-        with mock.patch.object(q, "gh_merged_prs", return_value=prs), \
-                mock.patch.object(q, "GH_REPO", "example/resume"):
+
+        if inside_enqueue["active"]:
+            return {"jd_text": JD_FIT}
+        inside_enqueue["active"] = True
+        with open(os.path.join(case["repo"], "applications.yaml"), encoding="utf-8") as fh:
+            tracker = fh.read()
+        def observed(_log, on_page=None):
+            if on_page:
+                on_page(prs)
+            return prs
+        with mock.patch.object(q, "gh_merged_prs", side_effect=observed), \
+                mock.patch.object(q, "gh_pr_files", return_value=prs[0]["files"]), \
+                mock.patch.object(q, "GH_REPO", "example/resume"), \
+                mock.patch.object(tailor, "fetch_jd", return_value={"jd_text": JD_FIT}):
+
             assert q.main(["enqueue", "--queue", case["queue"], "--repo", case["repo"]]) == 0
+        inside_enqueue["active"] = False
         return {"jd_text": JD_FIT}
     with mock.patch.object(tailor, "fetch_jd", side_effect=fetch_then_enqueue):
         assert run_claim(case) == 2

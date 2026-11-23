@@ -41,6 +41,10 @@ This script is the mechanical half of that flow:
 content or shared bookkeeping. Its default is
 ``~/.local/state/job-search-pipeline/queue.yaml``; override it with
 ``JOBSEARCH_QUEUE``. Keep it outside the code checkout.
+Owner-authorized merge observations and their pending or terminal outcomes are
+stored in the adjacent private ``queue.yaml.merge-intake.json`` sidecar. A
+pending record is replayed after restart until queue insertion or a verified
+exclusion is durable.
 The drain flips ``queued -> in_progress -> submitted`` several times per
 application; committing that churn to the resume repo would add a push per state
 change and race the other lanes, and the queue is reconstructible from the merged
@@ -62,7 +66,9 @@ lease owner fields on claim, and
 ``submitted_at`` / ``sent`` / ``confirmation_evidence`` after confirmation.
 
 Stdlib only; no secrets. The live ``enqueue`` path needs ``gh`` and a resume
-clone; ``--prs`` / ``--tracker`` provide non-writing offline previews only.
+clone. It paginates the complete merged-PR history and checkpoints owner
+merges before file and posting checks. ``--prs`` / ``--tracker`` provide
+read-only offline previews only with ``--dry-run``.
 
 **Queue state and tracker revision.** A missing queue is a source error, never
 an empty queue. Create the store once with ``queue.py init``; a valid ``[]``
@@ -833,14 +839,19 @@ def _write_queue_unlocked(path, items):
         if not number or number in seen:
             raise QueueStateError("refusing to write a missing or duplicate PR identity")
         seen.add(number)
+    _atomic_write_text(path, serialized)
+
+
+def _atomic_write_text(path, text):
+    """Replace one text file durably using the same path on every platform."""
     absolute = os.path.abspath(path)
     directory = os.path.dirname(absolute)
     os.makedirs(directory, exist_ok=True)
-    fd, temporary = tempfile.mkstemp(prefix="." + os.path.basename(path) + ".",
+    fd, temporary = tempfile.mkstemp(prefix="." + os.path.basename(absolute) + ".",
                                      suffix=".tmp", dir=directory)
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
-            fh.write(serialized)
+            fh.write(text)
             fh.flush()
             os.fsync(fh.fileno())
         if os.name == "nt":
@@ -1125,43 +1136,272 @@ def _run(cmd, timeout=60):
     return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
 
 
-def gh_merged_prs(log):
-    """Merged PRs on the resume repo, or None when the check is unavailable."""
-    try:
-        proc = _run(["gh", "pr", "list", "--repo", GH_REPO, "--state", "merged",
-                     "--limit", "1000", "--json",
-                     "number,title,headRefName,mergedAt,mergeCommit,mergedBy,body,"
-                     "url"])
-    except Exception as exc:  # noqa: BLE001 - network/subprocess failures expected
-        log(f"queue: PR check failed: {exc}")
-        return None
-    if proc.returncode != 0:
-        log(f"queue: PR check failed: {proc.stderr.strip() or proc.returncode}")
-        return None
-    try:
-        return json.loads(proc.stdout or "[]")
-    except ValueError:
-        log("queue: PR check returned invalid JSON")
-        return None
+def gh_merged_prs(log, on_page=None):
+    """Return every merged PR by explicit GraphQL cursor pagination.
+
+    ``on_page`` is called as soon as a page is decoded. Live intake uses it to
+    persist owner-authorized merges before requesting another page or looking
+    up any changed files.
+    """
+    return _gh_merged_prs_paginated(log, on_page=on_page)
+
+
+MERGED_PR_QUERY = (
+    "query($owner:String!, $name:String!, $endCursor:String) { "
+    "repository(owner:$owner, name:$name) { pullRequests( "
+    "first:100, after:$endCursor, states:MERGED, "
+    "orderBy:{field:CREATED_AT, direction:DESC}) { nodes { number title "
+    "headRefName headRefOid mergedAt mergeCommit { oid } mergedBy { login } "
+    "body url } pageInfo { hasNextPage endCursor } } } }"
+)
+
+
+def _gh_merged_prs_paginated(log, on_page=None):
+    owner, name = GH_REPO.split("/", 1)
+    cursor = None
+    cursors = set()
+    all_prs = []
+    while True:
+        cmd = ["gh", "api", "graphql", "-f", "query=" + MERGED_PR_QUERY,
+               "-F", "owner=" + owner, "-F", "name=" + name]
+        if cursor:
+            cmd += ["-F", "endCursor=" + cursor]
+        try:
+            proc = _run(cmd, timeout=120)
+        except Exception as exc:  # noqa: BLE001 - network/subprocess failures expected
+            log(f"queue: PR check failed: {exc}")
+            return None
+        if proc.returncode != 0:
+            log(f"queue: PR check failed: {proc.stderr.strip() or proc.returncode}")
+            return None
+        try:
+            response = json.loads(proc.stdout or "{}")
+            if response.get("errors"):
+                raise ValueError("GraphQL returned errors")
+            connection = response["data"]["repository"]["pullRequests"]
+            nodes = connection["nodes"]
+            page = connection["pageInfo"]
+            if (not isinstance(nodes, list) or any(not isinstance(row, dict) for row in nodes)
+                    or not isinstance(page, dict)
+                    or not isinstance(page.get("hasNextPage"), bool)):
+                raise ValueError("GraphQL page is malformed")
+            next_cursor = page.get("endCursor")
+            if page["hasNextPage"] and (not isinstance(next_cursor, str)
+                                         or not next_cursor or next_cursor in cursors):
+                raise ValueError("GraphQL pagination cursor is missing or repeated")
+        except (KeyError, TypeError, ValueError) as exc:
+            log(f"queue: merged PR response is malformed: {exc}")
+            return None
+        if on_page is not None:
+            on_page(nodes)
+        all_prs.extend(nodes)
+        if not page["hasNextPage"]:
+            return all_prs
+        cursors.add(next_cursor)
+        cursor = next_cursor
 
 
 def gh_pr_files(number, log):
-    """Changed files of one PR (works even after its branch was deleted)."""
+    """All changed files of one PR, or None when file metadata is unavailable."""
+    path = f"repos/{GH_REPO}/pulls/{int(number)}/files"
     try:
-        proc = _run(["gh", "pr", "view", str(number), "--repo", GH_REPO,
-                     "--json", "files"])
+        proc = _run(["gh", "api", "--paginate", "--slurp", path,
+                     "-F", "per_page=100"], timeout=120)
     except Exception as exc:  # noqa: BLE001
         log(f"queue: file check failed for #{number}: {exc}")
-        return []
+        return None
     if proc.returncode != 0:
         log(f"queue: file check failed for #{number}: "
             f"{proc.stderr.strip() or proc.returncode}")
-        return []
+        return None
     try:
-        return json.loads(proc.stdout or "{}").get("files", [])
-    except ValueError:
+        pages = json.loads(proc.stdout or "[]")
+        if not isinstance(pages, list):
+            raise ValueError("expected page list")
+        if not pages:
+            return []
+        if all(isinstance(page, list) for page in pages):
+            files = [item for page in pages for item in page]
+        elif all(isinstance(item, dict) for item in pages):
+            files = pages
+        else:
+            raise ValueError("malformed file page")
+        if any(not isinstance(item, dict) or not isinstance(item.get("path"), str)
+               or not item.get("path") for item in files):
+            raise ValueError("malformed file record")
+        return [{"path": item["path"]} for item in files]
+    except (TypeError, ValueError):
         log(f"queue: file check returned invalid JSON for #{number}")
-        return []
+        return None
+
+
+INTAKE_SCHEMA = 1
+INTAKE_STATES = {"pending", "admitted", "excluded"}
+
+
+def merge_intake_path(queue_path):
+    """Private durable merge outcomes beside the configured queue ledger."""
+    return os.path.abspath(os.fspath(queue_path)) + ".merge-intake.json"
+
+
+def _empty_merge_intake():
+    return {"schema": INTAKE_SCHEMA, "updated_at": now_utc(), "records": {}}
+
+
+def load_merge_intake(queue_path):
+    path = merge_intake_path(queue_path)
+    try:
+        with open(path, encoding="utf-8") as fh:
+            state = json.load(fh)
+    except FileNotFoundError:
+        return _empty_merge_intake()
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise QueueStateError("cannot read merge intake state") from exc
+    if (not isinstance(state, dict) or state.get("schema") != INTAKE_SCHEMA
+            or not isinstance(state.get("records"), dict)):
+        raise QueueStateError("merge intake state is malformed or unsupported")
+    for key, record in state["records"].items():
+        if (not isinstance(key, str) or not key.isdigit()
+                or not isinstance(record, dict)
+                or int(record.get("pr_number") or 0) != int(key)
+                or record.get("state") not in INTAKE_STATES
+                or not isinstance(record.get("identity"), dict)
+                or not isinstance(record.get("head"), dict)):
+            raise QueueStateError("merge intake state contains an invalid record")
+    return state
+
+
+def _write_merge_intake_unlocked(queue_path, state):
+    absolute = merge_intake_path(queue_path)
+    serialized = json.dumps(state, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
+    _atomic_write_text(absolute, serialized)
+
+
+def _posting_url_from_body(body):
+    for match in re.finditer(r"https?://[^\s)\]<>\"']+", str(body or "")):
+        link = match.group(0).rstrip(".,;")
+        if "github.com" not in link.casefold():
+            return link
+    return ""
+
+
+def _observed_merge_record(pr):
+    try:
+        number = int(pr.get("number") or 0)
+    except (TypeError, ValueError):
+        return None
+    if number < 1:
+        return None
+    merged_by = pr.get("mergedBy")
+    if not isinstance(merged_by, dict):
+        return None
+    login = norm_text(merged_by.get("login"))
+    owner = GH_REPO.split("/", 1)[0]
+    if not login or login.casefold() != owner.casefold():
+        return None
+    branch = norm_text(pr.get("headRefName"))
+    merge_commit = pr.get("mergeCommit")
+    merge_sha = (norm_text(merge_commit.get("oid"))
+                 if isinstance(merge_commit, dict) else "")
+    url = norm_text(pr.get("url"))
+    merged_at = norm_ts(pr.get("mergedAt"))
+    posting_url = _posting_url_from_body(pr.get("body"))
+    stored_pr = {
+        "number": number,
+        "title": norm_text(pr.get("title")),
+        "headRefName": branch,
+        "headRefOid": norm_text(pr.get("headRefOid")),
+        "mergedAt": merged_at,
+        "mergeCommit": {"oid": merge_sha} if merge_sha else None,
+        "mergedBy": {"login": login},
+        "url": url,
+        "posting_url": posting_url,
+    }
+    reason = "merge observed; intake processing is pending"
+    return {
+        "pr_number": number,
+        "state": "pending",
+        "reason_code": "metadata_unavailable",
+        "reason": reason,
+        "identity": {"pr_number": number, "pr_url": url,
+                     "posting_url": posting_url, "merged_at": merged_at,
+                     "merged_by": login, "merge_commit": merge_sha},
+        "head": {"branch": branch, "sha": stored_pr["headRefOid"]},
+        "pr": stored_pr,
+        "observed_at": now_utc(),
+        "updated_at": now_utc(),
+    }
+
+
+def _record_observed_page(queue_path, prs):
+    """Checkpoint owner merges for one API page before any per-PR lookups."""
+    if not any(_observed_merge_record(pr) is not None for pr in prs):
+        return
+    with queue_lock(queue_path):
+        state = load_merge_intake(queue_path)
+        records = state["records"]
+        changed = False
+        for pr in prs:
+            record = _observed_merge_record(pr)
+            if record is None:
+                continue
+            key = str(record["pr_number"])
+            old = records.get(key)
+            if old and old["state"] != "pending":
+                continue
+            if old:
+                if old.get("identity", {}).get("pr_url") not in ("", record["identity"]["pr_url"]):
+                    raise QueueStateError("merged PR identity changed after observation")
+                # Keep a successful file lookup across restart while refreshing
+                # authoritative merge/head metadata from the source page.
+                for field in ("files", "files_observed_at"):
+                    if field in old:
+                        record[field] = old[field]
+                record["observed_at"] = old.get("observed_at") or record["observed_at"]
+                if (old.get("pr") == record.get("pr")
+                        and old.get("identity") == record.get("identity")
+                        and old.get("head") == record.get("head")):
+                    continue
+            if not record["head"].get("branch"):
+                record["reason"] = "owner merge branch metadata is unavailable"
+            elif not is_app_branch(record["head"].get("branch")):
+                record.update({"state": "excluded", "reason_code": "not_application_pr",
+                               "reason": "merged PR is outside the app/ branch"})
+            elif not record["pr"].get("mergedAt"):
+                record["reason"] = "owner merge timestamp is unavailable"
+            records[key] = record
+            changed = True
+        if changed:
+            state["updated_at"] = now_utc()
+            _write_merge_intake_unlocked(queue_path, state)
+
+
+def _set_intake_outcome(queue_path, number, state_name, reason_code, reason,
+                        **fields):
+    if state_name not in INTAKE_STATES:
+        raise QueueStateError("invalid merge intake outcome")
+    with queue_lock(queue_path):
+        state = load_merge_intake(queue_path)
+        record = state["records"].get(str(int(number)))
+        if record is None:
+            raise QueueStateError("merge intake record disappeared")
+        if record.get("state") != "pending":
+            if state_name != "admitted" or not any(
+                    pr_number_of(item) == int(number) for item in load_queue(queue_path)):
+                return record
+        record.update({"state": state_name, "reason_code": reason_code,
+                       "reason": str(reason), "updated_at": now_utc()})
+        record.update(fields)
+        state["updated_at"] = now_utc()
+        _write_merge_intake_unlocked(queue_path, state)
+        return dict(record)
+
+
+def _pending_intake_records(queue_path):
+    with queue_lock(queue_path):
+        state = load_merge_intake(queue_path)
+    return [dict(row) for row in state["records"].values()
+            if row.get("state") == "pending"]
 
 
 def _git(repo, *args, timeout=60):
@@ -1551,38 +1791,10 @@ def _read_gate_entries(path, required=False):
 
 
 def _check_owner_controls(posting, skipped, gates):
-    import urllib.parse
-    import application_identity as identity
-    link = identity.normalize_posting_url(posting.get("link"))
-    company = norm_text(posting.get("company")).casefold()
-    role = norm_text(posting.get("role")).casefold()
-    for entry in skipped:
-        skip_link = identity.normalize_posting_url(entry.get("link"))
-        skip_company = norm_text(entry.get("company")).casefold()
-        skip_role = norm_text(entry.get("role")).casefold()
-        if ((skip_link and skip_link == link)
-                or (skip_company and skip_role and
-                    (skip_company, skip_role) == (company, role))):
-            raise QueueStateError("posting is on the owner's skip list")
-    today = datetime.now().date().isoformat()
-    host = urllib.parse.urlsplit(str(posting.get("link") or "")).netloc.lower()
-    for gate in gates:
-        until = str(gate.get("gate_until") or "").strip()
-        if until:
-            try:
-                datetime.strptime(until, "%Y-%m-%d")
-            except ValueError as exc:
-                raise QueueStateError("owner cap has an invalid gate_until") from exc
-            if until < today:
-                continue
-        aliases = gate.get("company_aliases") or []
-        if isinstance(aliases, str):
-            aliases = [aliases]
-        cap_names = {norm_text(name).casefold() for name in aliases if norm_text(name)}
-        cap_host = str(gate.get("host") or "").strip().lower().lstrip(".")
-        if ((company and company in cap_names)
-                or (cap_host and (host == cap_host or host.endswith("." + cap_host)))):
-            raise QueueStateError("an owner application cap is active for this posting")
+    from posting_admission import owner_control_exclusion
+    reason = owner_control_exclusion(posting, skipped, gates)
+    if reason:
+        raise QueueStateError(reason)
 
 
 def _check_claim_identities(item, queue_items, tracker_rows, posting):
@@ -1904,121 +2116,561 @@ def _read_claim_validation_inputs(args, item, queue_items, posting, revision):
 
 
 # ---------------------------------------------------------------- cli actions
-def cmd_enqueue(args, log):
-    if (args.prs or args.tracker) and not args.dry_run:
-        log("queue: offline inputs require --dry-run; only a GitHub-observed owner merge authorizes enqueue")
-        return 2
-    try:
-        with queue_lock(args.queue):
-            initial_items = load_queue(args.queue)
-    except QueueStateError as exc:
-        log("queue: enqueue blocked: " + str(exc))
-        return 1
-    if args.prs:
-        try:
-            with open(args.prs, encoding="utf-8") as fh:
-                prs = json.load(fh)
-        except (OSError, ValueError) as exc:
-            log(f"queue: cannot read --prs {args.prs}: {exc}")
-            return 1
-        if not isinstance(prs, list) or any(not isinstance(pr, dict) for pr in prs):
-            log("queue: --prs must contain a JSON list of PR objects")
-            return 1
-    else:
-        prs = gh_merged_prs(log)
-        if prs is None:
-            return 1
-        if not isinstance(prs, list) or any(not isinstance(pr, dict) for pr in prs):
-            log("queue: merged PR response is malformed")
-            return 1
-        owner = GH_REPO.split("/", 1)[0].casefold()
-        prs = [pr for pr in prs if norm_ts(pr.get("mergedAt"))
-               and isinstance(pr.get("mergedBy"), dict)
-               and str(pr["mergedBy"].get("login") or "").casefold() == owner]
+ENQUEUE_COUNT_KEYS = ("processed", "accepted", "added", "rejected", "duplicates",
+                      "limited", "observed", "owner_merged", "closed_history",
+                      "active_work")
 
-    revision = None
-    if args.tracker:
-        # Offline preview only (requires --dry-run), so nothing is written.
+
+
+def _new_enqueue_report():
+    return {"outcome": "healthy_empty",
+            "counts": {key: 0 for key in ENQUEUE_COUNT_KEYS}, "reasons": {}}
+
+
+def _count_reason(report, code, amount=1):
+    reasons = report["reasons"]
+    reasons[code] = reasons.get(code, 0) + amount
+
+
+def _intake_skip_code(reason):
+    if reason == "not an app/* PR":
+        return "not_application_pr"
+    if reason.startswith("not a tailoring PR"):
+        return "not_tailoring_pr"
+    if reason == "already queued":
+        return "already_queued"
+    if reason == "already submitted in tracker":
+        return "already_submitted"
+    if reason == "already active for this application":
+        return "already_active"
+    if reason == "limit reached":
+        return "limit_reached"
+    return "unknown"
+
+
+def _emit_intake_report(report, log, allow_seam=True, emit_stdout=True):
+    if allow_seam:
         try:
-            with open(args.tracker, encoding="utf-8") as fh:
-                tracker_text = fh.read()
-        except OSError as exc:
-            log(f"queue: cannot read --tracker {args.tracker}: {exc}")
-            return 1
-    else:
-        # The current tracker from a successful origin/main refresh, pinned to
-        # the fetched commit (not the merge-commit state, not a cached copy).
-        try:
-            revision = refresh_main_tracker(args.repo, log)
-        except QueueStateError as exc:
-            log("queue: enqueue stopped: " + str(exc))
-            return 1
-        tracker_text = revision.text
-        log("queue: tracker pinned to origin/main %s" % revision.commit[:12])
+            import intake_reporting
+        except ImportError:
+            intake_reporting = None
+        if intake_reporting is not None:
+            try:
+                intake_reporting.record_run("enqueue", report)
+                return True
+            except Exception as exc:  # noqa: BLE001 - reporting must not block intake
+                log("queue: intake reporting failed: " + str(exc))
+    if emit_stdout:
+        print(json.dumps({"intake_run": report}, ensure_ascii=False))
+    return False
+
+
+def _read_intake_admission_inputs(repo, tailor):
+    postings_path = os.path.join(repo, "data", "postings.json")
+    try:
+        with open(postings_path, "rb") as fh:
+            postings_bytes = fh.read()
+        postings = json.loads(postings_bytes.decode("utf-8"))
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise QueueStateError("current postings are unavailable or malformed") from exc
+    if not isinstance(postings, list) or any(not isinstance(row, dict) for row in postings):
+        raise QueueStateError("current postings must be a list of objects")
+    skipped = _read_flat_entries(tailor.SKIPPED_FILE, "owner skip list", required=True)
+    gates = _read_gate_entries(tailor.GATE_FILE, required=True)
+    return postings, skipped, gates
+
+
+def _match_intake_posting(link, postings):
+    import application_identity as identity
+    canonical = identity.normalize_posting_url(link)
+    if not canonical:
+        return None, "queue candidate has no verified posting link"
+    matches = [row for row in postings
+               if identity.normalize_posting_url(row.get("link")) == canonical]
+    if len(matches) != 1:
+        return None, ("posting link does not identify exactly one current posting")
+    return dict(matches[0]), ""
+
+
+def _intake_admission_decision(args, item):
+    """Check fresh posting age, current owner controls and explicit closure."""
+    import application_identity as identity
+    import tailor
+    from posting_admission import admission_exclusion
+
+    try:
+        postings, skipped, gates = _read_intake_admission_inputs(args.repo, tailor)
+    except (OSError, UnicodeError, QueueStateError, ValueError) as exc:
+        return "pending", "source_unavailable", str(exc), False, None
+    posting, reason = _match_intake_posting(item.get("link"), postings)
+    if posting is None:
+        return "excluded", "identity_review", reason, False, None
+    try:
+        reason = admission_exclusion(posting, skipped, gates)
+    except (TypeError, ValueError) as exc:
+        return "pending", "source_unavailable", str(exc), False, posting
+    if reason:
+        return "excluded", "unknown", reason, False, posting
+
+    try:
+        fetched = tailor.fetch_jd(posting)
+    except Exception as exc:  # noqa: BLE001 - posting fetch is retryable
+        return ("pending", "source_unavailable",
+                "current job description fetch failed: " + str(exc), False, posting)
+    jd_text = fetched.get("jd_text") if isinstance(fetched, dict) else None
+    if not isinstance(jd_text, str) or not jd_text.strip():
+        return ("pending", "source_unavailable",
+                "current job description is unavailable", False, posting)
+    closed = tailor.is_explicitly_closed("\n".join((
+        str(posting.get("company") or ""), str(posting.get("role") or ""),
+        str(posting.get("title") or ""), jd_text)))
+
+    try:
+        latest_postings, latest_skipped, latest_gates = _read_intake_admission_inputs(
+            args.repo, tailor)
+    except (OSError, UnicodeError, QueueStateError, ValueError) as exc:
+        return "pending", "source_unavailable", str(exc), closed, posting
+    latest, reason = _match_intake_posting(item.get("link"), latest_postings)
+    if latest is None:
+        return "excluded", "identity_review", reason, closed, posting
+    try:
+        reason = admission_exclusion(latest, latest_skipped, latest_gates,
+                                     explicitly_closed=closed)
+    except (TypeError, ValueError) as exc:
+        return "pending", "source_unavailable", str(exc), closed, latest
+    if reason:
+        return "excluded", "unknown", reason, closed, latest
+    if latest != posting:
+        return ("pending", "source_unavailable",
+                "posting changed during admission check", closed, posting)
+    app_identity = identity.application_id(item)
+    if app_identity != "link:" + identity.normalize_posting_url(item.get("link")):
+        return ("excluded", "identity_review",
+                "queue candidate has ambiguous posting identity", closed, latest)
+    return ("admitted", "unknown",
+            "current posting passed age, owner-control and closure checks", closed, latest)
+
+
+def _final_intake_admission_check(args, item, expected_posting, closed):
+    """Re-read local age and owner controls while holding the insertion lock."""
+    import tailor
+    from posting_admission import admission_exclusion
+
+    try:
+        postings, skipped, gates = _read_intake_admission_inputs(args.repo, tailor)
+    except (OSError, UnicodeError, QueueStateError, ValueError) as exc:
+        return "pending", "source_unavailable", str(exc)
+    posting, reason = _match_intake_posting(item.get("link"), postings)
+    if posting is None:
+        return "excluded", "identity_review", reason
+    try:
+        reason = admission_exclusion(posting, skipped, gates,
+                                     explicitly_closed=closed)
+    except (TypeError, ValueError) as exc:
+        return "pending", "source_unavailable", str(exc)
+    if reason:
+        return "excluded", "unknown", reason
+    if posting != expected_posting:
+        return "pending", "source_unavailable", "posting changed before queue insertion"
+    return "admitted", "unknown", "current posting passed final admission check"
+
+
+def _read_fixture_inputs(args, log):
+    if not args.prs or not args.tracker:
+        log("queue: --dry-run requires offline --prs and --tracker fixtures")
+        return None, None
+    try:
+        with open(args.prs, encoding="utf-8") as fh:
+            prs = json.load(fh)
+        with open(args.tracker, encoding="utf-8") as fh:
+            tracker_text = fh.read()
+    except (OSError, ValueError) as exc:
+        log(f"queue: cannot read dry-run fixtures: {exc}")
+        return None, None
+    if not isinstance(prs, list) or any(not isinstance(pr, dict) for pr in prs):
+        log("queue: --prs must contain a JSON list of PR objects")
+        return None, None
+
     try:
         tracker_rows = parse_queue(tracker_text, status_values=None)
         if not tracker_rows and not any(line.strip() == "[]" for line in tracker_text.splitlines()):
             raise QueueStateError("tracker needs entries or an explicit empty-list marker")
     except QueueStateError as exc:
-        log("queue: current tracker is malformed; enqueue stopped: " + str(exc))
-        return 1
+        log("queue: fixture tracker is malformed: " + str(exc))
+        return None, None
+    return prs, tracker_text
 
-    postings_path = os.path.join(args.repo, "data", "postings.json")
-    try:
-        with open(postings_path, encoding="utf-8") as fh:
-            postings = json.load(fh)
-        if not isinstance(postings, list) or any(not isinstance(row, dict) for row in postings):
-            raise ValueError("posting store must be a list of objects")
-    except FileNotFoundError:
-        postings = []
-    except (OSError, ValueError) as exc:
-        log("queue: could not read posting identities: " + str(exc))
-        return 1
 
-    # Attach changed-file lists (live: one API call per unseen app/* candidate).
-    # A deleted branch is never consulted -- only the PR metadata and diff.
-    seen_numbers = {pr_number_of(it) for it in initial_items}
-    prs2 = []
-    for pr in prs:
-        pr = dict(pr)
-        if pr.get("files") is None:
-            number = int(pr.get("number") or 0)
-            if is_app_branch(pr.get("headRefName", "")) and number not in seen_numbers:
-                pr["files"] = gh_pr_files(number, log)
-            else:
-                pr["files"] = []
+
+
+def _print_enqueue_result(args, added, skipped, report, include_summary=False):
+    if args.json:
+        payload = {"added": added, "skipped": [
+            {"pr_number": n, "reason": r} for n, r in skipped],
+            "summary": report}
+        if "preview_candidates" in report:
+            payload["proposed_candidates"] = report["preview_candidates"]
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        return
+    for it in added:
+        print(f"queued: {render_item_line(it)}")
+    for it in report.get("preview_candidates", []):
+        print(f"preview candidate: {render_item_line(it)}")
+    if include_summary:
+        print(json.dumps({"intake_run": report}, ensure_ascii=False))
+
+
+def _process_pending_intake(args, log, report, revision):
+    import tailor
+
+    added_rows, skipped_rows = [], []
+    failures = False
+    tracker_text = revision.text
+    records = _pending_intake_records(args.queue)
+    records.sort(key=lambda row: (str(row.get("pr", {}).get("mergedAt") or ""),
+                                  int(row.get("pr_number") or 0)))
+    for record in records:
+        number = int(record["pr_number"])
+        counts = report["counts"]
+        counts["processed"] += 1
+
+        try:
+            with queue_lock(args.queue):
+                current = load_queue(args.queue)
+            if any(pr_number_of(item) == number for item in current):
+                _set_intake_outcome(args.queue, number, "admitted", "already_queued",
+                                    "queue insertion already exists")
+                counts["duplicates"] += 1
+                _count_reason(report, "already_queued")
+                continue
+        except (QueueStateError, OSError) as exc:
+            _set_intake_outcome(args.queue, number, "pending", "queue_unavailable",
+                                "queue could not be read: " + str(exc))
+            _count_reason(report, "queue_unavailable")
+            failures = True
+            continue
+
+        pr = dict(record.get("pr") or {})
+        merge_commit = pr.get("mergeCommit")
+        merge_sha = (merge_commit.get("oid") if isinstance(merge_commit, dict) else "")
+        missing_metadata = [name for name, value in (
+            ("mergedAt", norm_ts(pr.get("mergedAt"))),
+            ("headRefName", pr.get("headRefName")),
+            ("headRefOid", pr.get("headRefOid")),
+            ("mergeCommit", merge_sha), ("url", pr.get("url"))) if not value]
+        if missing_metadata:
+            log("queue: pending #%s has incomplete merge metadata (%s)" %
+                (number, ", ".join(missing_metadata)))
+            _set_intake_outcome(args.queue, number, "pending", "metadata_unavailable",
+                                "authoritative merge or PR identity metadata is incomplete")
+            _count_reason(report, "metadata_unavailable")
+            failures = True
+            continue
+        if not is_app_branch(pr.get("headRefName")):
+            _set_intake_outcome(args.queue, number, "excluded", "not_application_pr",
+                                "merged PR is outside the app/ branch")
+            counts["rejected"] += 1
+            _count_reason(report, "not_application_pr")
+            continue
+
+        files = record.get("files")
+        if files is None:
+            files = gh_pr_files(number, log)
+            if files is None:
+                log("queue: pending #%s changed-file metadata is unavailable" % number)
+                _set_intake_outcome(args.queue, number, "pending", "metadata_unavailable",
+                                    "changed-file metadata is unavailable; retry required")
+                _count_reason(report, "metadata_unavailable")
+                failures = True
+                continue
+            _set_intake_outcome(args.queue, number, "pending", "unknown",
+                                "changed-file metadata saved for replay", files=files,
+                                files_observed_at=now_utc())
+        if (not isinstance(files, list) or any(not isinstance(file, dict)
+                                               or not isinstance(file.get("path"), str)
+                                               for file in files)):
+            _set_intake_outcome(args.queue, number, "pending", "metadata_unavailable",
+                                "changed-file metadata is malformed; retry required")
+            _count_reason(report, "metadata_unavailable")
+            failures = True
+            continue
+        pr["files"] = files
+        if not variant_from_files(files, pr.get("headRefName")):
+            _set_intake_outcome(args.queue, number, "excluded", "not_tailoring_pr",
+                                "verified changed-file list contains no tailoring resume")
+            counts["rejected"] += 1
+            _count_reason(report, "not_tailoring_pr")
+            continue
+
+        if args.limit and counts["added"] >= args.limit:
+            _set_intake_outcome(args.queue, number, "pending", "limit_reached",
+                                "run limit reached; pending for the next intake run")
+            counts["limited"] += 1
+            _count_reason(report, "limit_reached")
+            continue
+
+        pr["body"] = pr.get("posting_url") or ""
         pr["_tracker"] = tracker_text
+        try:
+            postings, _skipped, _gates = _read_intake_admission_inputs(args.repo, tailor)
+        except (OSError, UnicodeError, QueueStateError, ValueError) as exc:
+            _set_intake_outcome(args.queue, number, "pending", "source_unavailable",
+                                "posting admission inputs are unavailable: " + str(exc))
+            _count_reason(report, "source_unavailable")
+            failures = True
+            continue
         pr["_postings"] = postings
-        prs2.append(pr)
+        try:
+            with queue_lock(args.queue):
+                current = load_queue(args.queue)
+            preview_items, preview_added, preview_skipped = enqueue(
+                current, [pr], args.include_submitted, limit=0)
+        except (QueueStateError, OSError, ValueError) as exc:
+            _set_intake_outcome(args.queue, number, "pending", "queue_unavailable",
+                                "queue candidate check failed: " + str(exc))
+            _count_reason(report, "queue_unavailable")
+            failures = True
+            continue
+        if preview_skipped:
+            _number, skip_reason = preview_skipped[0]
+            log("queue: skip #%s: %s" % (number, skip_reason))
+            skip_code = _intake_skip_code(skip_reason)
+            outcome = "admitted" if skip_code == "already_queued" else "excluded"
+            _set_intake_outcome(args.queue, number, outcome, skip_code, skip_reason)
+            skipped_rows.append((number, skip_reason))
+            _count_reason(report, skip_code)
+            if outcome == "excluded":
+                counts["rejected"] += 1
+            if skip_code in {"already_queued", "already_submitted", "already_active"}:
+                counts["duplicates"] += 1
+            continue
+        if len(preview_added) != 1:
+            _set_intake_outcome(args.queue, number, "pending", "unknown",
+                                "candidate could not be prepared for admission")
+            _count_reason(report, "unknown")
+            failures = True
+            continue
+        candidate = preview_added[0]
+        if not norm_text(candidate.get("link")):
+            _set_intake_outcome(args.queue, number, "excluded", "identity_review",
+                                "tailoring merge has no verified posting identity")
+            counts["rejected"] += 1
+            _count_reason(report, "identity_review")
+            continue
 
+        decision, code, reason, closed, expected_posting = _intake_admission_decision(
+            args, candidate)
+        if decision != "admitted":
+            _set_intake_outcome(args.queue, number, decision, code, reason)
+            _count_reason(report, code)
+            if decision == "excluded":
+                counts["rejected"] += 1
+            else:
+                failures = True
+            continue
+
+        try:
+            final_admission = None
+            with queue_lock(args.queue):
+                latest = load_queue(args.queue)
+                merged_items, added, final_skips = enqueue(
+                    latest, [pr], args.include_submitted, limit=1)
+                if added:
+                    verify_tracker_revision(args.repo, revision)
+                    final_admission = _final_intake_admission_check(
+                        args, candidate, expected_posting, closed)
+                    if final_admission[0] == "admitted":
+                        _write_queue_unlocked(args.queue, merged_items)
+                    else:
+                        added = []
+                        merged_items = latest
+            if final_admission and final_admission[0] != "admitted":
+                final_state, final_code, final_reason = final_admission
+                _set_intake_outcome(args.queue, number, final_state,
+                                    final_code, final_reason)
+                _count_reason(report, final_code)
+                if final_state == "excluded":
+                    counts["rejected"] += 1
+                else:
+                    failures = True
+                continue
+            if added:
+                import application_identity as identity
+                merged_identity = dict(record.get("identity") or {})
+                merged_identity["application_id"] = identity.application_id(added[0])
+                _set_intake_outcome(args.queue, number, "admitted", "unknown",
+                                    "owner merge accepted into the application queue",
+                                    identity=merged_identity)
+                added_rows.extend(added)
+                counts["accepted"] += 1
+                counts["added"] += 1
+            elif final_skips:
+                _number, skip_reason = final_skips[0]
+                log("queue: skip #%s: %s" % (number, skip_reason))
+                skip_code = _intake_skip_code(skip_reason)
+                outcome = "admitted" if skip_code == "already_queued" else "excluded"
+                _set_intake_outcome(args.queue, number, outcome, skip_code, skip_reason)
+                skipped_rows.append((number, skip_reason))
+                _count_reason(report, skip_code)
+                if outcome == "excluded":
+                    counts["rejected"] += 1
+                if skip_code in {"already_queued", "already_submitted", "already_active"}:
+                    counts["duplicates"] += 1
+        except (QueueStateError, OSError, ValueError) as exc:
+            log("queue: enqueue stopped for #%s: %s" % (number, exc))
+            _set_intake_outcome(args.queue, number, "pending", "queue_unavailable",
+                                "queue insertion could not be confirmed: " + str(exc))
+            _count_reason(report, "queue_unavailable")
+            failures = True
+
+    return added_rows, skipped_rows, failures
+
+
+def cmd_enqueue(args, log):
+    report = _new_enqueue_report()
+    if (args.prs or args.tracker) and not args.dry_run:
+        log("queue: offline inputs require --dry-run; only a GitHub-observed owner merge authorizes enqueue")
+        return 2
+    try:
+        if args.dry_run:
+            initial_items = load_queue(args.queue)
+        else:
+            with queue_lock(args.queue):
+                initial_items = load_queue(args.queue)
+    except QueueStateError as exc:
+        report["outcome"] = "failed"
+        _emit_intake_report(report, log, allow_seam=not args.dry_run)
+        log("queue: enqueue blocked: " + str(exc))
+        return 1
+
+    if args.dry_run:
+        if not args.prs or not args.tracker:
+            _emit_intake_report(report, log, allow_seam=False)
+            log("queue: --dry-run requires offline --prs and --tracker fixtures")
+            return 2
+        prs, tracker_text = _read_fixture_inputs(args, log)
+        if prs is None:
+            report["outcome"] = "failed"
+            _emit_intake_report(report, log, allow_seam=False)
+            return 1
+        prs_with_tracker, unavailable = [], []
+        for pr in prs:
+            if pr.get("files") is None and is_app_branch(pr.get("headRefName")):
+                unavailable.append((int(pr.get("number") or 0),
+                                    "changed-file metadata unavailable in offline fixture"))
+                _count_reason(report, "metadata_unavailable")
+                continue
+            prs_with_tracker.append(dict(pr, _tracker=tracker_text))
+        _merged_items, proposed, skipped = enqueue(initial_items, prs_with_tracker,
+                                                   args.include_submitted, args.limit)
+        report["mode"] = "structural_preview"
+        report["outcome"] = "structural_preview"
+        report["preview_candidates"] = proposed
+        report["preview"] = {
+            "evidence_scope": "offline fixtures; structural candidate evaluation only",
+            "fixture_prs": len(prs),
+            "proposed_candidates": len(proposed),
+            "admitted": 0,
+            "owner_merged": 0,
+            "admission_gates": "not_evaluated",
+            "not_verified": ["merge_owner", "posting_age", "owner_skip_or_cap",
+                             "posting_closure", "live_queue_admission"],
+            "writes": False,
+        }
+        report["counts"]["active_work"] = sum(
+            1 for row in initial_items if row.get("status") in APPLICATION_GUARD_STATUSES)
+        for number, reason in skipped:
+            _count_reason(report, _intake_skip_code(reason))
+        skipped.extend(unavailable)
+        _emit_intake_report(report, log, allow_seam=False, emit_stdout=False)
+        _print_enqueue_result(args, [], skipped, report, include_summary=True)
+        return 0 if not unavailable else 1
+
+    try:
+        load_merge_intake(args.queue)
+    except QueueStateError as exc:
+        report["outcome"] = "failed"
+        _emit_intake_report(report, log)
+        log("queue: merge intake state is unavailable: " + str(exc))
+        return 1
+
+    def checkpoint_page(page):
+        report["counts"]["observed"] += len(page)
+        owner = GH_REPO.split("/", 1)[0].casefold()
+        for pr in page:
+            merged_by = pr.get("mergedBy")
+            login = (merged_by.get("login") if isinstance(merged_by, dict) else "")
+            if str(login or "").casefold() != owner:
+                continue
+            report["counts"]["owner_merged"] += 1
+            if not is_app_branch(pr.get("headRefName")):
+                _count_reason(report, "not_application_pr")
+                report["counts"]["rejected"] += 1
+        _record_observed_page(args.queue, page)
+
+    listing_failed = False
+    try:
+        prs = gh_merged_prs(log, on_page=checkpoint_page)
+    except (QueueStateError, OSError, ValueError) as exc:
+        log("queue: cannot checkpoint merged PR page: " + str(exc))
+        prs = None
+    if prs is None:
+        listing_failed = True
+        _count_reason(report, "metadata_unavailable")
+    elif not isinstance(prs, list) or any(not isinstance(pr, dict) for pr in prs):
+        listing_failed = True
+        _count_reason(report, "metadata_unavailable")
+        log("queue: merged PR response is malformed")
+    else:
+        if not prs:
+            _count_reason(report, "no_merged_prs")
+        elif not report["counts"]["owner_merged"]:
+            _count_reason(report, "no_owner_merges")
+
+    try:
+        revision = refresh_main_tracker(args.repo, log)
+        tracker_rows = parse_queue(revision.text, status_values=None)
+        if not tracker_rows and not any(
+                line.strip() == "[]" for line in revision.text.splitlines()):
+            raise QueueStateError(
+                "current application tracker needs entries or an explicit empty-list marker")
+        log("queue: tracker pinned to origin/main %s" % revision.commit[:12])
+    except QueueStateError as exc:
+        log("queue: enqueue stopped: " + str(exc))
+        _count_reason(report, "tracker_unavailable")
+        added, skipped, pending_failed = [], [], True
+    else:
+        try:
+            added, skipped, pending_failed = _process_pending_intake(
+                args, log, report, revision)
+        except (QueueStateError, OSError, ValueError) as exc:
+            log("queue: merge intake processing failed: " + str(exc))
+            report["outcome"] = "failed"
+            _emit_intake_report(report, log)
+            return 1
+    report["counts"]["closed_history"] = sum(
+        1 for row in load_merge_intake(args.queue)["records"].values()
+        if row.get("state") == "excluded")
     try:
         with queue_lock(args.queue):
-            current_items = load_queue(args.queue)
-            if revision is not None and not args.dry_run:
-                # Pinned tracker evidence must still hold before any write. The
-                # pure merge below then repeats the local PR-number and active
-                # application duplicate check against the queue as it is now.
-                verify_tracker_revision(args.repo, revision)
-            merged_items, added, skipped = enqueue(
-                current_items, prs2, args.include_submitted, args.limit)
-            if not args.dry_run:
-                _write_queue_unlocked(args.queue, merged_items)
-    except (QueueStateError, OSError, ValueError) as exc:
-        log("queue: enqueue failed closed: " + str(exc))
-        return 1
-    for number, reason in skipped:
-        log(f"queue: skip #{number}: {reason}")
-    for it in added:
-        log(f"queue: queued #{it['pr_number']} {it['company']} · {it['role']}")
+            current = load_queue(args.queue)
+        report["counts"]["active_work"] = sum(
+            1 for row in current if row.get("status") in APPLICATION_GUARD_STATUSES)
+    except (QueueStateError, OSError):
+        _count_reason(report, "queue_unavailable")
+        pending_failed = True
 
-    if args.json:
-        print(json.dumps({"added": added, "skipped": [
-            {"pr_number": n, "reason": r} for n, r in skipped]},
-            indent=2, ensure_ascii=False))
-    else:
-        for it in added:
-            print(f"queued: {render_item_line(it)}")
-    return 0
+    if (report["counts"]["processed"] and not report["counts"]["added"]
+            and not report["counts"]["limited"]
+            and not pending_failed and not listing_failed):
+        _count_reason(report, "no_eligible_prs")
+    failures = listing_failed or pending_failed
+    report["outcome"] = ("partial_failure" if report["counts"]["added"]
+                         or report["counts"]["rejected"] else "total_failure") \
+        if failures else ("healthy" if report["counts"]["added"] else "healthy_empty")
+    _emit_intake_report(report, log, emit_stdout=not args.json)
+    _print_enqueue_result(args, added, skipped, report)
+    return 1 if failures else 0
 
 
 def enqueue(existing, prs_with_trackers, include_submitted=False, limit=0):
@@ -3093,7 +3745,8 @@ def build_parser():
     add_common(e)
     e.add_argument("--repo", default=REPO_DIR,
                    help="resume clone (env JOBSEARCH_REPO)")
-    e.add_argument("--dry-run", action="store_true", help="print, write nothing")
+    e.add_argument("--dry-run", action="store_true",
+                   help="structural fixture preview; live admission gates are not checked")
     e.add_argument("--json", action="store_true", help="emit added/skipped as JSON")
     e.add_argument("--limit", type=int, default=0, help="add at most N items (0 = all)")
     e.add_argument("--include-submitted", action="store_true",
