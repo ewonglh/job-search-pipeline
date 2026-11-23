@@ -297,6 +297,21 @@ case("title start month", INTERN + " (January 2027 start)", NO_DATES,
 case("start and minimum duration must fit the same window", INTERN,
      "Start date: 1 August 2027. Minimum 8 weeks commitment.",
      "ineligible", "start_duration_conflict")
+case("ISO start also constrains the minimum duration", INTERN,
+     "Start date: 2027-08-01. Minimum 8 weeks commitment.",
+     "ineligible", "start_duration_conflict")
+case("repeated minimum duration still constrains start", INTERN + " (minimum 8 weeks)",
+     "Start date: 1 August 2027. Minimum 8 weeks commitment.",
+     "ineligible", "start_duration_conflict")
+case("alternative required start with one compatible choice", INTERN,
+     "Start date: 1 January 2027 or 1 June 2027. Minimum 8 weeks commitment.",
+     "eligible", "start_fit")
+case("required period after comma separated deadline", INTERN,
+     "Apply by 1 November 2026, internship runs 4 January 2027 to 25 June 2027.",
+     "ineligible", "availability_conflict")
+case("negated start date is optional", INTERN,
+     "Interns do not need to start in January 2027. Internship period: 1 June 2027 to 31 August 2027.",
+     "eligible", "availability_fit")
 
 # A minimum duration is a floor; a cap is not a requirement.
 case("minimum duration too long", INTERN, "Minimum 6 months commitment.",
@@ -328,6 +343,8 @@ case("graduation month deadline conflicts", INTERN,
      "Applicants must graduate by December 2027.", "ineligible", "graduation_conflict")
 case("graduation month matches", INTERN,
      "Applicants must graduate in May 2028.", "eligible", "graduation_match")
+case("graduation month alternatives share a year", INTERN,
+     "Applicants must graduate in May or June 2028.", "eligible", "graduation_match")
 case("graduation month differs", INTERN,
      "Applicants must graduate in June 2028.", "ineligible", "graduation_conflict")
 case("graduation lower bound", INTERN,

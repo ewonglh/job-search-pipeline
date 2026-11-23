@@ -986,8 +986,7 @@ def write_work_item(work_dir, slug, item):
     return path
 
 
-def retain_eligibility_decision(work_dir, slug, posting, decision):
-    """Keep one record per posting decision as policy and evidence change."""
+def _record_eligibility(work_dir, slug, posting, decision):
     from application_identity import application_id
     record = {"application_id": application_id(posting), "decision": decision}
     encoded = json.dumps(record, ensure_ascii=False, sort_keys=True).encode("utf-8")
@@ -996,6 +995,18 @@ def retain_eligibility_decision(work_dir, slug, posting, decision):
     if not os.path.isfile(os.path.join(work_dir, relative)):
         write_work_item(os.path.join(work_dir, "_eligibility", slug), digest, record)
     return relative.replace(os.sep, "/")
+
+
+def retain_eligibility_decision(work_dir, slug, posting, decision):
+    """Keep one record per posting decision as policy and evidence change."""
+    try:
+        with open(os.path.join(work_dir, slug + ".json"), encoding="utf-8") as fh:
+            previous = json.load(fh)
+    except FileNotFoundError:
+        previous = {}
+    if isinstance(previous.get("eligibility"), dict) and not previous.get("eligibility_decision_ref"):
+        _record_eligibility(work_dir, slug, posting, previous["eligibility"])
+    return _record_eligibility(work_dir, slug, posting, decision)
 
 
 def write_needs_jd(work_dir, pending):

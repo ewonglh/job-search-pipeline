@@ -29,7 +29,8 @@ _MONTH = (r"(?:(?-i:May)|Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|Jun(?:
 _SEP = r"(?:\s+(?:to|until|through|thru)\s+|\s*[-–—]\s*)"
 _ORD = r"(?:st|nd|rd|th)?"
 _BOUNDARY = re.compile(
-    r"(?<=[.!?;])\s+|\n+|,?\s+\b(?:although|but|whereas|however)\b\s+", re.I)
+    r"(?<=[.!?;])\s+|\n+|,?\s+\b(?:although|but|whereas|however)\b\s+|"
+    r",\s+(?=(?:the\s+)?(?:internship|placement|applications?|apply)\b)", re.I)
 _LEAD_CUT = re.compile(
     r"[;()]|\b(?:and|but|while|whereas|then|although)\b", re.I)
 # Words that make a date describe something other than the posting period.
@@ -63,9 +64,12 @@ _START_BEFORE = re.compile(
 _START_AFTER = re.compile(
     r"\b" + r"(?P<month>" + _MONTH + r")\b\.?(?:\s+(?P<day>\d{1,2})" + _ORD +
     r"(?!\d))?,?(?:\s+(?P<year>20\d{2}))?\s+(?:start|intake)\b", re.I)
+_START_ISO = re.compile(
+    r"\b" + _START_VERB + r"\b(?:\s+date)?\s*(?:is|on|:|-)?\s*(?P<iso>20\d{2}-\d{2}-\d{2})\b",
+    re.I)
 _START_SOFT = re.compile(
     r"\b(?:earliest|latest|flexible|flexibility|negotiable|as early|can start|"
-    r"could start|may start|open to)\b", re.I)
+    r"could start|may start|open to|not required|no need|do not need|does not need)\b", re.I)
 YEAR_WORDS = {
     "first": 1, "1st": 1, "second": 2, "2nd": 2, "third": 3,
     "3rd": 3, "fourth": 4, "4th": 4, "fifth": 5, "5th": 5,
@@ -227,9 +231,7 @@ def _snippet(text, start, end):
 def _sentences(text):
     # Contrast clauses have independent requirement polarity: an optional
     # degree must not cancel a mandatory authorization requirement.
-    return [part.strip() for part in re.split(
-        r"(?<=[.!?;])\s+|\n+|,?\s+\b(?:although|but|whereas|however)\b\s+",
-        text, flags=re.I) if part.strip()]
+    return [text[lo:hi].strip() for lo, hi in _spans(text) if text[lo:hi].strip()]
 
 
 def _preferred(sentence):
@@ -439,11 +441,24 @@ def _unsupported_dates(text):
     return found
 
 
+def _start_date(match):
+    fields = match.groupdict()
+    if fields.get("iso"):
+        value = date.fromisoformat(fields["iso"])
+        return {"month": value.month, "day": value.day, "year": value.year, "value": value}
+    month = _month(fields["month"])
+    day = fields.get("day") or fields.get("day2")
+    year = fields.get("year")
+    value = date(int(year), month, int(day)) if year and day else None
+    return {"month": month, "year": int(year) if year else None,
+            "day": int(day) if day else None, "value": value}
+
+
 def _start_requirements(text, parsed):
     """Find explicit start dates or months that are not part of a period."""
     taken = [(item["start_at"], item["end_at"]) for item in parsed]
     found = []
-    for pattern in (_START_BEFORE, _START_AFTER):
+    for pattern in (_START_BEFORE, _START_AFTER, _START_ISO):
         for match in pattern.finditer(text):
             if any(match.start() < hi and match.end() > lo for lo, hi in taken):
                 continue
@@ -456,15 +471,16 @@ def _start_requirements(text, parsed):
             if (_unrelated(lead + match.group(0), trail) or _preferred(clause)
                     or _START_SOFT.search(clause)):
                 continue
-            month = _month(match.group("month"))
-            day = match.group("day") or match.groupdict().get("day2")
-            year = match.group("year")
             try:
-                value = date(int(year), month, int(day)) if (year and day) else None
+                choices = [_start_date(match)]
+                alternative = re.match(r"\s*,?\s*or\b\s+(.+)", trail, re.I)
+                if alternative:
+                    value = "Start date: " + alternative.group(1)
+                    other = _START_BEFORE.match(value) or _START_ISO.match(value)
+                    choices.append(_start_date(other) if other else None)
             except ValueError:
                 continue
-            found.append({"month": month, "year": int(year) if year else None,
-                          "day": int(day) if day else None, "value": value,
+            found.append({"choices": choices,
                           "snippet": _snippet(text, match.start(), match.end()),
                           "start_at": match.start(), "end_at": match.end()})
     return found
@@ -526,7 +542,9 @@ def _availability_checks(metadata, jd, windows, minimum_days=0):
             if (re.search(r"\b(intern(ship)?|placement)\b", sentence, re.I) and
                     re.search(r"\b(period|dates?|runs?|from|between|duration|summer|"
                               r"winter|h[12])\b", sentence, re.I) and
-                    not _preferred(sentence) and not _UNRELATED.search(sentence)):
+                    not _preferred(sentence) and not _UNRELATED.search(sentence)
+                    and not _START_SOFT.search(sentence)
+                    and not any(lo <= item["start_at"] < hi for item in parsed)):
                 unclear.append(sentence[:240])
                 break
     results = []
@@ -555,6 +573,8 @@ def _availability_checks(metadata, jd, windows, minimum_days=0):
             if kinds == {"fit"}:
                 if unsupported:
                     results.append(("unknown", "unsupported_date_format", unsupported))
+                elif unclear:
+                    results.append(("unknown", "availability_unclear", unclear))
                 else:
                     results.append(("compatible", "availability_fit", evidence))
             elif kinds == {"conflict"}:
@@ -573,19 +593,33 @@ def _availability_checks(metadata, jd, windows, minimum_days=0):
         results.append(("unknown", "unsupported_date_format", unsupported))
     elif unclear and not starts:
         results.append(("unknown", "availability_unclear", unclear))
-    distinct_starts = {(req["month"], req["year"], req["day"]) for req in starts}
+    start_results = []
     for req in starts:
         if not windows:
             results.append(("unknown", "availability_unknown", [req["snippet"]]))
         else:
-            status, code = _start_outcome(req, windows)
-            if status != "conflict" and minimum_days > 1 and len(distinct_starts) == 1:
-                remaining = timedelta(days=minimum_days - 1)
-                feasible = [(low, high - remaining) for low, high in windows
-                            if high - low >= remaining]
-                if not feasible or _start_outcome(req, feasible)[0] == "conflict":
+            outcomes = []
+            remaining = timedelta(days=max(0, minimum_days - 1))
+            feasible = [(low, high - remaining) for low, high in windows
+                        if high - low >= remaining]
+            for choice in req["choices"]:
+                if not choice:
+                    outcomes.append(("unknown", "start_unclear"))
+                    continue
+                status, code = _start_outcome(choice, windows)
+                if status != "conflict" and remaining and (
+                        not feasible or _start_outcome(choice, feasible)[0] == "conflict"):
                     status, code = "conflict", "start_duration_conflict"
-            results.append((status, code, [req["snippet"]]))
+                outcomes.append((status, code))
+            status, code = next((outcome for outcome in outcomes if outcome[0] == "compatible"),
+                                next((outcome for outcome in outcomes if outcome[0] == "unknown"),
+                                     outcomes[0]))
+            start_results.append((status, code, [req["snippet"]]))
+    if {status for status, _, _ in start_results} == {"compatible", "conflict"}:
+        results.append(("unknown", "availability_source_conflict",
+                        [snippet for _, _, evidence in start_results for snippet in evidence]))
+    else:
+        results.extend(start_results)
     return results
 
 
@@ -624,6 +658,8 @@ def _graduation_tokens(sentence):
 
 def _graduation_decision(sentence, period):
     """Return (status, code) for a mandatory graduation-cohort sentence."""
+    sentence = re.sub(rf"\b({_MONTH})\s+or\s+({_MONTH})\s+(20\d{{2}})\b",
+                      r"\1 \3 or \2 \3", sentence, flags=re.I)
     tokens = _graduation_tokens(sentence)
     if not tokens:
         return "unknown", "graduation_unknown"
@@ -792,7 +828,8 @@ def evaluate(posting, profile, jd_text, profile_source=None):
     # Title and body are evaluated separately so that a conflict between them
     # reaches review, while unrelated deadlines never describe the period.
     durations = _duration_weeks(scan_text)
-    minimum_weeks = durations[0]["weeks"] if len(durations) == 1 else 0
+    duration_values = {item["weeks"] for item in durations}
+    minimum_weeks = next(iter(duration_values)) if len(duration_values) == 1 else 0
     for status_, code_, snippets in _availability_checks(
             clean_metadata, clean_jd, windows, math.ceil(minimum_weeks * 7)):
         add("availability", status_, code_, snippets)
