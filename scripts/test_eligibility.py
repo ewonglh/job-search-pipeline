@@ -180,4 +180,194 @@ assert plain["provenance"]["jd_sha256"] == restricted["provenance"]["jd_sha256"]
 for key in ("posting_metadata_sha256", "evaluated_text_sha256"):
     assert plain["provenance"][key] != restricted["provenance"][key]
 
+# Required periods, start months, durations and graduation cohorts (issue 49).
+# Profile A is available 1 May 2027 to 31 August 2027 and expects to graduate
+# in May 2028.
+def case(label, role, jd, expected, code=None, absent=(), profile=PROFILE_A,
+         source=PROFILE_A_TEXT):
+    result = eligibility.evaluate({"role": role}, profile, jd, source.encode("utf-8"))
+    assert result["status"] == expected, (label, result)
+    if code:
+        assert code in result["reason_codes"], (label, result)
+    for banned in absent:
+        assert banned not in result["reason_codes"], (label, result)
+    return result
+
+
+NO_DATES = "Build internal tools with the engineering team."
+IN_WINDOW = "Internship period: 1 June 2027 to 31 August 2027."
+OUT_WINDOW = "Internship period: 4 January 2027 to 25 June 2027."
+INTERN = "Software Engineering Intern"
+
+# A fixed month range in the title is evaluated even without period wording.
+case("title in window", INTERN + " (May - Aug 2027)", NO_DATES,
+     "eligible", "availability_fit")
+case("title out of window", INTERN + " (Jan - Jun 2027)", NO_DATES,
+     "ineligible", "availability_conflict")
+case("title range with day-less dash forms", "Intern, Jan to Jun 2027", NO_DATES,
+     "ineligible", "availability_conflict")
+# Words that look like months do not make a period.
+case("modal verb and prefixes are not months", "Market - Junior Intern", NO_DATES,
+     "unknown", "insufficient_evidence", ("availability_conflict",))
+
+# The title and its equivalent description both stop the posting.
+case("title and description both out of window", INTERN + " (Jan - Jun 2027)",
+     OUT_WINDOW, "ineligible", "availability_conflict")
+case("equivalent title and description fit", INTERN + " (Jun - Aug 2027)", IN_WINDOW,
+     "eligible", "availability_fit", ("availability_source_conflict",))
+case("title fits but description conflicts", INTERN + " (May - Aug 2027)", OUT_WINDOW,
+     "unknown", "availability_source_conflict")
+case("title conflicts but description fits", INTERN + " (Jan - Jun 2027)", IN_WINDOW,
+     "unknown", "availability_source_conflict")
+
+# An unrelated deadline neither hides a required period nor becomes one.
+case("deadline sentence cannot hide a conflicting period", INTERN,
+     OUT_WINDOW + " Applications close on 30 November 2026.",
+     "ineligible", "availability_conflict")
+case("deadline clause cannot hide a conflicting period", INTERN,
+     "The internship runs 4 January 2027 to 25 June 2027 and applications close "
+     "on 1 November 2026.", "ineligible", "availability_conflict")
+case("application window is not a period", INTERN,
+     IN_WINDOW + " Applications open 1 October to 30 November 2026.",
+     "eligible", "availability_fit", ("availability_conflict", "availability_unclear"))
+case("application range alone is not a period", INTERN + " (Applications open Oct - Nov 2026)",
+     "Internship applications run from 1 October 2026 to 30 November 2026. " + IN_WINDOW,
+     "eligible", "availability_fit", ("availability_conflict", "availability_unclear"))
+case("deadline with an unsupported-format date is not a period", INTERN,
+     IN_WINDOW + " Internship applications close 30/11/2026.",
+     "eligible", "availability_fit", ("unsupported_date_format",))
+
+# A supported alternative can satisfy the requirement; none fitting conflicts.
+case("alternative period fits", INTERN,
+     "Internship period: 4 January 2027 to 25 June 2027 or 1 June 2027 to 31 August 2027.",
+     "eligible", "availability_fit")
+case("labelled alternative fits", INTERN,
+     "Internship dates: Option A 4 January 2027 to 25 June 2027; "
+     "Option B 1 June 2027 to 31 August 2027.", "eligible", "availability_fit")
+case("no alternative fits", INTERN,
+     "Internship period: 4 January 2027 to 25 June 2027 or 1 September 2027 to "
+     "15 December 2027.", "ineligible", "availability_conflict")
+case("unlinked periods that disagree need review", INTERN,
+     OUT_WINDOW + " Internship dates: 1 June 2027 to 31 August 2027.",
+     "unknown", "availability_unclear")
+
+# A year crossing or a reversed range is surfaced rather than guessed.
+CROSS_TEXT = PROFILE_A_TEXT.replace(
+    "1 May 2027 to 31 August 2027", "1 November 2026 to 28 February 2027")
+CROSS = parse_profile(CROSS_TEXT)
+case("year crossing with one fitting reading needs review", INTERN,
+     "Internship period: November to February 2027.", "unknown",
+     "availability_year_ambiguous", profile=CROSS, source=CROSS_TEXT)
+case("year crossing where no reading fits conflicts", INTERN,
+     "Internship period: November to February 2027.", "ineligible",
+     "availability_conflict")
+case("year crossing where every reading fits", INTERN,
+     "Internship period: 1 November to 28 February 2027.", "eligible",
+     "availability_fit", profile=parse_profile(PROFILE_A_TEXT.replace(
+         "1 May 2027 to 31 August 2027", "1 November 2026 to 28 February 2029")),
+     source=PROFILE_A_TEXT)
+case("reversed explicit range needs review", INTERN,
+     "Internship period: 1 August 2027 to 1 May 2027.", "unknown",
+     "availability_unclear", ("availability_fit", "availability_conflict"))
+case("month range without a year needs review", INTERN,
+     "Internship period: June to August.", "unknown", "availability_year_unknown")
+case("between form", INTERN,
+     "The internship runs between 1 June 2027 and 31 August 2027.", "eligible",
+     "availability_fit")
+
+# An explicit start month or date is checked against the profile.
+case("start month in window", INTERN, "The internship must start in June 2027.",
+     "eligible", "start_fit")
+case("start month out of window", INTERN, "The internship must start in January 2027.",
+     "ineligible", "start_conflict")
+case("start date out of window", INTERN, "Start date: 4 January 2027.",
+     "ineligible", "start_conflict")
+case("start month without a year in window needs review", INTERN,
+     "The internship must start in June.", "unknown", "start_year_unknown")
+case("start month without a year never in window", INTERN,
+     "The internship must start in January.", "ineligible", "start_conflict")
+case("application start is not an internship start", INTERN,
+     "Applications start in January 2027.", "unknown", "insufficient_evidence",
+     ("start_conflict",))
+case("flexible start is not a requirement", INTERN,
+     "Earliest start January 2027, flexible.", "unknown", "insufficient_evidence",
+     ("start_conflict",))
+case("title start month", INTERN + " (January 2027 start)", NO_DATES,
+     "ineligible", "start_conflict")
+case("start and minimum duration must fit the same window", INTERN,
+     "Start date: 1 August 2027. Minimum 8 weeks commitment.",
+     "ineligible", "start_duration_conflict")
+case("ISO start also constrains the minimum duration", INTERN,
+     "Start date: 2027-08-01. Minimum 8 weeks commitment.",
+     "ineligible", "start_duration_conflict")
+case("repeated minimum duration still constrains start", INTERN + " (minimum 8 weeks)",
+     "Start date: 1 August 2027. Minimum 8 weeks commitment.",
+     "ineligible", "start_duration_conflict")
+case("alternative required start with one compatible choice", INTERN,
+     "Start date: 1 January 2027 or 1 June 2027. Minimum 8 weeks commitment.",
+     "eligible", "start_fit")
+case("required period after comma separated deadline", INTERN,
+     "Apply by 1 November 2026, internship runs 4 January 2027 to 25 June 2027.",
+     "ineligible", "availability_conflict")
+case("negated start date is optional", INTERN,
+     "Interns do not need to start in January 2027. Internship period: 1 June 2027 to 31 August 2027.",
+     "eligible", "availability_fit")
+
+# A minimum duration is a floor; a cap is not a requirement.
+case("minimum duration too long", INTERN, "Minimum 6 months commitment.",
+     "ineligible", "duration_conflict")
+case("minimum duration fits", INTERN, "Minimum 3 months commitment.",
+     "eligible", "duration_fit")
+case("minimum duration at the window boundary", INTERN, "Minimum 4 months.",
+     "eligible", "duration_fit")
+case("at least wording", INTERN, "Interns must work at least twelve months.",
+     "ineligible", "duration_conflict")
+case("range lower bound too long", INTERN, "Minimum 7 to 9 months.",
+     "ineligible", "duration_conflict")
+case("range lower bound fits needs review", INTERN, "Minimum 3 to 6 months.",
+     "unknown", "duration_unclear")
+case("duration cap is ignored", INTERN, "The internship lasts up to 12 months.",
+     "unknown", "insufficient_evidence", ("duration_conflict", "duration_fit"))
+case("neighbouring requirement does not make a duration mandatory", INTERN,
+     "Applicants must be Singapore citizens and the programme lasts 12 months.",
+     "eligible", "citizenship_match", ("duration_conflict",))
+
+# Mandatory graduation cohorts compare periods, not just the first year.
+case("graduation alternatives fit", INTERN,
+     "Applicants must graduate in 2027 or 2028.", "eligible", "graduation_match")
+case("graduation alternatives conflict", INTERN,
+     "Applicants must graduate in 2026 or 2027.", "ineligible", "graduation_conflict")
+case("graduation range fits", INTERN,
+     "Applicants must graduate between 2027 and 2028.", "eligible", "graduation_match")
+case("graduation month deadline conflicts", INTERN,
+     "Applicants must graduate by December 2027.", "ineligible", "graduation_conflict")
+case("graduation month matches", INTERN,
+     "Applicants must graduate in May 2028.", "eligible", "graduation_match")
+case("graduation month alternatives share a year", INTERN,
+     "Applicants must graduate in May or June 2028.", "eligible", "graduation_match")
+case("graduation month differs", INTERN,
+     "Applicants must graduate in June 2028.", "ineligible", "graduation_conflict")
+case("graduation lower bound", INTERN,
+     "Applicants must graduate after 2027.", "eligible", "graduation_match")
+case("graduating wording", INTERN,
+     "Applicants must be graduating in 2029.", "ineligible", "graduation_conflict")
+case("unlinked graduation years need review", INTERN,
+     "Applicants must graduate in 2028 for the 2026 programme.", "unknown",
+     "graduation_unclear")
+YEAR_ONLY_TEXT = PROFILE_A_TEXT.replace("2028-05", "2028")
+case("graduation month against a year-only profile needs review", INTERN,
+     "Applicants must graduate by May 2028.", "unknown", "graduation_unclear",
+     profile=parse_profile(YEAR_ONLY_TEXT), source=YEAR_ONLY_TEXT)
+case("graduation without a profile fact stays unknown", INTERN,
+     "Applicants must graduate in 2028.", "unknown", "graduation_unknown",
+     profile={}, source="")
+case("optional graduation cohort is ignored", INTERN,
+     "Students graduating in 2026 are preferred. " + IN_WINDOW, "eligible",
+     "availability_fit", ("graduation_conflict",))
+
+# Missing dates stay reviewable rather than excluded.
+case("no dates stays reviewable", INTERN, NO_DATES, "unknown", "insufficient_evidence")
+case("unclear period wording stays reviewable", INTERN,
+     "The internship runs over the summer.", "unknown", "availability_unclear")
+
 print("test_eligibility: all checks passed")

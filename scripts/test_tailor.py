@@ -144,6 +144,8 @@ try:
     assert _item["jd_guard"]["kinds"] == ["injection"], _item["jd_guard"]
     assert _item["jd_guard"]["metadata_verdict"] == "clean", _item["jd_guard"]
     assert _item["eligibility"]["status"] == "eligible", _item["eligibility"]
+    _initial_ref = _item["eligibility_decision_ref"]
+    assert _os2.path.isfile(_os2.path.join(_work, _initial_ref))
     assert all(_item["input_provenance"].get(key) for key in
                ("profile_sha256", "master_sha256", "jd_sha256",
                 "role_title_sha256", "combined_text_sha256")), _item
@@ -158,6 +160,28 @@ try:
     _errv = _err.getvalue()
     assert f"tailor: guard flagged {_slugs[0]} (1 findings; metadata clean)" in _errv, _errv
     assert f"tailor: guard hostile {_slugs[1]} (" in _errv, _errv
+
+    _profile = _os2.path.join(_repo, "data", "profile.yaml")
+    _args = ["--repo", _repo, "--work", _work,
+             "--skipped", _os2.path.join(_gtmp, "nope.yaml"),
+             "--queue", _os2.path.join(_gtmp, "nope2.yaml")]
+    with open(_profile, "w", encoding="utf-8") as _fh:
+        _fh.write("availability: 1 January 2027 to 31 March 2027\n")
+    with _ctx.redirect_stdout(_buf), _ctx.redirect_stderr(_err):
+        assert t.main(_args) == 0
+    with open(_os2.path.join(_work, _slugs[0] + ".json"), encoding="utf-8") as _fh:
+        _excluded = _json.load(_fh)
+    assert _excluded["status"] == "hold" and _excluded["eligibility_status"] == "ineligible"
+
+    with open(_profile, "w", encoding="utf-8") as _fh:
+        _fh.write("availability: 1 May 2027 to 31 August 2027\n")
+    with _ctx.redirect_stdout(_buf), _ctx.redirect_stderr(_err):
+        assert t.main(_args) == 0
+    with open(_os2.path.join(_work, _slugs[0] + ".json"), encoding="utf-8") as _fh:
+        _ready = _json.load(_fh)
+    assert _ready["status"] == "ready" and _ready["eligibility_decision_ref"] == _initial_ref
+    with open(_os2.path.join(_work, _excluded["eligibility_decision_ref"]), encoding="utf-8") as _fh:
+        assert _json.load(_fh)["decision"]["status"] == "ineligible"
 finally:
     t.fetch_jd, t.pr_index, t.FETCH_SLEEP = _real
     _sh.rmtree(_gtmp)
