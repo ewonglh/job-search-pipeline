@@ -8,7 +8,9 @@ import io
 import json
 import os
 import shutil
+import shlex
 import subprocess
+import sys
 import tempfile
 
 from datetime import date
@@ -306,11 +308,14 @@ try:
     # nothing.
     for argv in (["list"], ["next"], ["release-stale"],
                  ["status", "--pr", "12", "--status", "failed", "--notes", "x"],
-                 ["claim", "--pr", "12", "--repo", repo],
+                 ["claim", "--pr", "12", "--repo", repo,
+                  "--runner-id", "queue-test-runner", "--session-ref", "queue-test-session"],
                  ["enqueue", "--repo", repo],
                  ["enqueue", "--dry-run", "--repo", repo]):
         err = io.StringIO()
-        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err), \
+                mock.patch.dict(os.environ, {
+                    "JOBSEARCH_BROWSER_OWNERSHIP_VERIFIER": shlex.quote(sys.executable)}):
             with mock.patch.object(q, "gh_merged_prs", return_value=PRS) as gh:
                 rc = q.main([argv[0], "--queue", qfile] + argv[1:])
         assert rc in (1, 2), (argv, rc)
@@ -552,7 +557,11 @@ with tempfile.TemporaryDirectory() as root:
         with mock.patch.object(q, "gh_merged_prs", return_value=PRS):
             assert quiet(q.main, ["enqueue", "--queue", path, "--repo", repo]) == 1, label
         assert quiet(q.main, ["init", "--queue", path]) == 2, label
-        assert quiet(q.main, ["claim", "--queue", path, "--repo", repo, "--pr", "3"]) == 2, label
+        with mock.patch.dict(os.environ, {
+                "JOBSEARCH_BROWSER_OWNERSHIP_VERIFIER": shlex.quote(sys.executable)}):
+            assert quiet(q.main, ["claim", "--queue", path, "--repo", repo, "--pr", "3",
+                                  "--runner-id", "queue-test-runner",
+                                  "--session-ref", "queue-test-session"]) == 2, label
         assert read_bytes(path) == before, label
 
 

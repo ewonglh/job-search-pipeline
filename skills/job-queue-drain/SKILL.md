@@ -25,15 +25,25 @@ Private submission snapshots default to
 `JOBSEARCH_SNAPSHOT_ROOT` to select another private directory. It must be
 outside both the public checkout and the private resume repository.
 
-## Durable claim gate
+## Durable claim and browser owner
 
-Before any external form action, claim the queued item:
+The scheduler selects and reserves the oldest eligible row with one queue
+operation. It supplies a unique runner ID and the exact OpenClaw session
+reference:
 
 ```bash
-python3 scripts/queue.py claim --pr PR_NUMBER --repo "$JOBSEARCH_REPO" --json
+python3 scripts/queue.py claim --next --runner-id RUNNER_ID \
+  --session-ref SESSION_REF --repo "$JOBSEARCH_REPO" --json
 ```
 
-Claim reads the unique matching posting from `data/postings.json`, the selected
+Every new claim requires both owner values and pins the configured verifier's
+absolute command, command digest, and executable digest in the queue row.
+`claim --pr N`
+is permitted only when PR N is also the shared oldest-first FIFO selection.
+The scheduler and direct callers therefore cannot skip ahead by selecting a
+different PR. Configure `JOBSEARCH_BROWSER_OWNERSHIP_VERIFIER` in the runner
+host environment before claiming; a missing or invalid verifier blocks the
+claim. Claim reads the unique matching posting from `data/postings.json`, the selected
 profile from `data/profile.yaml` (or the exact path passed with `--profile`),
 the current `applications.yaml`, and owner skip/cap files. It fetches a fresh JD
 from that posting URL, guards it, and runs the shared eligibility evaluator.
@@ -43,11 +53,14 @@ an attempt is recorded. `--force` and review notes do not override these gates.
 The tracker, owner skip list, and cap file must be readable; an explicit `[]`
 records a verified empty list. Missing or empty-unmarked owner state blocks claim.
 
-Success returns an `attempt_id`. The command writes `status: in_progress`,
-`attempt_id`, `attempt_state: authorized`, and `submit_gate: durable` atomically
-and flushes the state before returning success. The returned ID is required to
-record the outcome. A failed claim has no form attempt and must not proceed to
-an external form.
+Success writes `status: in_progress`, `attempt_id`, `attempt_state: authorized`,
+`submit_gate: durable`, runner ID, session reference, verifier command and both
+digests, and lease expiry in one locked queue write. The command digest binds
+its arguments; the executable digest detects changed executable bytes. The expiry starts recovery;
+it never releases the browser slot. A failed claim has no form attempt and must
+not proceed to an external form. Pre-existing rows without a verifier pin use
+the explicitly configured verifier at recovery time; if it is missing or
+uncertain, the slot stays reserved with a clear error.
 
 ## Drain and record
 
@@ -57,6 +70,19 @@ captcha, uncovered availability or salary question, work-authorisation
 judgement, or uncertain employer cap. The queue code does not open or operate
 forms.
 
+Record a concrete pre-submit blocker against the exact owner tuple:
+
+```bash
+python3 scripts/queue.py status --pr PR_NUMBER --status blocked \
+  --attempt-id ATTEMPT_ID --runner-id RUNNER_ID --session-ref SESSION_REF \
+  --notes "CAPTCHA blocks progress" \
+  --evidence-source "employer application form" \
+  --evidence-observation "CAPTCHA blocks the form before it can continue."
+```
+
+This protects the application from scheduling. The runner still has to verify
+termination before the browser slot is free.
+
 Before opening or submitting the form, identify the exact selected PDF and
 answers JSON. The JSON must contain only form answers; credentials, OTPs, cookies
 and credential-like fields are rejected. Prepare the immutable snapshot for the
@@ -64,7 +90,8 @@ active attempt:
 
 ```bash
 python3 scripts/queue.py prepare-snapshot --pr PR_NUMBER \
-  --attempt-id ATTEMPT_ID --pdf "$PDF_FILE" --answers "$ANSWERS_FILE" \
+  --attempt-id ATTEMPT_ID --runner-id RUNNER_ID --session-ref SESSION_REF \
+  --pdf "$PDF_FILE" --answers "$ANSWERS_FILE" \
   --operator-verification "I checked the selected PDF and answers for this posting."
 ```
 
@@ -80,21 +107,30 @@ manifest and bytes and the currently selected files with the same paths:
 
 ```bash
 python3 scripts/queue.py verify-snapshot --pr PR_NUMBER \
-  --attempt-id ATTEMPT_ID --pdf "$PDF_FILE" --answers "$ANSWERS_FILE"
+  --attempt-id ATTEMPT_ID --runner-id RUNNER_ID --session-ref SESSION_REF \
+  --pdf "$PDF_FILE" --answers "$ANSWERS_FILE"
 ```
 
 The verification expires after two minutes. Do not change the selected files
 after verification. A mismatch clears the prior verification and requires a
 new `prepare-snapshot`, followed by `verify-snapshot` again. This is the gate
-before Submit. After employer confirmation, always record success even if the
-check has expired; never rerun a pre-submit check to conceal missing evidence.
+before Submit. Persist this marker immediately before the irreversible action:
+
+```bash
+python3 scripts/queue.py begin-submit --pr PR_NUMBER \
+  --attempt-id ATTEMPT_ID --runner-id RUNNER_ID --session-ref SESSION_REF --json
+```
+
+After employer confirmation, always record success even if the check has
+expired; never rerun a pre-submit check to conceal missing evidence.
 
 After the employer confirms submission, record that external confirmation
 against the exact attempt:
 
 ```bash
 python3 scripts/queue.py status --pr PR_NUMBER --status submitted \
-  --attempt-id ATTEMPT_ID --date YYYY-MM-DD --sent "exact submission summary" \
+  --attempt-id ATTEMPT_ID --runner-id RUNNER_ID --session-ref SESSION_REF \
+  --date YYYY-MM-DD --sent "exact submission summary" \
   --confirmation-evidence "employer portal confirmation observed" \
   --route "company ATS"
 ```
@@ -131,13 +167,37 @@ was fresh, expired, or missing at confirmation. Missing retained materials stay
 `unknown`; a missing pre-submit check leaves provenance `incomplete` even if
 retained bytes can be finalized. Neither condition authorizes another attempt.
 
+Submission confirmation does not release browser ownership. The runner reads
+`browser-owner --json`, verifies the matching process/session independently or
+fences new and in-flight browser actions, then calls `finish-attempt` with the
+exact PR, attempt, runner, and session tuple. Without a configured independent
+verifier, finish fails closed and another browser claim remains blocked. Agent
+prose, client exit, stop request, and lease expiry are not termination evidence.
+At claim time, `JOBSEARCH_BROWSER_OWNERSHIP_VERIFIER` is resolved to an absolute
+command and its executable SHA-256 digest is pinned. At finish, the stored
+command is executed after checking the digest; a caller cannot replace it by
+changing its environment. For older owner rows with no pin, configure the same
+environment variable explicitly for the recovery command. The verifier
+receives one JSON request on stdin with schema
+`job-search-browser-termination-request/v1`, a fresh challenge, the exact owner
+tuple, and the submitted evidence. It must return JSON with schema
+`job-search-browser-termination-verdict/v1`,
+`verified: true`, the same challenge and owner tuple, a `verifier_id`, and state
+`terminated` or `fenced`. A fenced result also requires
+`in_flight_rejected: true`. The command must observe or enforce the real browser
+boundary; echoing agent data is not verification. Pinning identifies the
+configured executable, but its semantics are an operator/deployment property;
+it does not defend against host users who can modify the queue or verifier
+files. The real browser adapter remains the #55 requirement.
+
 ## Interrupted attempts and reconciliation
 
-An old or incomplete claim becomes `outcome_unknown`; it is never released
-automatically. Run:
+An old or incomplete claim becomes `outcome_unknown`; the browser owner remains
+reserved until independently verified termination. Run:
 
 ```bash
 python3 scripts/queue.py release-stale
+python3 scripts/queue.py browser-owner --json
 ```
 
 To retry, inspect concrete evidence that submission did not occur, then record
@@ -153,6 +213,20 @@ Generic notes or `--force` cannot reopen a submitted or unresolved attempt.
 Evidence that confirms submission uses `--result submitted` with `--date`,
 `--sent`, and `--confirmation-evidence`; that result is terminal. Reconciliation
 keeps an attempt history in the private queue state.
+
+A known pre-submit blocker is recorded as `blocked` with a concrete source and
+observation. Browser ownership still must be finished independently. Resume is
+explicit and requires evidence that resolves the blocker, with no submit marker
+or unknown outcome:
+
+```bash
+python3 scripts/queue.py resume --pr PR_NUMBER --attempt-id ATTEMPT_ID \
+  --evidence-source "employer application form" \
+  --evidence-observation "The consent question was answered and verified."
+```
+
+If `begin-submit` was recorded and no confirmation exists, finish records
+`outcome_unknown`; use reconciliation, never blocked resume.
 
 ## Stop conditions
 

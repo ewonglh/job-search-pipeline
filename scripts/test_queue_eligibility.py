@@ -4,7 +4,9 @@ import contextlib
 import io
 import json
 import os
+import shlex
 import subprocess
+import sys
 import tempfile
 from unittest import mock
 
@@ -96,10 +98,13 @@ def make_case(root, *, posting_rows=None, item=None, profile=PROFILE,
 
 def run_claim(case):
     args = ["claim", "--queue", case["queue"], "--repo", case["repo"],
-            "--profile", case["profile"], "--pr", "12"]
+            "--profile", case["profile"], "--pr", "12",
+            "--runner-id", "eligibility-runner", "--session-ref", "eligibility-session"]
     with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
         with mock.patch.object(tailor, "SKIPPED_FILE", case["skipped"]), \
-                mock.patch.object(tailor, "GATE_FILE", case["gates"]):
+                mock.patch.object(tailor, "GATE_FILE", case["gates"]), \
+                mock.patch.dict(os.environ, {
+                    "JOBSEARCH_BROWSER_OWNERSHIP_VERIFIER": shlex.quote(sys.executable)}):
             return q.main(args)
 
 
@@ -343,10 +348,13 @@ with tempfile.TemporaryDirectory() as directory:
         return {"jd_text": JD_FIT}
     err = io.StringIO()
     args = ["claim", "--queue", case["queue"], "--repo", case["repo"],
-            "--profile", case["profile"], "--pr", "12"]
+            "--profile", case["profile"], "--pr", "12",
+            "--runner-id", "eligibility-runner", "--session-ref", "eligibility-session"]
     with mock.patch.object(tailor, "fetch_jd", side_effect=fetch_then_tracker_moves), \
             mock.patch.object(tailor, "SKIPPED_FILE", case["skipped"]), \
             mock.patch.object(tailor, "GATE_FILE", case["gates"]), \
+            mock.patch.dict(os.environ, {
+                "JOBSEARCH_BROWSER_OWNERSHIP_VERIFIER": shlex.quote(sys.executable)}), \
             contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
         assert q.main(args) == 2
     assert "tracker changed on origin/main after it was refreshed" in err.getvalue(), err.getvalue()
