@@ -155,7 +155,7 @@ def load_open_pr_links(prs_file, log):
                 continue
             m = re.search(r"https?://[^\s)\]<>\"']+", str(p.get("body") or ""))
             if m and "github.com" not in m.group(0):
-                links.add(t.normalize_url(m.group(0)).lower())
+                links.add(t.normalize_url(m.group(0)))
         return links
     links = t.open_pr_body_links(log)
     if links is None:

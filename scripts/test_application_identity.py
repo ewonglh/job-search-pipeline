@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Synthetic checks for exact application identity reconciliation."""
 import application_identity as identity
+from datetime import date
 
 
 url_a = "https://JOBS.example/role?job_id=42&utm_source=mail#details"
@@ -77,5 +78,81 @@ assert not explicit["conflicts"], explicit
 assert explicit["applications"]["application:reviewed"]["resolution"] == {
     "method": "explicit_alias", "reason": "owner confirmed",
     "evidence": "synthetic submission receipt"}
+
+import discover
+import queue as queue_module
+import tailor
+
+first = {
+    "company": "Fixture Employer", "role": "Software Intern",
+    "link": "https://board.example/jobs/first",
+    "apply_url": "https://ats.example/Jobs/Aa?req=8",
+    "apply_url_evidence": "fixture verified redirect",
+    "requisition_id": "fixture:8", "requisition_evidence": "fixture ATS API",
+}
+second = dict(first, link="https://ats.example/Jobs/aA?req=9", apply_url=None,
+              apply_url_evidence=None, requisition_id="fixture:9")
+now = date(2026, 11, 22)
+store, _ = discover.merge_postings([], [first], now)
+store, added = discover.merge_postings(store, [second], now)
+assert len(store) == 2 and len(added) == 1
+first_slug = tailor.assign_slugs([first])[0][1]
+second_slug = tailor.assign_slugs([second])[0][1]
+assert first_slug != second_slug
+assert [slug for _, slug in tailor.assign_slugs([second, first])] == [second_slug, first_slug]
+assert tailor.select_postings([first, second], [first]) == [second]
+assert identity.normalize_posting_url(first["apply_url"]) != identity.normalize_posting_url(second["link"])
+alias = {"link": first["apply_url"]}
+assert discover.merge_postings(store, [alias], now)[1] == []
+assert len(discover.coalesce([first, alias, second])) == 2
+
+
+def merged_pr(number, posting, slug):
+    return {
+        "number": number,
+        "headRefName": f"app/{slug}",
+        "title": f"Tailor CV: {posting.get('company', first['company'])} — {first['role']}",
+        "body": posting["link"],
+        "mergedAt": "2026-11-22T08:00:00Z",
+        "files": [{"path": f"variants/{slug}/resume.tex"}],
+        "_postings": store,
+    }
+
+
+rows, queued, skips = queue_module.enqueue(
+    [], [merged_pr(8, first, first_slug), merged_pr(9, second, second_slug)])
+assert len(queued) == 2 and not skips, (queued, skips)
+for item, posting in zip(rows, [first, second]):
+    queue_module._check_claim_identities(item, rows, [], posting)
+assert len(identity.resolve_applications([], rows)["applications"]) == 2
+
+rows[0].update(status="submitted", tracker_sync="pending")
+_, queued, skips = queue_module.enqueue(rows, [merged_pr(10, alias, first_slug)])
+assert not queued and skips == [(10, "already active for this application")]
+
+# A later observation can establish the trusted route for a legacy row.
+legacy = {"company": first["company"], "role": first["role"], "link": first["link"],
+          "apply_url": "https://other.example/jobs/unverified"}
+legacy_store, _ = discover.merge_postings([], [legacy], now)
+enriched, new = discover.merge_postings(legacy_store, [first], now)
+assert not new and enriched[0]["apply_url"] == first["apply_url"]
+assert not legacy_store[0].get("apply_url_evidence")
+assert discover.coalesce([legacy, first])[0]["apply_url"] == first["apply_url"]
+assert discover.merge_postings(enriched, [alias], now)[1] == []
+confirmed_legacy = dict(legacy, pr_number=8, status="submitted", tracker_sync="pending")
+alias_merge = dict(merged_pr(10, alias, first_slug), _postings=enriched)
+_, queued, skips = queue_module.enqueue([confirmed_legacy], [alias_merge])
+assert not queued and skips == [(10, "already active for this application")]
+
+different = dict(second, link=first["link"])
+ambiguous = dict(merged_pr(8, first, first_slug), _postings=[first, different])
+_, queued, skips = queue_module.enqueue([], [ambiguous])
+assert not queued and skips == [(8, "posting identity requires review")]
+
+tracker_row = dict(first, pr_number=8, applied_date="2026-11-22")
+wrong_queue_row = dict(second, pr_number=8, submitted_at="2026-11-22")
+conflict = identity.resolve_applications([tracker_row], [wrong_queue_row])
+assert conflict["conflicts"][0]["reason"] == "conflicting_requisitions"
+assert not conflict["applications"]
 
 print("test_application_identity: all assertions passed")

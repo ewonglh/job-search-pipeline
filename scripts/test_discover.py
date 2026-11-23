@@ -97,7 +97,7 @@ assert not d.posted_ok(date(2027, 1, 1), TODAY)    # far future
 
 # ---------------------------------------------------------------- dedup key
 a = {"company": "Acme  Corp", "role": "Software Engineer Intern",
-     "link": "https://acme.com/jobs/1?ref=x"}
+     "link": "https://acme.com/jobs/1?utm_source=x"}
 b = {"company": "acme corp", "role": "software engineer intern",
      "link": "https://acme.com/jobs/1/"}
 c = {"company": "Acme Corp", "role": "Software Engineer Intern",
@@ -198,7 +198,7 @@ existing[0]["key"] = d.dedup_key(existing[0])
 incoming = [
     # exact duplicate (different spelling/url cosmetics) -> skipped
     {"company": "acme  corp", "role": "software engineer intern",
-     "link": "https://acme.example/jobs/1/?ref=1", "source": "InternSG"},
+     "link": "https://acme.example/jobs/1/?utm_source=fixture", "source": "InternSG"},
     # new posting
     {"company": "Delta Systems Pte Ltd", "role": "Backend Engineer Intern",
      "link": "https://acme.example/jobs/2", "source": "InternSG"},
@@ -266,14 +266,14 @@ imp3 = d.import_postings([
 ], TODAY)
 assert [p["company"] for p in imp3] == ["Ok Co"], imp3
 
-# --- merge_postings: company+role secondary dedupe ---
+# --- merge_postings: a repeated title does not identify a requisition ---
 _TODAY = date(2026, 10, 9)
 existing = [{
     "company": "Airwallex", "role": "Software Engineer Intern (Summer 2027)",
     "link": "https://www.linkedin.com/jobs/view/4445083875", "source": "LinkedIn",
 }]
 incoming = [
-    # same company+role, different URL (repost) -> skipped
+    # Same company and role, different listing route -> retain for review.
     {"company": "Airwallex", "role": "Software Engineer Intern (Summer 2027)",
      "link": "https://www.linkedin.com/jobs/view/9999999", "source": "LinkedIn"},
     # genuinely new posting -> kept
@@ -281,8 +281,8 @@ incoming = [
      "link": "https://www.linkedin.com/jobs/view/123", "source": "LinkedIn"},
 ]
 merged, new = d.merge_postings(existing, incoming, _TODAY)
-assert [p["company"] for p in new] == ["Ok Co"], new
-assert len(merged) == 2, merged
+assert [p["company"] for p in new] == ["Airwallex", "Ok Co"], new
+assert len(merged) == 3, merged
 
 # same company+role twins inside the store itself are collapsed on next merge
 existing_twins = existing + [{

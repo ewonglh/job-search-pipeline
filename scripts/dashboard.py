@@ -150,6 +150,7 @@ def build_board(apps, postings, prs, queue, today, links=None):
     # sankey loses every Found/Tailored posting).
     tracked_links, names = s.tracker_keys(apps)
     tracker_slugs = {s.work_slug(a) for a in apps}
+    legacy_tracker_slugs = {s._legacy_work_slug(a) for a in apps}
     tracker_pr_nums = s.tracker_pr_numbers(apps)
     tailor_prs = s.effective_tailor_prs(prs, apps) if prs is not None else []
     pr_nums = {p.get("number") for p in tailor_prs}
@@ -162,15 +163,16 @@ def build_board(apps, postings, prs, queue, today, links=None):
         """Queue item for a tracker/PR app: work-slug first, then PR number."""
         if not queue:
             return None
-        slug = s.work_slug(app)
-        for it in queue:
-            if slug and (s.work_slug(it) == slug or s.pr_branch_slug(it) == slug):
-                return it
         num = card_pr_number(app)
         if num is not None:
             for it in queue:
                 if it.get("pr_number") == num:
                     return it
+        slug = s.work_slug(app)
+        for it in queue:
+            if (s.work_slug(it) == slug or s.pr_branch_slug(it) == slug
+                    or not s.posting_keys(it) and s._legacy_work_slug(it) == s._legacy_work_slug(app)):
+                return it
         return None
 
     board = {k: [] for k in COLUMNS}
@@ -178,13 +180,8 @@ def build_board(apps, postings, prs, queue, today, links=None):
 
     def pr_for_posting(posting):
         """The open tailor PR covering this posting, as a URL (or None)."""
-        link = s.normalize_url(posting.get("link", "")).lower()
-        slug = s.work_slug(posting)
         for pr in tailor_prs:
-            if (s.posting_pr_matched(posting, s.pr_body_links(pr),
-                                     {s.pr_branch_slug(pr)})
-                    or link and link in s.pr_body_links(pr)
-                    or s.pr_branch_slug(pr) == slug):
+            if s.posting_pr_matched(posting, s.pr_body_links(pr), {s.pr_branch_slug(pr)}):
                 num = pr.get("number")
                 repo = s.GH_REPO_DEFAULT
                 return f"https://github.com/{repo}/pull/{num}"
@@ -195,7 +192,7 @@ def build_board(apps, postings, prs, queue, today, links=None):
         board[status].append(_card(status, posting.get("company"),
                                    posting.get("role"), "added", date_val,
                                    pr, today))
-        key = s.normalize_url(posting.get("link", "")).lower()
+        key = s.normalize_url(posting.get("link", ""))
         if key:
             card_links[key] = status
 
@@ -208,7 +205,7 @@ def build_board(apps, postings, prs, queue, today, links=None):
     q_pr_nums = {q.get("pr_number") for q in q_unfinished}
     q_slugs = {s.pr_branch_slug(q) for q in q_unfinished
                if s.pr_branch_slug(q).startswith("app/")}
-    q_links = {s.normalize_url(str(q.get("link") or "")).lower()
+    q_links = {s.normalize_url(str(q.get("link") or ""))
                for q in q_unfinished if q.get("link")}
 
     def queue_in_flight(q):
@@ -220,10 +217,12 @@ def build_board(apps, postings, prs, queue, today, links=None):
             return True
         if s.work_slug(q) in tracker_slugs:
             return True
+        if not s.posting_keys(q) and s._legacy_work_slug(q) in legacy_tracker_slugs:
+            return True
         slug = s.pr_branch_slug(q)
         if slug and slug in tracker_slugs:
             return True
-        link = s.normalize_url(str(q.get("link") or "")).lower()
+        link = s.normalize_url(str(q.get("link") or ""))
         return bool(link and link in tracked_links)
 
     # Queue items still in flight get a Tailored card only when they are not
@@ -246,7 +245,7 @@ def build_board(apps, postings, prs, queue, today, links=None):
             continue
         if prs is not None and s.posting_pr_matched(p, pr_links, pr_slugs):
             continue
-        plink = s.normalize_url(str(p.get("link") or "")).lower()
+        plink = s.normalize_url(str(p.get("link") or ""))
         if plink and plink in q_links:
             continue
         if s.work_slug(p) in q_slugs:
@@ -264,11 +263,11 @@ def build_board(apps, postings, prs, queue, today, links=None):
     # only — the tracker loop below adds each tracked row exactly once, so
     # adding a posting-level card here would double-count it.
     for p in postings:
-        key = s.normalize_url(p.get("link", "")).lower()
+        key = s.normalize_url(p.get("link", ""))
         if not key or key not in tracked_links:
             continue
         for a in apps:
-            if s.normalize_url(a.get("link", "")).lower() == key:
+            if s.normalize_url(a.get("link", "")) == key:
                 bucket = s.row_stage(a)
                 if bucket:
                     card_links[key] = bucket
@@ -295,12 +294,12 @@ def build_board(apps, postings, prs, queue, today, links=None):
             # Tracker-Tailored entries always belong on the board, with or
             # without a PR link / queue item (summary.py counts them too).
             board["Tailored"].append(card)
-            cl = s.normalize_url(a.get("link", "")).lower()
+            cl = s.normalize_url(a.get("link", ""))
             if cl:
                 card_links[cl] = "Tailored"
         else:
             board[bucket].append(card)
-            cl = s.normalize_url(a.get("link", "")).lower()
+            cl = s.normalize_url(a.get("link", ""))
             if cl:
                 card_links[cl] = bucket
 
@@ -361,14 +360,14 @@ def build_sankey(postings, board, min_count=SOURCE_MIN, status_of=None):
     for col, cards in board.items():
         for c in cards:
             if c.get("link"):
-                status_of.setdefault(s.normalize_url(c["link"]).lower(), col)
+                status_of.setdefault(s.normalize_url(c["link"]), col)
     sources = {}
     flows = {}
     for p in postings:
         if not isinstance(p, dict):
             continue
         src = s.norm_text(p.get("source")) or "Unknown"
-        key = s.normalize_url(p.get("link", "")).lower()
+        key = s.normalize_url(p.get("link", ""))
         status = status_of.get(key, "Unknown/unmatched")
         sources[src] = sources.get(src, 0) + 1
         flows[(src, status)] = flows.get((src, status), 0) + 1

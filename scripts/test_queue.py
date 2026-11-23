@@ -157,7 +157,7 @@ orion_pr = {
     "headRefName": "app/orion-games", "mergedAt": "2026-11-02T15:32:44Z",
     "url": "https://github.com/demo-user/resume/pull/272",
     "mergedBy": {"login": "demo-user"},
-    "body": "https://www.linkedin.com/jobs/view/3999000001",
+    "body": "https://www.linkedin.com/jobs/view/3999000002",
     "files": [{"path": "variants/orion-games-game-programmer-intern/resume.tex"}],
 }
 assert q.extract_entry(orion_pr, TRACKER_TWO_ROWS) is None, \
@@ -165,6 +165,10 @@ assert q.extract_entry(orion_pr, TRACKER_TWO_ROWS) is None, \
 _, g_added, g_skipped = q.enqueue([], [dict(orion_pr, _tracker=TRACKER_TWO_ROWS)])
 assert [it["pr_number"] for it in g_added] == [272], (g_added, g_skipped)
 assert g_skipped == [], g_skipped
+# A second PR carrying the already submitted posting is a different case.
+duplicate = dict(orion_pr, body="https://www.linkedin.com/jobs/view/3999000001")
+_, duplicate_rows, duplicate_skips = q.enqueue([], [dict(duplicate, _tracker=TRACKER_TWO_ROWS)])
+assert not duplicate_rows and duplicate_skips == [(272, "already submitted in tracker")]
 # the row that really is this PR's still skips (same PR, submitted)
 same = dict(orion_pr, number=196, url="https://github.com/demo-user/resume/pull/196",
             headRefName="app/orion-games-ai-engineer-intern")
