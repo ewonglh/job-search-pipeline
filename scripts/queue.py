@@ -61,7 +61,16 @@ available, ``approved_at`` / ``approved_by`` from the merge, durable
 Stdlib only; no secrets. The live ``enqueue`` path needs ``gh`` and a resume
 clone; ``--prs`` / ``--tracker`` provide non-writing offline previews only.
 
+**Queue state and tracker revision.** A missing queue is a source error, never
+an empty queue. Create the store once with ``queue.py init``; a valid ``[]``
+store and valid legacy stores load as before. ``enqueue`` and ``claim`` refresh
+``origin/main`` first and read ``applications.yaml`` from the exact commit that
+fetch returned. A failed refresh stops them even when a cached copy exists.
+Before writing, both recheck that pinned tracker evidence and the current local
+queue under the queue lock.
+
 Usage:
+  queue.py init  [--queue FILE]
   queue.py enqueue [--repo DIR] [--queue FILE] [--dry-run] [--json] [--limit N]
                    [--include-submitted] [--prs FILE] [--tracker FILE]
   queue.py list  [--queue FILE] [--json] [--status STATUS]
@@ -85,11 +94,13 @@ verified on ``origin/main``. Failure leaves the queue item ``submitted`` with
 reopening the attempt or touching a form.
 """
 import argparse
+from collections import namedtuple
 from contextlib import contextmanager
 import hashlib
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -178,6 +189,19 @@ TRANSITIONS = {
 
 class QueueStateError(ValueError):
     """The queue cannot be read or safely updated."""
+
+
+class QueueMissingError(QueueStateError):
+    """The queue store does not exist. It is not an empty queue."""
+
+    def __init__(self, path):
+        super().__init__(
+            "queue store is missing at %s; create an empty one once with: "
+            "python3 queue.py init --queue %s" % (path, shlex.quote(str(path))))
+
+
+class TrackerRefreshError(QueueStateError):
+    """The tracker could not be refreshed from origin/main, so it is not fresh."""
 
 # Tracker statuses that mean the application has already been submitted.
 SUBMITTED_ALIASES = {
@@ -515,7 +539,7 @@ def load_queue(path):
         with open(path, encoding="utf-8") as fh:
             items = parse_queue(fh.read())
     except FileNotFoundError:
-        return []
+        raise QueueMissingError(path)
     except (OSError, UnicodeError) as exc:
         raise QueueStateError("cannot read queue: %s" % type(exc).__name__)
     seen = set()
@@ -569,6 +593,20 @@ def _write_queue_unlocked(path, items):
             os.unlink(temporary)
         except FileNotFoundError:
             pass
+
+
+def init_queue(path):
+    """Create an empty queue store. Returns True when created, False if valid.
+
+    An existing store is validated and never overwritten, so a malformed or
+    unreadable queue still stops the caller instead of being reset to empty.
+    """
+    with queue_lock(path):
+        if os.path.exists(path):
+            load_queue(path)
+            return False
+        _write_queue_unlocked(path, [])
+        return True
 
 
 def write_queue(path, items):
@@ -854,27 +892,106 @@ def _git(repo, *args, timeout=60):
         capture_output=True, text=True, timeout=timeout)
 
 
-def read_main_tracker(repo, log):
-    """Current ``applications.yaml`` on ``origin/main``, or None.
+class TrackerRevision(namedtuple("TrackerRevision", "commit text sha256")):
+    """``applications.yaml`` as read from one fetched ``origin/main`` commit."""
 
-    The **current** tracker is what decides whether an application has already
-    been submitted (a submission may have been recorded on ``main`` after the
-    tailoring PR merged), so the enqueue guard reads it, not the merge-commit
-    state. A deleted PR branch is irrelevant -- ``main`` always has the file.
-    """
-    if not os.path.isdir(os.path.join(repo, ".git")):
-        log(f"queue: no clone at {repo}; cannot read the tracker")
-        return None
+
+FETCH_REF_PREFIX = "refs/jobsearch/tracker-fetch/"
+_COMMIT_RE = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
+
+
+def _redact(text):
+    """Trim git output for logs and drop any credentials embedded in a URL."""
+    text = re.sub(r"(?i)(://)[^/@\s]+@", r"\1***@", str(text or "").strip())
+    return text.splitlines()[0][:200] if text else ""
+
+
+def _git_bytes(repo, *args, timeout=60):
+    return subprocess.run(["git", "-C", repo, *args], capture_output=True,
+                          timeout=timeout)
+
+
+def _tracker_blob(repo, revision):
+    """Tracker bytes at ``revision`` (a commit or local ref); local, no network."""
     try:
-        _git(repo, "fetch", "--quiet", "--no-tags", "origin", "main")
-        proc = _git(repo, "show", f"origin/main:{TRACKER_PATH}")
-    except Exception as exc:  # noqa: BLE001
-        log(f"queue: tracker read failed: {exc}")
-        return None
+        proc = _git_bytes(repo, "show", "%s:%s" % (revision, TRACKER_PATH))
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise TrackerRefreshError(
+            "tracker cannot be read at %s: %s" % (revision, type(exc).__name__))
     if proc.returncode != 0:
-        log(f"queue: tracker read failed: {proc.stderr.strip() or proc.returncode}")
-        return None
+        raise TrackerRefreshError(
+            "tracker cannot be read at %s: %s" % (
+                revision, _redact(proc.stderr.decode("utf-8", "replace"))
+                or proc.returncode))
     return proc.stdout
+
+
+def refresh_main_tracker(repo, log=lambda *a: None, timeout=60):
+    """Fetch ``origin/main`` and read the tracker from the commit fetched.
+
+    The **current** tracker decides whether an application is already
+    submitted (a row may land on ``main`` after the tailoring PR merged), so
+    callers need a revision that this fetch produced, not whatever a stale
+    ``origin/main`` ref or working tree holds. The fetch writes the commit to a
+    unique private ref and the tracker is read from that exact SHA, so a
+    concurrent fetch cannot swap the revision between fetch and read.
+
+    Raises ``TrackerRefreshError`` when the fetch or read fails, even if an
+    older copy of the tracker is readable. Returns ``TrackerRevision``.
+    """
+    if not os.path.exists(os.path.join(repo, ".git")):
+        raise TrackerRefreshError(
+            "no resume clone at %s; set JOBSEARCH_REPO and retry" % repo)
+    ref = FETCH_REF_PREFIX + uuid.uuid4().hex
+    hint = ("tracker refresh failed, so cached data was not used; check network "
+            "access and `gh auth status`, then retry")
+    try:
+        try:
+            fetched = _git(repo, "fetch", "--quiet", "--no-tags", "origin",
+                           "+refs/heads/main:" + ref,
+                           "+refs/heads/main:refs/remotes/origin/main",
+                           timeout=timeout)
+        except (OSError, subprocess.SubprocessError) as exc:
+            log("queue: tracker refresh failed: " + type(exc).__name__)
+            raise TrackerRefreshError(hint)
+        if fetched.returncode != 0:
+            log("queue: tracker refresh failed: "
+                + (_redact(fetched.stderr) or str(fetched.returncode)))
+            raise TrackerRefreshError(hint)
+        try:
+            proc = _git_bytes(repo, "rev-parse", "--verify", "--quiet",
+                              ref + "^{commit}")
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise TrackerRefreshError(hint)
+        commit = proc.stdout.decode("utf-8", "replace").strip()
+        if proc.returncode != 0 or not _COMMIT_RE.fullmatch(commit):
+            raise TrackerRefreshError(hint)
+        blob = _tracker_blob(repo, commit)
+    finally:
+        try:
+            _git_bytes(repo, "update-ref", "-d", ref)
+        except (OSError, subprocess.SubprocessError):
+            pass
+    try:
+        text = blob.decode("utf-8")
+    except UnicodeError:
+        raise TrackerRefreshError("tracker at %s is not valid UTF-8" % commit[:12])
+    return TrackerRevision(commit, text, hashlib.sha256(blob).hexdigest())
+
+
+def verify_tracker_revision(repo, revision):
+    """Recheck pinned tracker evidence locally, for use under the queue lock.
+
+    Makes no network call. The pinned commit must still yield identical bytes,
+    and the local ``origin/main`` must not carry a different tracker, which
+    would mean another lane fetched newer state after this refresh.
+    """
+    if hashlib.sha256(_tracker_blob(repo, revision.commit)).hexdigest() != revision.sha256:
+        raise TrackerRefreshError("pinned tracker revision no longer verifies; retry")
+    current = hashlib.sha256(_tracker_blob(repo, "refs/remotes/origin/main")).hexdigest()
+    if current != revision.sha256:
+        raise TrackerRefreshError(
+            "tracker changed on origin/main after it was refreshed; retry")
 
 
 # ---------------------------------------------------------------- enqueue core
@@ -1055,15 +1172,22 @@ def _canonical_queue_identity(item):
     return app_id
 
 
-def _read_flat_entries(path, label, required=False):
+def _parse_flat_entries(text, label, required=False):
     try:
-        with open(path, encoding="utf-8") as fh:
-            text = fh.read()
         entries = parse_queue(text, status_values=None)
         explicit_empty = any(line.strip() == "[]" for line in text.splitlines())
         if required and not entries and not explicit_empty:
             raise QueueStateError("%s has no explicit empty-list marker or entries" % label)
         return entries
+    except QueueStateError as exc:
+        raise QueueStateError("cannot safely read %s" % label) from exc
+
+
+def _read_flat_entries(path, label, required=False):
+    try:
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+        return _parse_flat_entries(text, label, required)
     except FileNotFoundError:
         if required:
             raise QueueStateError("%s is unavailable" % label)
@@ -1216,13 +1340,19 @@ def _check_claim_identities(item, queue_items, tracker_rows, posting):
             raise QueueStateError("application is already recorded as submitted")
 
 
-def _read_claim_inputs(args, item, queue_items):
+def _read_claim_inputs(args, item, queue_items, log=lambda *a: None):
     import application_identity as identity
     import eligibility
     import tailor
     from posting_guard import guard_text
 
     app_id = _canonical_queue_identity(item)
+
+    # Refresh first: a failed refresh blocks the claim before any other read
+    # or network call, whether or not a cached tracker exists.
+    revision = refresh_main_tracker(args.repo, log)
+    tracker_rows = _parse_flat_entries(revision.text, "current application tracker",
+                                       required=True)
 
     postings_path = os.path.join(args.repo, "data", "postings.json")
     try:
@@ -1262,11 +1392,6 @@ def _read_claim_inputs(args, item, queue_items):
     if not isinstance(profile, dict) or not profile:
         raise QueueStateError("selected profile is empty")
 
-    tracker_path = os.path.join(args.repo, TRACKER_PATH)
-    if not os.path.isfile(tracker_path):
-        raise QueueStateError("current application tracker is unavailable")
-    tracker_rows = _read_flat_entries(tracker_path, "current application tracker",
-                                      required=True)
     _check_claim_identities(item, queue_items, tracker_rows, posting)
 
     skipped = _read_flat_entries(args.skipped, "owner skip list", required=True)
@@ -1299,8 +1424,8 @@ def _read_claim_inputs(args, item, queue_items):
         "profile_path": os.path.abspath(profile_path),
         "profile_sha256": hashlib.sha256(profile_source).hexdigest(),
         "postings_sha256": hashlib.sha256(postings_bytes).hexdigest(),
-        "tracker_rows": tracker_rows,
-        "tracker_sha256": _optional_file_hash(tracker_path, "current application tracker", True),
+        "tracker_revision": revision,
+        "tracker_sha256": revision.sha256,
         "skip_sha256": skip_sha256,
         "gate_sha256": gate_sha256,
         "jd_sha256": hashlib.sha256(guarded_jd["clean_text"].encode("utf-8")).hexdigest(),
@@ -1323,7 +1448,7 @@ def cmd_claim(args, log):
         return 2
 
     try:
-        inputs = _read_claim_inputs(args, item, initial)
+        inputs = _read_claim_inputs(args, item, initial, log)
     except (OSError, ValueError, RuntimeError) as exc:
         log("queue: claim blocked: " + str(exc))
         return 2
@@ -1338,13 +1463,13 @@ def cmd_claim(args, log):
                 raise QueueStateError("item changed while eligibility was being checked")
             if _canonical_queue_identity(current) != inputs["application_id"]:
                 raise QueueStateError("posting identity changed while eligibility was being checked")
-            current_inputs = _read_claim_validation_inputs(args, current, latest,
-                                                           inputs["posting"])
+            current_inputs = _read_claim_validation_inputs(
+                args, current, latest, inputs["posting"], inputs["tracker_revision"])
             expected_inputs = (inputs["profile_sha256"], inputs["postings_sha256"],
                                inputs["tracker_sha256"], inputs["skip_sha256"],
                                inputs["gate_sha256"])
             if current_inputs != expected_inputs:
-                raise QueueStateError("profile, tracker, owner controls, or posting store changed during claim checks")
+                raise QueueStateError("profile, owner controls, or posting store changed during claim checks")
             for key in ("company", "role"):
                 old, verified = norm_text(current.get(key)), norm_text(
                     inputs["posting"].get(key))
@@ -1387,6 +1512,8 @@ def cmd_claim(args, log):
                     "status": inputs["decision"].get("status"),
                     "reason_codes": inputs["decision"].get("reason_codes", []),
                     "provenance": inputs["decision"].get("provenance", {}),
+                    "tracker_commit": inputs["tracker_revision"].commit,
+                    "tracker_sha256": inputs["tracker_revision"].sha256,
                     "evaluated_at": now_utc(),
                 }, sort_keys=True, separators=(",", ":")),
             })
@@ -1404,31 +1531,34 @@ def cmd_claim(args, log):
     return 0
 
 
-def _read_claim_validation_inputs(args, item, queue_items, posting):
-    """Cheap local recheck while holding the queue lock; no network calls."""
+def _read_claim_validation_inputs(args, item, queue_items, posting, revision):
+    """Cheap local recheck while holding the queue lock; no network calls.
+
+    Rechecks the pinned tracker revision, then the current local queue, profile,
+    posting store and owner controls against the same identity gates.
+    """
     import application_identity as identity
     profile_path = args.profile or os.path.join(args.repo, "data", "profile.yaml")
     postings_path = os.path.join(args.repo, "data", "postings.json")
-    tracker_path = os.path.join(args.repo, TRACKER_PATH)
     try:
         with open(profile_path, "rb") as fh:
             profile_bytes = fh.read()
         with open(postings_path, "rb") as fh:
             postings_bytes = fh.read()
-        with open(tracker_path, "rb") as fh:
-            tracker_bytes = fh.read()
     except OSError as exc:
-        raise QueueStateError("profile, tracker, or posting store became unavailable") from exc
+        raise QueueStateError("profile or posting store became unavailable") from exc
+    verify_tracker_revision(args.repo, revision)
     if _canonical_queue_identity(item) != identity.application_id(item):
         raise QueueStateError("application identity changed")
-    tracker_rows = _read_flat_entries(tracker_path, "current application tracker", required=True)
+    tracker_rows = _parse_flat_entries(revision.text, "current application tracker",
+                                       required=True)
     _check_claim_identities(item, queue_items, tracker_rows, posting)
     skipped = _read_flat_entries(args.skipped, "owner skip list", required=True)
     gates = _read_gate_entries(args.gates, required=True)
     _check_owner_controls(posting, skipped, gates)
     return (hashlib.sha256(profile_bytes).hexdigest(),
             hashlib.sha256(postings_bytes).hexdigest(),
-            hashlib.sha256(tracker_bytes).hexdigest(),
+            revision.sha256,
             _optional_file_hash(args.skipped, "owner skip list", True),
             _optional_file_hash(args.gates, "owner application caps", True))
 
@@ -1466,8 +1596,9 @@ def cmd_enqueue(args, log):
                and isinstance(pr.get("mergedBy"), dict)
                and str(pr["mergedBy"].get("login") or "").casefold() == owner]
 
-    tracker_text = None
+    revision = None
     if args.tracker:
+        # Offline preview only (requires --dry-run), so nothing is written.
         try:
             with open(args.tracker, encoding="utf-8") as fh:
                 tracker_text = fh.read()
@@ -1475,11 +1606,15 @@ def cmd_enqueue(args, log):
             log(f"queue: cannot read --tracker {args.tracker}: {exc}")
             return 1
     else:
-        # The current tracker on origin/main (not the merge-commit state).
-        tracker_text = read_main_tracker(args.repo, log)
-    if tracker_text is None:
-        log("queue: current tracker is unavailable; enqueue stopped")
-        return 1
+        # The current tracker from a successful origin/main refresh, pinned to
+        # the fetched commit (not the merge-commit state, not a cached copy).
+        try:
+            revision = refresh_main_tracker(args.repo, log)
+        except QueueStateError as exc:
+            log("queue: enqueue stopped: " + str(exc))
+            return 1
+        tracker_text = revision.text
+        log("queue: tracker pinned to origin/main %s" % revision.commit[:12])
     try:
         parse_queue(tracker_text, status_values=None)
     except QueueStateError as exc:
@@ -1504,6 +1639,11 @@ def cmd_enqueue(args, log):
     try:
         with queue_lock(args.queue):
             current_items = load_queue(args.queue)
+            if revision is not None and not args.dry_run:
+                # Pinned tracker evidence must still hold before any write. The
+                # pure merge below then repeats the local PR-number and active
+                # application duplicate check against the queue as it is now.
+                verify_tracker_revision(args.repo, revision)
             merged_items, added, skipped = enqueue(
                 current_items, prs2, args.include_submitted, args.limit)
             if not args.dry_run:
@@ -1568,6 +1708,15 @@ def enqueue(existing, prs_with_trackers, include_submitted=False, limit=0):
         added.append(item)
         items.append(item)
     return sort_items(items), added, skipped
+
+
+def cmd_init(args, log):
+    """Create the empty queue store once; never overwrite an existing one."""
+    if init_queue(args.queue):
+        log("queue: initialised an empty queue at %s" % args.queue)
+    else:
+        log("queue: %s already holds a valid queue; left unchanged" % args.queue)
+    return 0
 
 
 def cmd_list(args, log):
@@ -2196,6 +2345,9 @@ def build_parser():
         formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd")
 
+    i = sub.add_parser("init", help="create an empty queue store (once; never overwrites)")
+    add_common(i)
+
     e = sub.add_parser("enqueue", help="append newly merged app/* tailoring PRs")
     add_common(e)
     e.add_argument("--repo", default=REPO_DIR,
@@ -2314,6 +2466,8 @@ def main(argv=None):
     args = build_parser().parse_args(argv)
     log = lambda *a: print(*a, file=sys.stderr)  # noqa: E731
     try:
+        if args.cmd == "init":
+            return cmd_init(args, log)
         if args.cmd == "enqueue":
             return cmd_enqueue(args, log)
         if args.cmd == "list":
