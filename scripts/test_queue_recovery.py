@@ -5,6 +5,7 @@ import importlib.util
 import io
 import json
 import os
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -108,7 +109,7 @@ sys.path.insert(0, os.environ['SCRIPTS_DIR'])
 import tailor
 import queue as q
 tailor.fetch_jd = lambda posting: {'jd_text': %r}
-ready, barrier, queue_path, repo, profile, skipped, gates = sys.argv[1:]
+ready, barrier, queue_path, repo, profile, skipped, gates, runner = sys.argv[1:]
 open(ready, 'w').close()
 deadline = time.time() + 15
 while len([name for name in os.listdir(barrier) if name.endswith('.ready')]) < 2:
@@ -116,19 +117,22 @@ while len([name for name in os.listdir(barrier) if name.endswith('.ready')]) < 2
         sys.exit(90)
     time.sleep(.01)
 sys.exit(q.main(['claim', '--queue', queue_path, '--repo', repo,
-                 '--profile', profile, '--pr', '12']))
+                 '--profile', profile, '--pr', '12', '--runner-id', runner,
+                 '--session-ref', 'session-' + runner]))
 """ % JD)
     barrier = os.path.join(directory, "barrier")
     os.mkdir(barrier)
     env = dict(os.environ, SCRIPTS_DIR=os.path.dirname(q.__file__),
                JOBSEARCH_SKIPPED=os.path.join(directory, "skipped.yaml"),
-               JOBSEARCH_GATES=os.path.join(directory, "gates.yaml"))
+               JOBSEARCH_GATES=os.path.join(directory, "gates.yaml"),
+               JOBSEARCH_BROWSER_OWNERSHIP_VERIFIER=shlex.quote(sys.executable))
     workers = []
     for number in range(2):
         workers.append(subprocess.Popen(
             [sys.executable, worker, os.path.join(barrier, "%d.ready" % number),
              barrier, case["queue"], case["repo"], case["profile"],
-             case["skipped"], case["gates"]], cwd=os.path.dirname(q.__file__),
+             case["skipped"], case["gates"], "recovery-race-%d" % number],
+            cwd=os.path.dirname(q.__file__),
             env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE))
     results = []
     for proc in workers:
@@ -228,7 +232,11 @@ with tempfile.TemporaryDirectory() as directory:
     unknown = restarted.load_queue(case["queue"])[0]
     assert unknown["status"] == "outcome_unknown"
     assert unknown["attempt_id"] == "attempt-12"
-    assert restarted.main(["claim", "--queue", case["queue"], "--pr", "12"]) == 2
+    with mock.patch.dict(os.environ, {
+            "JOBSEARCH_BROWSER_OWNERSHIP_VERIFIER": shlex.quote(sys.executable)}):
+        assert restarted.main(["claim", "--queue", case["queue"], "--pr", "12",
+                               "--runner-id", "recovery-runner",
+                               "--session-ref", "recovery-session"]) == 2
     assert restarted.main(["status", "--queue", case["queue"], "--pr", "12",
                            "--status", "queued", "--force"]) == 2
     assert restarted.main(["reconcile", "--queue", case["queue"], "--pr", "12",

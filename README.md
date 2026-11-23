@@ -96,7 +96,11 @@ merge or enqueue. See `skills/job-tailor/SKILL.md` for the exact commands.
 
 ## Queue claim and recovery
 
-`queue.py claim --pr N` is the required gate before an external form action. It
+`queue.py claim --next --runner-id ID --session-ref REF` is the required gate
+before an external form action. `--pr N` is also available for callers that
+already selected an item, but it must match the shared oldest-first FIFO
+selector. Every new claim requires a nonempty runner ID and exact session
+reference. It
 matches one queue item to exactly one current posting in
 `$JOBSEARCH_REPO/data/postings.json`, fetches and guards a fresh JD from that
 posting URL, and evaluates it against the selected profile. The default profile
@@ -109,8 +113,22 @@ Missing, conflicting, or unknown eligibility cannot be overridden with
 `--force` or a generic review note.
 
 A successful claim durably records `attempt_id`, `attempt_state: authorized`,
-`submit_gate: durable`, claim time, and eligibility/profile/JD hashes before the
-command returns. Use the returned ID when recording confirmation:
+`submit_gate: durable`, the owner tuple, the absolute verifier command and its
+SHA-256 command and executable digests, claim time, and eligibility/profile/JD
+hashes before the command returns. The command digest binds its arguments;
+the executable digest detects changed executable bytes. Configure
+`JOBSEARCH_BROWSER_OWNERSHIP_VERIFIER` in the
+runner host environment before claiming; a missing or invalid verifier blocks
+the claim. `finish-attempt` verifies that executable digest and runs
+the stored command regardless of its caller's verifier environment. Existing
+owners without a verifier pin require an explicitly configured
+`JOBSEARCH_BROWSER_OWNERSHIP_VERIFIER` for recovery; if it is missing or
+uncertain, the browser slot remains reserved. The verifier's ability to observe
+or fence the real browser is an operator/deployment property covered by #55.
+This pin detects command-path and executable-content changes; it does not
+defend against a host user who can write the queue or verifier files.
+
+Use the returned attempt ID when recording confirmation:
 
 ```bash
 python3 scripts/queue.py status --pr N --status submitted \

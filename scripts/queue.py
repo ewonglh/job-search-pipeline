@@ -78,7 +78,7 @@ Usage:
                    [--include-submitted] [--prs FILE] [--tracker FILE]
   queue.py list  [--queue FILE] [--json] [--status STATUS]
   queue.py next  [--queue FILE] [--json]
-  queue.py claim (--pr N | --next) [--runner-id ID --session-ref REF]
+  queue.py claim (--pr N | --next) --runner-id ID --session-ref REF
                  [--repo DIR] [--profile FILE] [--queue FILE] [--json]
   queue.py prepare-snapshot --pr N --attempt-id ID --pdf FILE --answers FILE
                             --operator-verification TEXT
@@ -110,6 +110,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -468,6 +469,9 @@ def _owner_for_item(item):
     owner_attempt = item.get("browser_owner_attempt_id")
     owner_fields = ("runner_id", "session_ref", "lease_expires_at")
     present = [name in item and item.get(name) is not None for name in owner_fields]
+    pin_present = [name in item and item.get(name) is not None for name in (
+        "browser_owner_verifier_command", "browser_owner_verifier_sha256",
+        "browser_owner_verifier_command_sha256")]
     if owner_attempt not in (None, ""):
         if not all(present):
             raise QueueStateError("browser owner record is incomplete")
@@ -475,6 +479,26 @@ def _owner_for_item(item):
         if (not OWNER_ID_RE.fullmatch(runner_id)
                 or not OWNER_ID_RE.fullmatch(session_ref)):
             raise QueueStateError("browser owner identity is malformed")
+        verifier_command = item.get("browser_owner_verifier_command")
+        verifier_sha256 = item.get("browser_owner_verifier_sha256")
+        command_sha256 = item.get("browser_owner_verifier_command_sha256")
+        pin_values = (verifier_command, verifier_sha256, command_sha256)
+        if any(value in (None, "") for value in pin_values) != all(
+                value in (None, "") for value in pin_values):
+            raise QueueStateError("browser owner verifier pin is incomplete")
+        if verifier_command not in (None, ""):
+            try:
+                verifier_command = json.loads(verifier_command)
+            except (TypeError, ValueError) as exc:
+                raise QueueStateError("browser owner verifier command is malformed") from exc
+            if (not isinstance(verifier_command, list) or not verifier_command
+                    or not all(isinstance(part, str) and part for part in verifier_command)
+                    or not os.path.isabs(verifier_command[0])
+                    or not isinstance(verifier_sha256, str)
+                    or not re.fullmatch(r"[0-9a-f]{64}", verifier_sha256)
+                    or not isinstance(command_sha256, str)
+                    or not re.fullmatch(r"[0-9a-f]{64}", command_sha256)):
+                raise QueueStateError("browser owner verifier pin is malformed")
         return {
             "pr_number": pr_number_of(item),
             "attempt_id": str(owner_attempt),
@@ -483,8 +507,11 @@ def _owner_for_item(item):
             "lease_expires_at": str(item.get("lease_expires_at") or ""),
             "owner_state": str(item.get("browser_owner_state") or "active"),
             "legacy": str(item.get("legacy_browser_owner") or "").casefold() == "true",
+            "verifier_command": verifier_command,
+            "verifier_sha256": verifier_sha256,
+            "verifier_command_sha256": command_sha256,
         }
-    if any(present):
+    if any(present) or any(pin_present):
         raise QueueStateError("browser owner record is incomplete")
     return _legacy_owner_for_item(item)
 
@@ -545,6 +572,70 @@ def _termination_request(owner, evidence):
     }
 
 
+def _executable_sha256(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as executable:
+        for chunk in iter(lambda: executable.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _verifier_command_sha256(command):
+    encoded = json.dumps(command, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def pin_browser_ownership_verifier(command_value=None):
+    """Resolve and hash the configured verifier executable for a new owner."""
+    command_value = (os.environ.get("JOBSEARCH_BROWSER_OWNERSHIP_VERIFIER", "")
+                     if command_value is None else str(command_value))
+    try:
+        command = shlex.split(command_value)
+    except ValueError as exc:
+        raise QueueStateError("browser ownership verifier command is malformed") from exc
+    if not command:
+        raise QueueStateError("independent browser ownership verifier is not configured")
+    executable = command[0]
+    if os.path.dirname(executable):
+        executable = os.path.abspath(executable)
+    else:
+        executable = shutil.which(executable) or ""
+    if not executable or not os.path.isfile(executable) or not os.access(executable, os.X_OK):
+        raise QueueStateError("browser ownership verifier executable is unavailable")
+    executable = os.path.realpath(executable)
+    try:
+        digest = _executable_sha256(executable)
+    except OSError as exc:
+        raise QueueStateError("browser ownership verifier executable cannot be read") from exc
+    pinned_command = [executable] + command[1:]
+    return {"command": pinned_command, "sha256": digest,
+            "command_sha256": _verifier_command_sha256(pinned_command)}
+
+
+def _pinned_browser_verifier_command(owner):
+    command = owner.get("verifier_command")
+    digest = owner.get("verifier_sha256")
+    command_digest = owner.get("verifier_command_sha256")
+    if command and digest and command_digest:
+        if _verifier_command_sha256(command) != command_digest:
+            raise QueueStateError("pinned browser ownership verifier command changed")
+        try:
+            current_digest = _executable_sha256(command[0])
+        except OSError as exc:
+            raise QueueStateError("pinned browser ownership verifier is unavailable") from exc
+        if current_digest != digest:
+            raise QueueStateError("pinned browser ownership verifier digest changed")
+        return command
+    # Pre-pin queue owners need an explicit operator-configured recovery
+    # verifier. New claims cannot enter this path.
+    try:
+        return pin_browser_ownership_verifier()["command"]
+    except QueueStateError as exc:
+        raise QueueStateError(
+            "legacy browser owner has no pinned verifier; configure "
+            "JOBSEARCH_BROWSER_OWNERSHIP_VERIFIER for recovery (%s)" % exc) from exc
+
+
 def verify_browser_termination(owner, evidence, verifier=None):
     """Ask an independent verifier to observe or fence the exact browser owner.
 
@@ -561,6 +652,7 @@ def verify_browser_termination(owner, evidence, verifier=None):
     if not isinstance(evidence, dict):
         raise QueueStateError("termination evidence must be a JSON object")
     request = _termination_request(owner, evidence)
+    command = _pinned_browser_verifier_command(owner)
     configured = (verifier if verifier is not None
                   else TERMINATION_VERIFIER_CALLBACK)
     if configured is not None:
@@ -572,13 +664,6 @@ def verify_browser_termination(owner, evidence, verifier=None):
             raise QueueStateError("browser ownership verifier failed: %s" %
                                   type(exc).__name__) from None
     else:
-        command_value = os.environ.get("JOBSEARCH_BROWSER_OWNERSHIP_VERIFIER", "")
-        try:
-            command = shlex.split(command_value)
-        except ValueError:
-            command = []
-        if not command:
-            raise QueueStateError("independent browser ownership verifier is not configured")
         try:
             proc = subprocess.run(command, input=json.dumps(request, sort_keys=True),
                                   capture_output=True, text=True, timeout=30, check=False)
@@ -1635,10 +1720,10 @@ def _read_claim_inputs(args, item, queue_items, log=lambda *a: None):
 def cmd_claim(args, log):
     owner_ids = (getattr(args, "runner_id", None),
                  getattr(args, "session_ref", None))
-    if bool(owner_ids[0]) != bool(owner_ids[1]):
-        log("queue: claim requires both --runner-id and --session-ref")
+    if not all(owner_ids):
+        log("queue: every new claim requires --runner-id and --session-ref")
         return 2
-    if any(value and not OWNER_ID_RE.fullmatch(str(value)) for value in owner_ids):
+    if any(not OWNER_ID_RE.fullmatch(str(value)) for value in owner_ids):
         log("queue: runner and session identifiers must use letters, digits, . _ : @ or -")
         return 2
     lease_seconds = getattr(args, "lease_seconds", ATTEMPT_LEASE_SECONDS)
@@ -1647,11 +1732,13 @@ def cmd_claim(args, log):
         log("queue: --lease-seconds must be between 1 and 86400")
         return 2
     claim_next = bool(getattr(args, "claim_next", False))
-    if claim_next and not all(owner_ids):
-        log("queue: claim --next requires --runner-id and --session-ref")
-        return 2
     if not claim_next and not getattr(args, "pr", None):
         log("queue: claim requires --pr or --next")
+        return 2
+    try:
+        verifier_pin = pin_browser_ownership_verifier()
+    except QueueStateError as exc:
+        log("queue: claim blocked: " + str(exc))
         return 2
 
     try:
@@ -1659,15 +1746,20 @@ def cmd_claim(args, log):
             initial = load_queue(args.queue)
             if _browser_owner_from_rows(initial) is not None:
                 raise QueueStateError("browser slot is still owned; finish the current attempt first")
-            if claim_next:
-                selected = select_next_candidate(initial)
-                if selected is None:
+            selected = select_next_candidate(initial)
+            if selected is None:
+                if claim_next:
                     if args.json:
                         print("null")
                     else:
                         log("queue: no queued items")
                     return 0
+                raise QueueStateError("no queued items")
+            if claim_next:
                 args.pr = pr_number_of(selected)
+            elif pr_number_of(selected) != args.pr:
+                raise QueueStateError("claim --pr must match FIFO-selected PR #%s" %
+                                      pr_number_of(selected))
             idx = _unique_item_index(initial, args.pr)
             item = dict(initial[idx])
             if item.get("status") != "queued":
@@ -1689,10 +1781,9 @@ def cmd_claim(args, log):
             latest = load_queue(args.queue)
             if _browser_owner_from_rows(latest) is not None:
                 raise QueueStateError("browser slot became owned while eligibility was checked")
-            if claim_next:
-                selected = select_next_candidate(latest)
-                if selected is None or pr_number_of(selected) != args.pr:
-                    raise QueueStateError("next queue selection changed while eligibility was checked")
+            selected = select_next_candidate(latest)
+            if selected is None or pr_number_of(selected) != args.pr:
+                raise QueueStateError("FIFO queue selection changed while eligibility was checked")
             idx = _unique_item_index(latest, args.pr)
             current = dict(latest[idx])
             if (current.get("status") != "queued" or current.get("attempt_id")
@@ -1735,9 +1826,8 @@ def cmd_claim(args, log):
             if inputs.get("apply_url") and not current.get("apply_url"):
                 current["apply_url"] = norm_text(inputs["apply_url"])
             attempt_id = uuid.uuid4().hex
-            legacy_owner = not bool(owner_ids[0])
-            runner_id = str(owner_ids[0] or "legacy-unbound")
-            session_ref = str(owner_ids[1] or "legacy-unbound")
+            runner_id = str(owner_ids[0])
+            session_ref = str(owner_ids[1])
             current.update({
                 "status": "in_progress",
                 "attempt_id": attempt_id,
@@ -1749,7 +1839,11 @@ def cmd_claim(args, log):
                 "session_ref": session_ref,
                 "lease_expires_at": _lease_expiry(lease_seconds),
                 "browser_owner_state": "active",
-                "legacy_browser_owner": "true" if legacy_owner else "false",
+                "legacy_browser_owner": "false",
+                "browser_owner_verifier_command": json.dumps(
+                    verifier_pin["command"], separators=(",", ":")),
+                "browser_owner_verifier_sha256": verifier_pin["sha256"],
+                "browser_owner_verifier_command_sha256": verifier_pin["command_sha256"],
                 "claim_application_id": inputs["application_id"],
                 "claim_profile_path": inputs["profile_path"],
                 "claim_profile_sha256": inputs["profile_sha256"],
@@ -2251,7 +2345,10 @@ def cmd_finish_attempt(args, log):
             item["browser_owner_verifier_id"] = verification["verifier_id"]
             item["browser_owner_release_challenge"] = verification["challenge"]
             for key in ("browser_owner_attempt_id", "runner_id", "session_ref",
-                        "lease_expires_at", "browser_owner_state", "legacy_browser_owner"):
+                        "lease_expires_at", "browser_owner_state", "legacy_browser_owner",
+                        "browser_owner_verifier_command",
+                        "browser_owner_verifier_sha256",
+                        "browser_owner_verifier_command_sha256"):
                 item.pop(key, None)
             rows[idx] = item
             _write_queue_unlocked(args.queue, rows)
@@ -3022,8 +3119,8 @@ def build_parser():
     claim_target.add_argument("--pr", type=int, help="PR number of the queued item")
     claim_target.add_argument("--next", dest="claim_next", action="store_true",
                               help="atomically claim the oldest queued eligible item")
-    c.add_argument("--runner-id", help="unique browser runner owner")
-    c.add_argument("--session-ref", help="exact browser session reference")
+    c.add_argument("--runner-id", help="required unique browser runner owner")
+    c.add_argument("--session-ref", help="required exact browser session reference")
     c.add_argument("--lease-seconds", type=int, default=ATTEMPT_LEASE_SECONDS,
                    help="recovery deadline metadata; expiry never releases ownership")
     c.add_argument("--json", action="store_true")
