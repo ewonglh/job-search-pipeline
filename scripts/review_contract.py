@@ -9,8 +9,11 @@ import json
 import re
 from urllib.parse import urlsplit
 from datetime import datetime
+from application_identity import application_id, normalize_posting_url
+from posting_guard import guard_text
 
 SCHEMA = 1
+POSTING_EVIDENCE_VERSION = 1
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 ARTIFACT_RE = re.compile(
@@ -28,6 +31,22 @@ def canonical_sha256(value):
     data = json.dumps(value, ensure_ascii=False, sort_keys=True,
                       separators=(",", ":")).encode("utf-8")
     return sha256_bytes(data)
+
+
+def posting_evidence(posting, jd_text):
+    """Create the requisition and guarded JD fields shared by review and readiness."""
+    if not normalize_posting_url(posting.get("link")):
+        raise ValueError("review posting link is unavailable")
+    if not isinstance(jd_text, str) or not jd_text.strip():
+        raise ValueError("current job description is unavailable")
+    guarded = guard_text(jd_text)
+    if guarded.get("verdict") == "hostile" or not guarded["clean_text"].strip():
+        raise ValueError("current job description requires review")
+    return {
+        "posting_evidence_version": POSTING_EVIDENCE_VERSION,
+        "posting_identity": application_id(posting),
+        "current_jd_sha256": sha256_bytes(guarded["clean_text"].encode("utf-8")),
+    }
 
 
 def valid_provenance(provenance, head_sha):

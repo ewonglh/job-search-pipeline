@@ -45,7 +45,7 @@ def review(head=HEAD, item=None, master_commit="2" * 40, master_blob="3" * 40,
         "master_commit": master_commit,
         "master_resume_blob": master_blob,
         "master_resume_path": "master/resume.tex",
-        "current_jd_sha256": contract.sha256_bytes(item["jd_text"].encode("utf-8")),
+        **contract.posting_evidence(item, item["jd_text"]),
         "profile_sha256": contract.canonical_sha256(item["profile"]),
         "artifacts": dict(artifacts),
     }
@@ -198,6 +198,8 @@ def test_provenance_preflight_and_cap():
             fh.write("Synthetic resume source.\n")
         with open(os.path.join(repo, "data", "profile.yaml"), "w", encoding="utf-8") as fh:
             fh.write("name: Synthetic Candidate\n")
+        with open(os.path.join(repo, "data", "postings.json"), "w", encoding="utf-8") as fh:
+            json.dump([{"company": "Synthetic Co", "role": "Software Intern", "link": LINK}], fh)
         with open(os.path.join(repo, "applications.yaml"), "w", encoding="utf-8") as fh:
             fh.write("[]\n")
         with open(os.path.join(repo, "variants", "synthetic-role", "resume.tex"), "w", encoding="utf-8") as fh:
@@ -205,7 +207,7 @@ def test_provenance_preflight_and_cap():
         with open(os.path.join(repo, "variants", "synthetic-role", "resume.pdf"), "wb") as fh:
             fh.write(b"synthetic pdf bytes")
         subprocess.run(["git", "-C", repo, "init", "-q"], check=True)
-        subprocess.run(["git", "-C", repo, "add", "master/resume.tex", "data/profile.yaml",
+        subprocess.run(["git", "-C", repo, "add", "master/resume.tex", "data/profile.yaml", "data/postings.json",
                         "applications.yaml"], check=True)
         subprocess.run(["git", "-C", repo, "-c", "user.name=Synthetic", "-c",
                         "user.email=synthetic@example.invalid", "commit", "-qm", "base fixture"], check=True)
@@ -235,7 +237,7 @@ def test_provenance_preflight_and_cap():
         item = work_item()
         entry = review(item=item, master_commit=commit, master_blob=blob,
                        head=head, artifacts=artifacts)
-        with mock.patch.object(queue_module, "read_main_tracker", return_value="[]\n"):
+        with mock.patch.object(tailor_module, "fetch_jd", return_value=item):
             allowed, reason = am.preflight_candidate(
                 pr(head=head), entry, item, queue_module=queue_module,
                 tailor_module=tailor_module, queue_file=queue_file,
@@ -249,6 +251,14 @@ def test_provenance_preflight_and_cap():
                 tailor_module=tailor_module, queue_file=queue_file,
                 gates_file=gates_file, repo_dir=repo)
             assert not allowed and "cap" in reason, reason
+
+        redirected = dict(item, link="https://example.invalid/jobs/different")
+        altered = copy.deepcopy(entry)
+        altered["audit"]["posting_url"] = redirected["link"]
+        allowed, reason = am.preflight_candidate(
+            pr(head=head, link=redirected["link"]), altered, redirected,
+            queue_module=queue_module, tailor_module=tailor_module, repo_dir=repo)
+        assert not allowed and "requisition evidence" in reason, reason
 
         tracker_row = ("- company: Synthetic Co\n  role: Software Intern\n"
                        "  link: " + LINK + "\n  status: Applied\n")
@@ -264,6 +274,10 @@ def test_provenance_preflight_and_cap():
              False, "[]\n", "[]\n", "[]\n", "profile"),
             ("JD", {"jd_text": "A revised job description."}, {}, False,
              "[]\n", "[]\n", "[]\n", "job description"),
+            ("aged posting", {}, {("show", "origin/main:data/postings.json"):
+                                  json.dumps([dict(item, added="2000-01-01")])}, False,
+             "[]\n", "[]\n", "[]\n", "older than"),
+            ("changed live JD", {}, {}, False, "[]\n", "[]\n", "[]\n", "reviewed evidence"),
             ("malformed queue", {}, {}, False, "not a list\n", "[]\n", "[]\n", "queue"),
             ("active queue", {}, {}, False, active_queue, "[]\n", "[]\n", "active queue"),
             ("malformed tracker", {}, {}, False, "[]\n", "[]\n", "not a list\n", "tracker"),
@@ -296,7 +310,9 @@ def test_provenance_preflight_and_cap():
                 return blob_digest(path, revision, artifact)
 
             with mock.patch.object(am, "_git_output", side_effect=observed_git), \
-                    mock.patch.object(am, "_git_blob_sha256", side_effect=observed_digest):
+                    mock.patch.object(am, "_git_blob_sha256", side_effect=observed_digest), \
+                    mock.patch.object(tailor_module, "fetch_jd",
+                                      return_value={"jd_text": "Revised live description."}):
                 allowed, reason = am.preflight_candidate(
                     pr(head=head), entry, current_item, queue_module=queue_module,
                     tailor_module=tailor_module, queue_file=queue_file,

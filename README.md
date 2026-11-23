@@ -288,6 +288,14 @@ actor and time. Narrative approval remains an owner decision during the drain.
 The merger must match the configured resume repository owner. Offline `--prs`
 and `--tracker` inputs require `--dry-run` and cannot persist queue approval.
 
+Review writers generate the requisition and guarded description fields with
+`review_contract.posting_evidence(work_item, current_jd_text)` and include them
+in the provenance covered by the audit digest. Readiness refetches the current
+posting identified in the resume repository and checks the same evidence.
+Older reviews without these fields require revalidation. Set
+`JOBSEARCH_MAX_AGE_DAYS` to configure the discovery age limit (default seven
+days, zero disables it).
+
 ## What this does not do
 
 - Does not auto-submit. A merged PR puts an item in a queue that a human or an

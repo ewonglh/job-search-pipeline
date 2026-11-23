@@ -24,7 +24,9 @@ import subprocess
 import sys
 import urllib.parse
 
-from review_contract import approval_result, canonical_sha256
+from application_identity import application_id, normalize_posting_url as normalize_url
+from posting_admission import freshness_exclusion
+from review_contract import approval_result, canonical_sha256, posting_evidence
 from config import (default_repo_dir, default_runtime_path, github_repo_setting,
                     path_setting)
 
@@ -51,17 +53,6 @@ def gh_json(args):
     if proc.returncode != 0:
         raise RuntimeError(proc.stderr.strip() or "gh failed")
     return json.loads(proc.stdout or "null")
-
-
-def normalize_url(url):
-    try:
-        p = urllib.parse.urlsplit(str(url or "").strip())
-    except ValueError:
-        return ""
-    if p.scheme.lower() not in ("http", "https") or not p.netloc:
-        return ""
-    return urllib.parse.urlunsplit(
-        (p.scheme.lower(), p.netloc.lower(), p.path.rstrip("/"), "", "")).lower()
 
 
 def _strip_yaml_comment(line):
@@ -307,11 +298,14 @@ def preflight_candidate(pr, review, work_item=None, queue_module=None,
             return False, "review posting identity differs from the work item"
         if not isinstance(work_item.get("jd_text"), str) or not work_item["jd_text"].strip():
             return False, "current job description is unavailable"
-        jd_hash = hashlib.sha256(work_item["jd_text"].encode("utf-8")).hexdigest()
+        observed = posting_evidence(work_item, work_item["jd_text"])
+        for key in ("posting_evidence_version", "posting_identity"):
+            if provenance.get(key) != observed[key]:
+                return False, "review requisition evidence requires revalidation"
         profile = work_item.get("profile")
         if not isinstance(profile, dict):
             return False, "current profile is unavailable"
-        if provenance.get("current_jd_sha256") != jd_hash:
+        if provenance.get("current_jd_sha256") != observed["current_jd_sha256"]:
             return False, "review is for a different job description"
         if provenance.get("profile_sha256") != canonical_sha256(profile):
             return False, "review is for a different profile"
@@ -430,6 +424,29 @@ def preflight_candidate(pr, review, work_item=None, queue_module=None,
             tracker_links.add(link)
             if link == posting_link and q.canonical_submitted(item.get("status")):
                 return False, "posting already submitted in applications tracker"
+
+        try:
+            postings = json.loads(_git_output(repo, "show", "origin/main:" + tailor.POSTINGS_PATH))
+        except (ValueError, OSError):
+            return False, "current posting store is unavailable or malformed"
+        if not isinstance(postings, list) or any(not isinstance(row, dict) for row in postings):
+            return False, "current posting store is malformed"
+        matched = [posting for posting in postings
+                   if normalize_url(posting.get("link")) == posting_link]
+        if len(matched) != 1 or application_id(matched[0]) != observed["posting_identity"]:
+            return False, "current posting identity is unavailable or conflicts with the review"
+        posting = matched[0]
+        reason = freshness_exclusion(posting)
+        if reason:
+            return False, reason
+        fetched = tailor.fetch_jd(posting)
+        if not isinstance(fetched, dict):
+            return False, "current job description is unavailable"
+        current = posting_evidence(posting, fetched.get("jd_text"))
+        if tailor.is_explicitly_closed(fetched["jd_text"]):
+            return False, "current posting is explicitly closed"
+        if current != observed:
+            return False, "current job description differs from the reviewed evidence"
         return True, "clear"
     except Exception as exc:
         return False, "preflight failed: " + str(exc)
