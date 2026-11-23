@@ -98,7 +98,7 @@ with tempfile.TemporaryDirectory() as directory:
     subprocess.run(["git", "init", "--bare", "-q", origin], check=True)
     git = ["git", "-C", case["repo"]]
     subprocess.run(git + ["init", "-q"], check=True)
-    subprocess.run(git + ["add", "applications.yaml"], check=True)
+    subprocess.run(git + ["add", "applications.yaml", "data/postings.json"], check=True)
     subprocess.run(git + ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
                           "commit", "-qm", "Tracker fixture"], check=True)
     subprocess.run(git + ["remote", "add", "origin", origin], check=True)

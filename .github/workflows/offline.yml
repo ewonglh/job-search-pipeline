@@ -28,6 +28,8 @@ jobs:
         run: |
           python test_queue.py
           python test_queue_eligibility.py
+          python test_queue_intake.py
+          python test_posting_admission.py
           python test_queue_recovery.py
           python test_submission_snapshot.py
           python test_tailor.py
