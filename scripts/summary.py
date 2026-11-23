@@ -52,6 +52,8 @@ import subprocess
 import sys
 import unicodedata
 from datetime import date, datetime, timedelta, timezone
+from application_identity import normalize_posting_url as normalize_url, posting_keys, requisition_key
+from tailor import is_tracked, tracker_keys, slugify, work_slug as requisition_work_slug
 from config import (default_repo_dir, default_runtime_path, github_repo_setting,
                     path_setting)
 
@@ -172,12 +174,6 @@ def norm_text(s):
     return re.sub(r"\s+", " ", html_mod.unescape(str(s or ""))).strip()
 
 
-def normalize_url(url):
-    import urllib.parse
-    p = urllib.parse.urlsplit(str(url or "").strip())
-    return urllib.parse.urlunsplit((p.scheme, p.netloc, p.path.rstrip("/"), "", ""))
-
-
 def parse_date(value):
     """Parse an ISO ``YYYY-MM-DD`` (or datetime) string to a date, else None."""
     if not value:
@@ -219,31 +215,6 @@ def canonical_status(status):
     return canonical_stage(status)
 
 
-def tracker_keys(apps):
-    """Normalised link + company|role keys that count as already tracked."""
-    links, names = set(), set()
-    for a in apps:
-        if not isinstance(a, dict):
-            continue
-        link = normalize_url(a.get("link", "")).lower()
-        if link:
-            links.add(link)
-        company = norm_text(a.get("company", "")).lower()
-        role = norm_text(a.get("role", "")).lower()
-        if company or role:
-            names.add(f"{company}|{role}")
-    return links, names
-
-
-def is_tracked(posting, links, names):
-    link = normalize_url(posting.get("link", "")).lower()
-    if link and link in links:
-        return True
-    company = norm_text(posting.get("company", "")).lower()
-    role = norm_text(posting.get("role", "")).lower()
-    return f"{company}|{role}" in names
-
-
 # --------------------------------------------------------------- tailor PRs
 # Tailored CVs ship as open PRs in the resume repo (head branch ``app/*``,
 # title ``app(<slug>): tailored ...`` per TAILOR_BRIEF.md). The digest counts
@@ -281,24 +252,21 @@ def fetch_open_tailor_prs(log=lambda *a: None):
     return [p for p in prs if isinstance(p, dict) and is_tailor_pr(p)]
 
 
-def slugify(text, maxlen=60):
-    """Same rule as tailor.py: lowercase, non-alphanumerics to single dashes."""
-    text = html_mod.unescape(str(text or "")).lower()
-    text = re.sub(r"[^a-z0-9]+", "-", text).strip("-")
-    text = re.sub(r"-{2,}", "-", text)
-    return (text[:maxlen].rstrip("-")) or "item"
+def _legacy_work_slug(posting):
+    return f"{slugify(posting.get('company', ''))}-{slugify(posting.get('role', ''))}"
 
 
 def work_slug(posting):
-    """tailor.py's derived work slug: ``<company-slug>-<role-slug>``."""
-    return f"{slugify(posting.get('company', ''))}-{slugify(posting.get('role', ''))}"
+    if posting_keys(posting):
+        return requisition_work_slug(posting)
+    return _legacy_work_slug(posting)
 
 
 def pr_body_links(pr):
     """Normalised bare URLs found in the PR body (the posting link lives there)."""
     out = set()
     for m in re.finditer(r"https?://[^\s)\]<>\"']+", str((pr or {}).get("body") or "")):
-        out.add(normalize_url(m.group(0)).lower())
+        out.add(normalize_url(m.group(0)))
     return out
 
 
@@ -309,10 +277,10 @@ def pr_branch_slug(pr):
 
 def posting_pr_matched(posting, pr_links, pr_slugs):
     """True when an open tailor PR covers this posting (body link or work slug)."""
-    link = normalize_url(posting.get("link", "")).lower()
-    if link and link in pr_links:
+    if any(key.startswith("link:") and key[5:] in pr_links for key in posting_keys(posting)):
         return True
-    return work_slug(posting) in pr_slugs
+    return (work_slug(posting) in pr_slugs
+            or not requisition_key(posting) and _legacy_work_slug(posting) in pr_slugs)
 
 
 def tracker_pr_numbers(apps):
@@ -337,13 +305,17 @@ def effective_tailor_prs(prs, apps):
     nums = tracker_pr_numbers(apps)
     links, _names = tracker_keys(apps)
     slugs = {work_slug(a) for a in apps if isinstance(a, dict)}
+    legacy_slugs = {_legacy_work_slug(a) for a in apps
+                    if isinstance(a, dict) and not requisition_key(a)}
     out = []
     for p in prs:
         if p.get("number") in nums:
             continue
-        if pr_body_links(p) & links:
+        body_links = pr_body_links(p)
+        if body_links & links:
             continue
-        if pr_branch_slug(p) in slugs:
+        slug = pr_branch_slug(p)
+        if slug in slugs or (not body_links and slug in legacy_slugs):
             continue
         out.append(p)
     return out
@@ -1268,7 +1240,7 @@ def load_rankings(rankings_path, now=None):
             score = int(r.get("score", 0))
         except (TypeError, ValueError):
             continue
-        link = normalize_url(r.get("link", "")).lower()
+        link = normalize_url(r.get("link", ""))
         if link:
             scores[link] = score
         company = norm_text(r.get("company", "")).lower()
@@ -1291,7 +1263,7 @@ def load_skipped(skipped_path):
 def skipped_keys(skipped):
     links, names, meta = set(), {}, set()
     for s in skipped:
-        link = normalize_url(s.get("link", "")).lower()
+        link = normalize_url(s.get("link", ""))
         if link:
             links.add(link)
         company = norm_text(s.get("company", "")).lower()
@@ -1333,7 +1305,7 @@ def compute_newpost(postings, apps, skipped, today, scores=None, prs=None):
     for p in postings:
         if not isinstance(p, dict):
             continue
-        link = normalize_url(p.get("link", "")).lower()
+        link = normalize_url(p.get("link", ""))
         company = norm_text(p.get("company", "")).lower()
         role = norm_text(p.get("role", "")).lower()
         namekey = f"{company}|{role}"
@@ -1345,12 +1317,14 @@ def compute_newpost(postings, apps, skipped, today, scores=None, prs=None):
             if entry is None:
                 entry = {"skipped_at": "", "skip_kind": ""}
                 for s in skipped:
-                    if normalize_url(s.get("link", "")).lower() == link:
+                    if normalize_url(s.get("link", "")) == link:
                         entry = s
                         break
             skip(p, skipped_short(entry))
             continue
         pr_no = pr_slugs.get(link) or pr_slugs.get(work_slug(p))
+        if pr_no is None and not requisition_key(p):
+            pr_no = pr_slugs.get(_legacy_work_slug(p))
         if link and link in pr_links:
             for bl, no in pr_slugs.items():
                 if bl == link:

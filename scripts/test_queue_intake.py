@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Synthetic replay, pagination and admission checks for merge intake."""
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -32,7 +33,10 @@ def make_case(root, *, added=None, skipped="[]\n", gates="[]\n"):
         fh.write(skipped)
     with open(gates_path, "w", encoding="utf-8") as fh:
         fh.write(gates)
-    return {"repo": repo, "queue": os.path.join(root, "queue.yaml"),
+    queue_path = os.path.join(root, "queue.yaml")
+    with open(queue_path, "w", encoding="utf-8") as fh:
+        fh.write(q.dump_queue([]))
+    return {"repo": repo, "queue": queue_path,
             "skipped": skipped_path, "gates": gates_path, "posting": posting}
 
 
@@ -60,9 +64,12 @@ def run_live(case, prs, *, files=FILES, jd_text=JD, fetch_error=None,
                    mock.patch.object(tailor, "fetch_jd", side_effect=fetch_error)
                    if fetch_error else
                    mock.patch.object(tailor, "fetch_jd", return_value={"jd_text": jd_text}))
+    revision = q.TrackerRevision(
+        "a" * 40, tracker, hashlib.sha256(tracker.encode("utf-8")).hexdigest())
     with mock.patch.object(q, "gh_merged_prs", side_effect=observed), \
             mock.patch.object(q, "gh_pr_files", return_value=files), \
-            mock.patch.object(q, "read_main_tracker", return_value=tracker), \
+            mock.patch.object(q, "refresh_main_tracker", return_value=revision), \
+            mock.patch.object(q, "verify_tracker_revision", return_value=None), \
             mock.patch.object(q, "GH_REPO", "demo-user/resume"), \
             mock.patch.object(tailor, "SKIPPED_FILE", case["skipped"]), \
             mock.patch.object(tailor, "GATE_FILE", case["gates"]), \
@@ -91,7 +98,9 @@ with tempfile.TemporaryDirectory() as root:
                  for page in pages]
     with mock.patch.object(q, "_run", side_effect=completed), \
             mock.patch.object(q, "gh_pr_files", return_value=FILES), \
-            mock.patch.object(q, "read_main_tracker", return_value="[]\n"), \
+            mock.patch.object(q, "refresh_main_tracker", return_value=q.TrackerRevision(
+                "a" * 40, "[]\n", hashlib.sha256(b"[]\n").hexdigest())), \
+            mock.patch.object(q, "verify_tracker_revision", return_value=None), \
             mock.patch.object(q, "GH_REPO", "demo-user/resume"), \
             mock.patch.object(tailor, "SKIPPED_FILE", case["skipped"]), \
             mock.patch.object(tailor, "GATE_FILE", case["gates"]), \
@@ -137,7 +146,9 @@ with tempfile.TemporaryDirectory() as root:
     with mock.patch.object(q, "gh_merged_prs", side_effect=lambda _log, on_page=None: (
             on_page([pr()]) or [pr()])), \
             mock.patch.object(q, "gh_pr_files", side_effect=AssertionError("should reuse queue")), \
-            mock.patch.object(q, "read_main_tracker", side_effect=AssertionError("should not fetch tracker")), \
+            mock.patch.object(q, "refresh_main_tracker", return_value=q.TrackerRevision(
+                "a" * 40, "[]\n", hashlib.sha256(b"[]\n").hexdigest())), \
+            mock.patch.object(q, "verify_tracker_revision", return_value=None), \
             mock.patch.object(q, "GH_REPO", "demo-user/resume"), \
             contextlib.redirect_stdout(io.StringIO()):
         assert q.main(["enqueue", "--queue", case["queue"],
@@ -200,21 +211,37 @@ with tempfile.TemporaryDirectory() as root:
     assert "explicitly closed" in saved["reason"]
 
 
-# Fixture dry-run stays offline and writes neither the queue nor its sidecar.
+# Fixture preview is explicitly structural, and writes neither store nor sidecar.
 with tempfile.TemporaryDirectory() as root:
-    case = make_case(root)
+    case = make_case(root, added="2026-01-01")
     prs_path = os.path.join(root, "prs.json")
     tracker_path = os.path.join(root, "tracker.yaml")
-    fixture = dict(pr(), files=FILES)
+    fixture = dict(pr(merged_by="untrusted-fixture", merged_at="2020-01-01T00:00:00Z"),
+                   files=FILES)
     with open(prs_path, "w", encoding="utf-8") as fh:
         json.dump([fixture], fh)
     with open(tracker_path, "w", encoding="utf-8") as fh:
         fh.write("[]\n")
+    before = open(case["queue"], "rb").read()
+    output = io.StringIO()
     with mock.patch.object(q, "gh_merged_prs", side_effect=AssertionError("dry-run must stay offline")), \
-            contextlib.redirect_stdout(io.StringIO()):
+            contextlib.redirect_stdout(output):
         assert q.main(["enqueue", "--queue", case["queue"], "--repo", case["repo"],
-                       "--prs", prs_path, "--tracker", tracker_path, "--dry-run"]) == 0
-    assert not os.path.exists(case["queue"])
+                       "--prs", prs_path, "--tracker", tracker_path, "--dry-run", "--json"]) == 0
+    preview = json.loads(output.getvalue())
+    summary = preview["summary"]
+    assert summary["mode"] == "structural_preview"
+    assert summary["preview"]["proposed_candidates"] == 1
+    assert summary["preview"]["admitted"] == 0
+    assert summary["preview"]["owner_merged"] == 0
+    assert "merge_owner" in summary["preview"]["not_verified"]
+    assert "posting_age" in summary["preview"]["not_verified"]
+    assert "owner_skip_or_cap" in summary["preview"]["not_verified"]
+    assert summary["counts"]["added"] == summary["counts"]["accepted"] == 0
+    assert summary["counts"]["owner_merged"] == 0
+    assert preview["added"] == [] and len(preview["proposed_candidates"]) == 1
+    assert "queued:" not in output.getvalue()
+    assert open(case["queue"], "rb").read() == before
     assert not os.path.exists(case["queue"] + ".lock")
     assert not os.path.exists(q.merge_intake_path(case["queue"]))
 

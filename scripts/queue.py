@@ -67,7 +67,16 @@ clone. It paginates the complete merged-PR history and checkpoints owner
 merges before file and posting checks. ``--prs`` / ``--tracker`` provide
 read-only offline previews only with ``--dry-run``.
 
+**Queue state and tracker revision.** A missing queue is a source error, never
+an empty queue. Create the store once with ``queue.py init``; a valid ``[]``
+store and valid legacy stores load as before. ``enqueue`` and ``claim`` refresh
+``origin/main`` first and read ``applications.yaml`` from the exact commit that
+fetch returned. A failed refresh stops them even when a cached copy exists.
+Before writing, both recheck that pinned tracker evidence and the current local
+queue under the queue lock.
+
 Usage:
+  queue.py init  [--queue FILE]
   queue.py enqueue [--repo DIR] [--queue FILE] [--dry-run] [--json] [--limit N]
                    [--include-submitted] [--prs FILE] [--tracker FILE]
   queue.py list  [--queue FILE] [--json] [--status STATUS]
@@ -91,11 +100,13 @@ verified on ``origin/main``. Failure leaves the queue item ``submitted`` with
 reopening the attempt or touching a form.
 """
 import argparse
+from collections import namedtuple
 from contextlib import contextmanager
 import hashlib
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -184,6 +195,19 @@ TRANSITIONS = {
 
 class QueueStateError(ValueError):
     """The queue cannot be read or safely updated."""
+
+
+class QueueMissingError(QueueStateError):
+    """The queue store does not exist. It is not an empty queue."""
+
+    def __init__(self, path):
+        super().__init__(
+            "queue store is missing at %s; create an empty one once with: "
+            "python3 queue.py init --queue %s" % (path, shlex.quote(str(path))))
+
+
+class TrackerRefreshError(QueueStateError):
+    """The tracker could not be refreshed from origin/main, so it is not fresh."""
 
 # Tracker statuses that mean the application has already been submitted.
 SUBMITTED_ALIASES = {
@@ -521,7 +545,7 @@ def load_queue(path):
         with open(path, encoding="utf-8") as fh:
             items = parse_queue(fh.read())
     except FileNotFoundError:
-        return []
+        raise QueueMissingError(path)
     except (OSError, UnicodeError) as exc:
         raise QueueStateError("cannot read queue: %s" % type(exc).__name__)
     seen = set()
@@ -543,14 +567,19 @@ def _write_queue_unlocked(path, items):
         if not number or number in seen:
             raise QueueStateError("refusing to write a missing or duplicate PR identity")
         seen.add(number)
+    _atomic_write_text(path, serialized)
+
+
+def _atomic_write_text(path, text):
+    """Replace one text file durably using the same path on every platform."""
     absolute = os.path.abspath(path)
     directory = os.path.dirname(absolute)
     os.makedirs(directory, exist_ok=True)
-    fd, temporary = tempfile.mkstemp(prefix="." + os.path.basename(path) + ".",
+    fd, temporary = tempfile.mkstemp(prefix="." + os.path.basename(absolute) + ".",
                                      suffix=".tmp", dir=directory)
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
-            fh.write(serialized)
+            fh.write(text)
             fh.flush()
             os.fsync(fh.fileno())
         if os.name == "nt":
@@ -575,6 +604,20 @@ def _write_queue_unlocked(path, items):
             os.unlink(temporary)
         except FileNotFoundError:
             pass
+
+
+def init_queue(path):
+    """Create an empty queue store. Returns True when created, False if valid.
+
+    An existing store is validated and never overwritten, so a malformed or
+    unreadable queue still stops the caller instead of being reset to empty.
+    """
+    with queue_lock(path):
+        if os.path.exists(path):
+            load_queue(path)
+            return False
+        _write_queue_unlocked(path, [])
+        return True
 
 
 def write_queue(path, items):
@@ -602,11 +645,10 @@ def pr_number_of(item):
 
 def active_key(item):
     """Identity of an application for the secondary duplicate guard."""
-    link = normalize_url(item.get("link", "")).lower()
-    if link:
-        return "link:" + link
-    return "name:" + norm_text(item.get("company", "")).lower() + "|" + \
-        norm_text(item.get("role", "")).lower()
+    from application_identity import application_id, posting_keys
+    if posting_keys(item):
+        return application_id(item)
+    return "name:" + norm_text(item.get("company")).casefold() + "|" + norm_text(item.get("role")).casefold()
 
 
 def append_note(item, text):
@@ -665,12 +707,14 @@ def _append_tracker_row(tracker_text, row):
 
 def build_tracker_row(item, date, sent, route, note=None):
     """The applications.yaml row for one submission (tracker schema per RULES.md)."""
+    from application_identity import identity_evidence
     company = norm_text(item.get("company"))
     role = norm_text(item.get("role"))
     source = norm_text(item.get("source"))
     link = norm_text(item.get("link"))
     variant = normalize_variant(item.get("variant"))
     row = {
+        **identity_evidence(item),
         "company": company,
         "role": role,
         "status": "applied",
@@ -730,13 +774,13 @@ def write_tracker_row(repo, item, date, sent, route, dry_run=False,
         import application_identity as identity
         try:
             tracker_rows = parse_queue(tracker_text, status_values=None)
-            target_id = _canonical_queue_identity(item)
+            _canonical_queue_identity(item)
             target_pr = identity.pr_number(item)
             resolution = identity.resolve_applications(tracker_rows, [item])
         except (QueueStateError, TypeError, ValueError) as exc:
             log("queue: tracker write-back: application identity is ambiguous: " + str(exc))
             return TRACKER_CONFLICT
-        if any("queue:1" in conflict.get("row_refs", [])
+        if any(f"queue:{len(tracker_rows) + 1}" in conflict.get("row_refs", [])
                for conflict in resolution.get("conflicts", [])):
             log("queue: tracker write-back: tracker identity conflict for PR #"
                 + str(pr_number_of(item)))
@@ -748,13 +792,12 @@ def write_tracker_row(repo, item, date, sent, route, dry_run=False,
             except (TypeError, ValueError):
                 log("queue: tracker write-back: tracker row has contradictory PR aliases")
                 return TRACKER_CONFLICT
-            entry_link = identity.normalize_posting_url(entry.get("link"))
             if entry_pr == target_pr:
                 same_pr.append(entry)
-                if entry_link and entry_link != target_id[5:]:
+                if identity.posting_keys(entry) and not identity.same_posting(entry, item):
                     log("queue: tracker write-back: PR points at a different posting")
                     return TRACKER_CONFLICT
-            elif entry_link and entry_link == target_id[5:]:
+            elif identity.same_posting(entry, item):
                 log("queue: tracker write-back: posting is already attached to another PR")
                 return TRACKER_CONFLICT
         if len(same_pr) > 1:
@@ -952,38 +995,8 @@ def load_merge_intake(queue_path):
 
 def _write_merge_intake_unlocked(queue_path, state):
     absolute = merge_intake_path(queue_path)
-    directory = os.path.dirname(absolute)
-    os.makedirs(directory, exist_ok=True)
-    fd, temporary = tempfile.mkstemp(prefix="." + os.path.basename(absolute) + ".",
-                                     suffix=".tmp", dir=directory)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
-            json.dump(state, fh, ensure_ascii=False, sort_keys=True, indent=2)
-            fh.write("\n")
-            fh.flush()
-            os.fsync(fh.fileno())
-        if os.name == "nt":
-            import ctypes
-            kernel = ctypes.WinDLL("kernel32", use_last_error=True)
-            move_file = kernel.MoveFileExW
-            move_file.argtypes = (ctypes.c_wchar_p, ctypes.c_wchar_p,
-                                  ctypes.c_uint32)
-            move_file.restype = ctypes.c_int
-            flags = 0x1 | 0x8  # MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH
-            if not move_file(temporary, absolute, flags):
-                raise ctypes.WinError(ctypes.get_last_error())
-        else:
-            os.replace(temporary, absolute)
-            dir_fd = os.open(directory, os.O_RDONLY)
-            try:
-                os.fsync(dir_fd)
-            finally:
-                os.close(dir_fd)
-    finally:
-        try:
-            os.unlink(temporary)
-        except FileNotFoundError:
-            pass
+    serialized = json.dumps(state, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
+    _atomic_write_text(absolute, serialized)
 
 
 def _posting_url_from_body(body):
@@ -1119,27 +1132,112 @@ def _git(repo, *args, timeout=60):
         capture_output=True, text=True, timeout=timeout)
 
 
-def read_main_tracker(repo, log):
-    """Current ``applications.yaml`` on ``origin/main``, or None.
+class TrackerRevision(namedtuple("TrackerRevision", "commit text sha256")):
+    """``applications.yaml`` as read from one fetched ``origin/main`` commit."""
 
-    The **current** tracker is what decides whether an application has already
-    been submitted (a submission may have been recorded on ``main`` after the
-    tailoring PR merged), so the enqueue guard reads it, not the merge-commit
-    state. A deleted PR branch is irrelevant -- ``main`` always has the file.
-    """
-    if not os.path.isdir(os.path.join(repo, ".git")):
-        log(f"queue: no clone at {repo}; cannot read the tracker")
-        return None
+
+FETCH_REF_PREFIX = "refs/jobsearch/tracker-fetch/"
+_COMMIT_RE = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
+
+
+def _redact(text):
+    """Trim git output for logs and drop any credentials embedded in a URL."""
+    text = re.sub(r"(?i)(://)[^/@\s]+@", r"\1***@", str(text or "").strip())
+    return text.splitlines()[0][:200] if text else ""
+
+
+def _git_bytes(repo, *args, timeout=60):
+    return subprocess.run(["git", "-C", repo, *args], capture_output=True,
+                          timeout=timeout)
+
+
+def _tracker_blob(repo, revision):
+    """Tracker bytes at ``revision`` (a commit or local ref); local, no network."""
     try:
-        _git(repo, "fetch", "--quiet", "--no-tags", "origin", "main")
-        proc = _git(repo, "show", f"origin/main:{TRACKER_PATH}")
-    except Exception as exc:  # noqa: BLE001
-        log(f"queue: tracker read failed: {exc}")
-        return None
+        proc = _git_bytes(repo, "show", "%s:%s" % (revision, TRACKER_PATH))
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise TrackerRefreshError(
+            "tracker cannot be read at %s: %s" % (revision, type(exc).__name__))
     if proc.returncode != 0:
-        log(f"queue: tracker read failed: {proc.stderr.strip() or proc.returncode}")
-        return None
+        raise TrackerRefreshError(
+            "tracker cannot be read at %s: %s" % (
+                revision, _redact(proc.stderr.decode("utf-8", "replace"))
+                or proc.returncode))
     return proc.stdout
+
+
+def refresh_main_tracker(repo, log=lambda *a: None, timeout=60):
+    """Fetch ``origin/main`` and read the tracker from the commit fetched.
+
+    The **current** tracker decides whether an application is already
+    submitted (a row may land on ``main`` after the tailoring PR merged), so
+    callers need a revision that this fetch produced, not whatever a stale
+    ``origin/main`` ref or working tree holds. The fetch writes the commit to a
+    unique private ref and the tracker is read from that exact SHA, so a
+    concurrent fetch cannot swap the revision between fetch and read.
+
+    Raises ``TrackerRefreshError`` when the fetch or read fails, even if an
+    older copy of the tracker is readable. Returns ``TrackerRevision``.
+    """
+    if not os.path.exists(os.path.join(repo, ".git")):
+        raise TrackerRefreshError(
+            "no resume clone at %s; set JOBSEARCH_REPO and retry" % repo)
+    ref = FETCH_REF_PREFIX + uuid.uuid4().hex
+    hint = ("tracker refresh failed, so cached data was not used; check network "
+            "access and `gh auth status`, then retry")
+    try:
+        try:
+            fetched = _git(repo, "fetch", "--quiet", "--no-tags", "origin",
+                           "+refs/heads/main:" + ref,
+                           "+refs/heads/main:refs/remotes/origin/main",
+                           timeout=timeout)
+        except (OSError, subprocess.SubprocessError) as exc:
+            log("queue: tracker refresh failed: " + type(exc).__name__)
+            raise TrackerRefreshError(hint)
+        if fetched.returncode != 0:
+            log("queue: tracker refresh failed: "
+                + (_redact(fetched.stderr) or str(fetched.returncode)))
+            raise TrackerRefreshError(hint)
+        try:
+            proc = _git_bytes(repo, "rev-parse", "--verify", "--quiet",
+                              ref + "^{commit}")
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise TrackerRefreshError(hint)
+        commit = proc.stdout.decode("utf-8", "replace").strip()
+        if proc.returncode != 0 or not _COMMIT_RE.fullmatch(commit):
+            raise TrackerRefreshError(hint)
+        blob = _tracker_blob(repo, commit)
+    finally:
+        try:
+            _git_bytes(repo, "update-ref", "-d", ref)
+        except (OSError, subprocess.SubprocessError):
+            pass
+    try:
+        text = blob.decode("utf-8")
+    except UnicodeError:
+        raise TrackerRefreshError("tracker at %s is not valid UTF-8" % commit[:12])
+    try:
+        rows = parse_queue(text, status_values=None)
+    except QueueStateError as exc:
+        raise TrackerRefreshError("tracker is malformed: " + str(exc)) from exc
+    if not rows and not any(line.strip() == "[]" for line in text.splitlines()):
+        raise TrackerRefreshError("tracker needs entries or an explicit empty-list marker")
+    return TrackerRevision(commit, text, hashlib.sha256(blob).hexdigest())
+
+
+def verify_tracker_revision(repo, revision):
+    """Recheck pinned tracker evidence locally, for use under the queue lock.
+
+    Makes no network call. The pinned commit must still yield identical bytes,
+    and the local ``origin/main`` must not carry a different tracker, which
+    would mean another lane fetched newer state after this refresh.
+    """
+    if hashlib.sha256(_tracker_blob(repo, revision.commit)).hexdigest() != revision.sha256:
+        raise TrackerRefreshError("pinned tracker revision no longer verifies; retry")
+    current = hashlib.sha256(_tracker_blob(repo, "refs/remotes/origin/main")).hexdigest()
+    if current != revision.sha256:
+        raise TrackerRefreshError(
+            "tracker changed on origin/main after it was refreshed; retry")
 
 
 # ---------------------------------------------------------------- enqueue core
@@ -1204,6 +1302,7 @@ def extract_entry(pr, tracker_text):
 
 
 def build_item(pr, entry, variant_path, include_submitted=False):
+    from application_identity import identity_evidence
     e = entry or {}
     t_company, t_role = title_parts(pr)
     company = norm_text(e.get("company")) or t_company or \
@@ -1220,6 +1319,7 @@ def build_item(pr, entry, variant_path, include_submitted=False):
         if m:
             link = m.group(0).rstrip(".,;")
     item = {
+        **identity_evidence(e),
         "company": company,
         "role": norm_text(e.get("role")) or t_role,
         "source": norm_text(e.get("source")),
@@ -1312,23 +1412,28 @@ def _canonical_queue_identity(item):
         if value and identity.normalize_posting_url(value) != link:
             raise QueueStateError("queue item has conflicting posting URL aliases")
     app_id = identity.application_id(item)
-    if app_id != "link:" + link:
-        raise QueueStateError("queue item has an ambiguous canonical identity")
     stored_id = str(item.get("application_id") or "").strip()
-    if stored_id and stored_id != app_id:
+    if stored_id and stored_id not in identity.posting_keys(item):
         raise QueueStateError("queue application_id conflicts with its posting link")
     return app_id
+
+
+def _parse_flat_entries(text, label, required=False):
+    try:
+        entries = parse_queue(text, status_values=None)
+        explicit_empty = any(line.strip() == "[]" for line in text.splitlines())
+        if required and not entries and not explicit_empty:
+            raise QueueStateError("%s has no explicit empty-list marker or entries" % label)
+        return entries
+    except QueueStateError as exc:
+        raise QueueStateError("cannot safely read %s" % label) from exc
 
 
 def _read_flat_entries(path, label, required=False):
     try:
         with open(path, encoding="utf-8") as fh:
             text = fh.read()
-        entries = parse_queue(text, status_values=None)
-        explicit_empty = any(line.strip() == "[]" for line in text.splitlines())
-        if required and not entries and not explicit_empty:
-            raise QueueStateError("%s has no explicit empty-list marker or entries" % label)
-        return entries
+        return _parse_flat_entries(text, label, required)
     except FileNotFoundError:
         if required:
             raise QueueStateError("%s is unavailable" % label)
@@ -1417,12 +1522,13 @@ def _check_owner_controls(posting, skipped, gates):
 def _check_claim_identities(item, queue_items, tracker_rows, posting):
     """Apply the same identity gates before and after the network check."""
     import application_identity as identity
-    app_id = _canonical_queue_identity(item)
-    if sum(1 for row in queue_items
-           if identity.normalize_posting_url(row.get("link")) == app_id[5:]) != 1:
+    _canonical_queue_identity(item)
+    target = dict(item, **identity.identity_evidence(posting))
+    target["link"] = posting.get("link") or item.get("link")
+    if sum(1 for row in queue_items if identity.same_posting(row, target)) != 1:
         raise QueueStateError("queue posting link has a duplicate or conflicting alias")
     target_index = queue_items.index(item)
-    effective = dict(item)
+    effective = target
     for key in ("company", "role"):
         if not norm_text(effective.get(key)):
             effective[key] = posting.get(key, "")
@@ -1438,28 +1544,34 @@ def _check_claim_identities(item, queue_items, tracker_rows, posting):
             tracker_pr = identity.pr_number(tracker)
         except (TypeError, ValueError) as exc:
             raise QueueStateError("tracker contains contradictory PR aliases") from exc
-        tracker_link = identity.normalize_posting_url(tracker.get("link"))
-        same_id = tracker_link == app_id[5:] if tracker_link else False
+        same_id = identity.same_posting(tracker, effective)
         same_pr = tracker_pr and tracker_pr == pr_number_of(item)
-        if same_pr and tracker_link and tracker_link != app_id[5:]:
+        if same_pr and identity.posting_keys(tracker) and not same_id:
             raise QueueStateError("current tracker PR alias points at a different posting")
         same_name = (norm_text(tracker.get("company")).casefold(),
                      norm_text(tracker.get("role")).casefold()) == (
                          norm_text(posting.get("company")).casefold(),
                          norm_text(posting.get("role")).casefold())
-        if (same_id or same_pr or same_name) and not same_pr:
+        both_verified = identity.requisition_key(tracker) and identity.requisition_key(effective)
+        if (same_id or (same_name and not both_verified)) and not same_pr:
             raise QueueStateError("current tracker contains a conflicting application identity")
         if (same_id or same_pr) and canonical_submitted(tracker.get("status")):
             raise QueueStateError("application is already recorded as submitted")
 
 
-def _read_claim_inputs(args, item, queue_items):
+def _read_claim_inputs(args, item, queue_items, log=lambda *a: None):
     import application_identity as identity
     import eligibility
     import tailor
     from posting_guard import guard_text
 
     app_id = _canonical_queue_identity(item)
+
+    # Refresh first: a failed refresh blocks the claim before any other read
+    # or network call, whether or not a cached tracker exists.
+    revision = refresh_main_tracker(args.repo, log)
+    tracker_rows = _parse_flat_entries(revision.text, "current application tracker",
+                                       required=True)
 
     postings_path = os.path.join(args.repo, "data", "postings.json")
     try:
@@ -1470,9 +1582,8 @@ def _read_claim_inputs(args, item, queue_items):
         raise QueueStateError("current postings are unavailable or malformed") from exc
     if not isinstance(postings, list) or any(not isinstance(row, dict) for row in postings):
         raise QueueStateError("current postings must be a list of objects")
-    matches = [row for row in postings
-               if identity.normalize_posting_url(row.get("link")) == app_id[5:]]
-    if len(matches) != 1:
+    matches = identity.matching_routes(item, postings)
+    if len(matches) != 1 or not identity.same_posting(matches[0], item):
         raise QueueStateError("posting link does not identify exactly one current posting")
     posting = dict(matches[0])
     clean_meta, meta_verdict, meta_findings = tailor.guard_posting_metadata(posting)
@@ -1486,7 +1597,7 @@ def _read_claim_inputs(args, item, queue_items):
     posting["title"] = clean_meta.get("title", "")
     for key in ("posting_url", "posting_link"):
         alias = posting.get(key)
-        if alias and identity.normalize_posting_url(alias) != app_id[5:]:
+        if alias and "link:" + identity.normalize_posting_url(alias) not in identity.posting_keys(posting):
             raise QueueStateError("current posting contains a conflicting URL alias")
 
     profile_path = args.profile or os.path.join(args.repo, "data", "profile.yaml")
@@ -1499,11 +1610,6 @@ def _read_claim_inputs(args, item, queue_items):
     if not isinstance(profile, dict) or not profile:
         raise QueueStateError("selected profile is empty")
 
-    tracker_path = os.path.join(args.repo, TRACKER_PATH)
-    if not os.path.isfile(tracker_path):
-        raise QueueStateError("current application tracker is unavailable")
-    tracker_rows = _read_flat_entries(tracker_path, "current application tracker",
-                                      required=True)
     _check_claim_identities(item, queue_items, tracker_rows, posting)
 
     skipped = _read_flat_entries(args.skipped, "owner skip list", required=True)
@@ -1536,8 +1642,8 @@ def _read_claim_inputs(args, item, queue_items):
         "profile_path": os.path.abspath(profile_path),
         "profile_sha256": hashlib.sha256(profile_source).hexdigest(),
         "postings_sha256": hashlib.sha256(postings_bytes).hexdigest(),
-        "tracker_rows": tracker_rows,
-        "tracker_sha256": _optional_file_hash(tracker_path, "current application tracker", True),
+        "tracker_revision": revision,
+        "tracker_sha256": revision.sha256,
         "skip_sha256": skip_sha256,
         "gate_sha256": gate_sha256,
         "jd_sha256": hashlib.sha256(guarded_jd["clean_text"].encode("utf-8")).hexdigest(),
@@ -1560,7 +1666,7 @@ def cmd_claim(args, log):
         return 2
 
     try:
-        inputs = _read_claim_inputs(args, item, initial)
+        inputs = _read_claim_inputs(args, item, initial, log)
     except (OSError, ValueError, RuntimeError) as exc:
         log("queue: claim blocked: " + str(exc))
         return 2
@@ -1575,13 +1681,13 @@ def cmd_claim(args, log):
                 raise QueueStateError("item changed while eligibility was being checked")
             if _canonical_queue_identity(current) != inputs["application_id"]:
                 raise QueueStateError("posting identity changed while eligibility was being checked")
-            current_inputs = _read_claim_validation_inputs(args, current, latest,
-                                                           inputs["posting"])
+            current_inputs = _read_claim_validation_inputs(
+                args, current, latest, inputs["posting"], inputs["tracker_revision"])
             expected_inputs = (inputs["profile_sha256"], inputs["postings_sha256"],
                                inputs["tracker_sha256"], inputs["skip_sha256"],
                                inputs["gate_sha256"])
             if current_inputs != expected_inputs:
-                raise QueueStateError("profile, tracker, owner controls, or posting store changed during claim checks")
+                raise QueueStateError("profile, owner controls, or posting store changed during claim checks")
             for key in ("company", "role"):
                 old, verified = norm_text(current.get(key)), norm_text(
                     inputs["posting"].get(key))
@@ -1624,6 +1730,8 @@ def cmd_claim(args, log):
                     "status": inputs["decision"].get("status"),
                     "reason_codes": inputs["decision"].get("reason_codes", []),
                     "provenance": inputs["decision"].get("provenance", {}),
+                    "tracker_commit": inputs["tracker_revision"].commit,
+                    "tracker_sha256": inputs["tracker_revision"].sha256,
                     "evaluated_at": now_utc(),
                 }, sort_keys=True, separators=(",", ":")),
             })
@@ -1641,31 +1749,34 @@ def cmd_claim(args, log):
     return 0
 
 
-def _read_claim_validation_inputs(args, item, queue_items, posting):
-    """Cheap local recheck while holding the queue lock; no network calls."""
+def _read_claim_validation_inputs(args, item, queue_items, posting, revision):
+    """Cheap local recheck while holding the queue lock; no network calls.
+
+    Rechecks the pinned tracker revision, then the current local queue, profile,
+    posting store and owner controls against the same identity gates.
+    """
     import application_identity as identity
     profile_path = args.profile or os.path.join(args.repo, "data", "profile.yaml")
     postings_path = os.path.join(args.repo, "data", "postings.json")
-    tracker_path = os.path.join(args.repo, TRACKER_PATH)
     try:
         with open(profile_path, "rb") as fh:
             profile_bytes = fh.read()
         with open(postings_path, "rb") as fh:
             postings_bytes = fh.read()
-        with open(tracker_path, "rb") as fh:
-            tracker_bytes = fh.read()
     except OSError as exc:
-        raise QueueStateError("profile, tracker, or posting store became unavailable") from exc
+        raise QueueStateError("profile or posting store became unavailable") from exc
+    verify_tracker_revision(args.repo, revision)
     if _canonical_queue_identity(item) != identity.application_id(item):
         raise QueueStateError("application identity changed")
-    tracker_rows = _read_flat_entries(tracker_path, "current application tracker", required=True)
+    tracker_rows = _parse_flat_entries(revision.text, "current application tracker",
+                                       required=True)
     _check_claim_identities(item, queue_items, tracker_rows, posting)
     skipped = _read_flat_entries(args.skipped, "owner skip list", required=True)
     gates = _read_gate_entries(args.gates, required=True)
     _check_owner_controls(posting, skipped, gates)
     return (hashlib.sha256(profile_bytes).hexdigest(),
             hashlib.sha256(postings_bytes).hexdigest(),
-            hashlib.sha256(tracker_bytes).hexdigest(),
+            revision.sha256,
             _optional_file_hash(args.skipped, "owner skip list", True),
             _optional_file_hash(args.gates, "owner application caps", True))
 
@@ -1674,6 +1785,7 @@ def _read_claim_validation_inputs(args, item, queue_items, posting):
 ENQUEUE_COUNT_KEYS = ("processed", "accepted", "added", "rejected", "duplicates",
                       "limited", "observed", "owner_merged", "closed_history",
                       "active_work")
+
 
 
 def _new_enqueue_report():
@@ -1844,33 +1956,42 @@ def _read_fixture_inputs(args, log):
     if not isinstance(prs, list) or any(not isinstance(pr, dict) for pr in prs):
         log("queue: --prs must contain a JSON list of PR objects")
         return None, None
+
     try:
-        parse_queue(tracker_text, status_values=None)
+        tracker_rows = parse_queue(tracker_text, status_values=None)
+        if not tracker_rows and not any(line.strip() == "[]" for line in tracker_text.splitlines()):
+            raise QueueStateError("tracker needs entries or an explicit empty-list marker")
     except QueueStateError as exc:
         log("queue: fixture tracker is malformed: " + str(exc))
         return None, None
     return prs, tracker_text
 
 
+
+
 def _print_enqueue_result(args, added, skipped, report, include_summary=False):
     if args.json:
-        print(json.dumps({"added": added, "skipped": [
+        payload = {"added": added, "skipped": [
             {"pr_number": n, "reason": r} for n, r in skipped],
-            "summary": report}, indent=2, ensure_ascii=False))
+            "summary": report}
+        if "preview_candidates" in report:
+            payload["proposed_candidates"] = report["preview_candidates"]
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
         return
     for it in added:
         print(f"queued: {render_item_line(it)}")
+    for it in report.get("preview_candidates", []):
+        print(f"preview candidate: {render_item_line(it)}")
     if include_summary:
         print(json.dumps({"intake_run": report}, ensure_ascii=False))
 
 
-def _process_pending_intake(args, log, report):
+def _process_pending_intake(args, log, report, revision):
     import tailor
 
     added_rows, skipped_rows = [], []
     failures = False
-    tracker_loaded = False
-    tracker_text = None
+    tracker_text = revision.text
     records = _pending_intake_records(args.queue)
     records.sort(key=lambda row: (str(row.get("pr", {}).get("mergedAt") or ""),
                                   int(row.get("pr_number") or 0)))
@@ -1898,8 +2019,14 @@ def _process_pending_intake(args, log, report):
         pr = dict(record.get("pr") or {})
         merge_commit = pr.get("mergeCommit")
         merge_sha = (merge_commit.get("oid") if isinstance(merge_commit, dict) else "")
-        if (not norm_ts(pr.get("mergedAt")) or not pr.get("headRefName")
-                or not pr.get("headRefOid") or not merge_sha or not pr.get("url")):
+        missing_metadata = [name for name, value in (
+            ("mergedAt", norm_ts(pr.get("mergedAt"))),
+            ("headRefName", pr.get("headRefName")),
+            ("headRefOid", pr.get("headRefOid")),
+            ("mergeCommit", merge_sha), ("url", pr.get("url"))) if not value]
+        if missing_metadata:
+            log("queue: pending #%s has incomplete merge metadata (%s)" %
+                (number, ", ".join(missing_metadata)))
             _set_intake_outcome(args.queue, number, "pending", "metadata_unavailable",
                                 "authoritative merge or PR identity metadata is incomplete")
             _count_reason(report, "metadata_unavailable")
@@ -1916,6 +2043,7 @@ def _process_pending_intake(args, log, report):
         if files is None:
             files = gh_pr_files(number, log)
             if files is None:
+                log("queue: pending #%s changed-file metadata is unavailable" % number)
                 _set_intake_outcome(args.queue, number, "pending", "metadata_unavailable",
                                     "changed-file metadata is unavailable; retry required")
                 _count_reason(report, "metadata_unavailable")
@@ -1947,23 +2075,17 @@ def _process_pending_intake(args, log, report):
             _count_reason(report, "limit_reached")
             continue
 
-        if not tracker_loaded:
-            tracker_text = read_main_tracker(args.repo, log)
-            tracker_loaded = True
-            if tracker_text is not None:
-                try:
-                    parse_queue(tracker_text, status_values=None)
-                except QueueStateError:
-                    tracker_text = None
-        if tracker_text is None:
-            _set_intake_outcome(args.queue, number, "pending", "tracker_unavailable",
-                                "current application tracker is unavailable or malformed")
-            _count_reason(report, "tracker_unavailable")
-            failures = True
-            continue
-
         pr["body"] = pr.get("posting_url") or ""
         pr["_tracker"] = tracker_text
+        try:
+            postings, _skipped, _gates = _read_intake_admission_inputs(args.repo, tailor)
+        except (OSError, UnicodeError, QueueStateError, ValueError) as exc:
+            _set_intake_outcome(args.queue, number, "pending", "source_unavailable",
+                                "posting admission inputs are unavailable: " + str(exc))
+            _count_reason(report, "source_unavailable")
+            failures = True
+            continue
+        pr["_postings"] = postings
         try:
             with queue_lock(args.queue):
                 current = load_queue(args.queue)
@@ -1977,6 +2099,7 @@ def _process_pending_intake(args, log, report):
             continue
         if preview_skipped:
             _number, skip_reason = preview_skipped[0]
+            log("queue: skip #%s: %s" % (number, skip_reason))
             skip_code = _intake_skip_code(skip_reason)
             outcome = "admitted" if skip_code == "already_queued" else "excluded"
             _set_intake_outcome(args.queue, number, outcome, skip_code, skip_reason)
@@ -2019,6 +2142,7 @@ def _process_pending_intake(args, log, report):
                 merged_items, added, final_skips = enqueue(
                     latest, [pr], args.include_submitted, limit=1)
                 if added:
+                    verify_tracker_revision(args.repo, revision)
                     final_admission = _final_intake_admission_check(
                         args, candidate, expected_posting, closed)
                     if final_admission[0] == "admitted":
@@ -2048,6 +2172,7 @@ def _process_pending_intake(args, log, report):
                 counts["added"] += 1
             elif final_skips:
                 _number, skip_reason = final_skips[0]
+                log("queue: skip #%s: %s" % (number, skip_reason))
                 skip_code = _intake_skip_code(skip_reason)
                 outcome = "admitted" if skip_code == "already_queued" else "excluded"
                 _set_intake_outcome(args.queue, number, outcome, skip_code, skip_reason)
@@ -2058,6 +2183,7 @@ def _process_pending_intake(args, log, report):
                 if skip_code in {"already_queued", "already_submitted", "already_active"}:
                     counts["duplicates"] += 1
         except (QueueStateError, OSError, ValueError) as exc:
+            log("queue: enqueue stopped for #%s: %s" % (number, exc))
             _set_intake_outcome(args.queue, number, "pending", "queue_unavailable",
                                 "queue insertion could not be confirmed: " + str(exc))
             _count_reason(report, "queue_unavailable")
@@ -2070,10 +2196,6 @@ def cmd_enqueue(args, log):
     report = _new_enqueue_report()
     if (args.prs or args.tracker) and not args.dry_run:
         log("queue: offline inputs require --dry-run; only a GitHub-observed owner merge authorizes enqueue")
-        return 2
-    if args.dry_run and (not args.prs or not args.tracker):
-        _emit_intake_report(report, log, allow_seam=False)
-        log("queue: --dry-run requires offline --prs and --tracker fixtures")
         return 2
     try:
         if args.dry_run:
@@ -2088,6 +2210,10 @@ def cmd_enqueue(args, log):
         return 1
 
     if args.dry_run:
+        if not args.prs or not args.tracker:
+            _emit_intake_report(report, log, allow_seam=False)
+            log("queue: --dry-run requires offline --prs and --tracker fixtures")
+            return 2
         prs, tracker_text = _read_fixture_inputs(args, log)
         if prs is None:
             report["outcome"] = "failed"
@@ -2098,30 +2224,32 @@ def cmd_enqueue(args, log):
             if pr.get("files") is None and is_app_branch(pr.get("headRefName")):
                 unavailable.append((int(pr.get("number") or 0),
                                     "changed-file metadata unavailable in offline fixture"))
-                report["counts"]["processed"] += 1
                 _count_reason(report, "metadata_unavailable")
                 continue
             prs_with_tracker.append(dict(pr, _tracker=tracker_text))
-        merged_items, added, skipped = enqueue(initial_items, prs_with_tracker,
-                                                args.include_submitted, args.limit)
-        report["counts"]["added"] = len(added)
-        report["counts"]["accepted"] = len(added)
-        report["counts"]["rejected"] = len(skipped)
-        report["counts"]["observed"] = len(prs)
-        report["counts"]["owner_merged"] = len(prs)
+        _merged_items, proposed, skipped = enqueue(initial_items, prs_with_tracker,
+                                                   args.include_submitted, args.limit)
+        report["mode"] = "structural_preview"
+        report["outcome"] = "structural_preview"
+        report["preview_candidates"] = proposed
+        report["preview"] = {
+            "evidence_scope": "offline fixtures; structural candidate evaluation only",
+            "fixture_prs": len(prs),
+            "proposed_candidates": len(proposed),
+            "admitted": 0,
+            "owner_merged": 0,
+            "admission_gates": "not_evaluated",
+            "not_verified": ["merge_owner", "posting_age", "owner_skip_or_cap",
+                             "posting_closure", "live_queue_admission"],
+            "writes": False,
+        }
         report["counts"]["active_work"] = sum(
             1 for row in initial_items if row.get("status") in APPLICATION_GUARD_STATUSES)
         for number, reason in skipped:
             _count_reason(report, _intake_skip_code(reason))
-        for _number, _reason in unavailable:
-            pass
-        report["counts"]["limited"] = report["reasons"].get("limit_reached", 0)
-        report["outcome"] = "partial_failure" if unavailable else (
-            "healthy" if added else "healthy_empty")
-        if args.json:
-            skipped = skipped + unavailable
+        skipped.extend(unavailable)
         _emit_intake_report(report, log, allow_seam=False, emit_stdout=False)
-        _print_enqueue_result(args, added, skipped, report, include_summary=True)
+        _print_enqueue_result(args, [], skipped, report, include_summary=True)
         return 0 if not unavailable else 1
 
     try:
@@ -2166,12 +2294,26 @@ def cmd_enqueue(args, log):
             _count_reason(report, "no_owner_merges")
 
     try:
-        added, skipped, pending_failed = _process_pending_intake(args, log, report)
-    except (QueueStateError, OSError, ValueError) as exc:
-        log("queue: merge intake processing failed: " + str(exc))
-        report["outcome"] = "failed"
-        _emit_intake_report(report, log)
-        return 1
+        revision = refresh_main_tracker(args.repo, log)
+        tracker_rows = parse_queue(revision.text, status_values=None)
+        if not tracker_rows and not any(
+                line.strip() == "[]" for line in revision.text.splitlines()):
+            raise QueueStateError(
+                "current application tracker needs entries or an explicit empty-list marker")
+        log("queue: tracker pinned to origin/main %s" % revision.commit[:12])
+    except QueueStateError as exc:
+        log("queue: enqueue stopped: " + str(exc))
+        _count_reason(report, "tracker_unavailable")
+        added, skipped, pending_failed = [], [], True
+    else:
+        try:
+            added, skipped, pending_failed = _process_pending_intake(
+                args, log, report, revision)
+        except (QueueStateError, OSError, ValueError) as exc:
+            log("queue: merge intake processing failed: " + str(exc))
+            report["outcome"] = "failed"
+            _emit_intake_report(report, log)
+            return 1
     report["counts"]["closed_history"] = sum(
         1 for row in load_merge_intake(args.queue)["records"].values()
         if row.get("state") == "excluded")
@@ -2203,11 +2345,11 @@ def enqueue(existing, prs_with_trackers, include_submitted=False, limit=0):
     Each PR mapping carries ``files`` (its changed paths) and ``_tracker`` (the
     ``applications.yaml`` text at its merge commit). Idempotent by PR number.
     """
+    from application_identity import identity_evidence, matching_routes, posting_keys, same_posting
     items = [dict(it) for it in existing]
     seen = {pr_number_of(it) for it in items}
     seen.discard(0)
-    active = {active_key(it) for it in items
-              if it.get("status") in APPLICATION_GUARD_STATUSES}
+    active = [it for it in items if it.get("status") in APPLICATION_GUARD_STATUSES]
     added, skipped = [], []
     for pr in sorted(prs_with_trackers, key=lambda p: int(p.get("number") or 0)):
         number = int(pr.get("number") or 0)
@@ -2228,17 +2370,40 @@ def enqueue(existing, prs_with_trackers, include_submitted=False, limit=0):
             skipped.append((number, "already submitted in tracker"))
             continue
         item = build_item(pr, entry, vp, include_submitted=include_submitted)
-        if active_key(item) in active:
+        postings = matching_routes(item, pr.get("_postings", ()))
+        if len(postings) > 1 or (postings and not same_posting(item, postings[0])):
+            skipped.append((number, "posting identity requires review"))
+            continue
+        if postings:
+            item.update(identity_evidence(postings[0]))
+            item["link"] = normalize_url(postings[0].get("link")) or item["link"]
+        if any(same_posting(item, row)
+               or (not posting_keys(item) and active_key(item) == active_key(row))
+               for row in active):
             skipped.append((number, "already active for this application"))
+            continue
+        if not include_submitted and any(
+                canonical_submitted(row.get("status")) and same_posting(item, row)
+                for row in parse_yaml_list(pr.get("_tracker") or "")):
+            skipped.append((number, "already submitted in tracker"))
             continue
         if limit and len(added) >= limit:
             skipped.append((number, "limit reached"))
             continue
         seen.add(number)
-        active.add(active_key(item))
+        active.append(item)
         added.append(item)
         items.append(item)
     return sort_items(items), added, skipped
+
+
+def cmd_init(args, log):
+    """Create the empty queue store once; never overwrite an existing one."""
+    if init_queue(args.queue):
+        log("queue: initialised an empty queue at %s" % args.queue)
+    else:
+        log("queue: %s already holds a valid queue; left unchanged" % args.queue)
+    return 0
 
 
 def cmd_list(args, log):
@@ -2867,11 +3032,15 @@ def build_parser():
         formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd")
 
+    i = sub.add_parser("init", help="create an empty queue store (once; never overwrites)")
+    add_common(i)
+
     e = sub.add_parser("enqueue", help="append newly merged app/* tailoring PRs")
     add_common(e)
     e.add_argument("--repo", default=REPO_DIR,
                    help="resume clone (env JOBSEARCH_REPO)")
-    e.add_argument("--dry-run", action="store_true", help="print, write nothing")
+    e.add_argument("--dry-run", action="store_true",
+                   help="structural fixture preview; live admission gates are not checked")
     e.add_argument("--json", action="store_true", help="emit added/skipped as JSON")
     e.add_argument("--limit", type=int, default=0, help="add at most N items (0 = all)")
     e.add_argument("--include-submitted", action="store_true",
@@ -2985,6 +3154,8 @@ def main(argv=None):
     args = build_parser().parse_args(argv)
     log = lambda *a: print(*a, file=sys.stderr)  # noqa: E731
     try:
+        if args.cmd == "init":
+            return cmd_init(args, log)
         if args.cmd == "enqueue":
             return cmd_enqueue(args, log)
         if args.cmd == "list":
