@@ -24,14 +24,16 @@ This script is the mechanical half of that flow:
   * ``list`` / ``next`` -- show the queue / the oldest ``queued`` item.
 
   * ``claim`` -- verify a unique current posting, exact selected profile, fresh
-    guarded JD, owner skips, and caps, then durably persist a unique attempt ID.
+    guarded JD, owner skips, and caps, then durably reserve one browser owner.
     External submission needs this durable claim and a verified material snapshot.
   * ``prepare-snapshot`` / ``verify-snapshot`` -- retain exact PDF and answer
     bytes for this application/attempt, then check retained and current bytes.
-  * ``status`` -- record a confirmed submission against that attempt ID before
-    snapshot finalization and tracker I/O, or mark an item failed before an attempt.
+  * ``status`` -- record a confirmed submission or a concrete blocked outcome
+    against the exact attempt, before releasing its browser owner.
   * ``finalize-snapshot`` -- repair provenance for an already submitted attempt;
     it never submits or reconstructs missing historical files.
+  * ``browser-owner`` / ``finish-attempt`` -- retain browser ownership until an
+    independent verifier establishes termination or an enforceable fence.
   * ``release-stale`` / ``reconcile`` -- keep interrupted attempts in
     ``outcome_unknown`` until explicit evidence establishes the outcome.
 
@@ -55,7 +57,8 @@ checkouts. The queue stores content IDs and application/attempt bindings only.
 ``variant`` (path in the repo), ``pr`` (URL), ``pr_number``, ``enqueued_at``
 (UTC; the PR's merge time), ``status``, and ``notes``; plus ``apply_url`` when
 available, ``approved_at`` / ``approved_by`` from the merge, durable
-``attempt_id`` / ``attempt_state`` / ``submit_gate`` on claim, and
+``attempt_id`` / ``attempt_state`` / ``submit_gate`` plus runner, session, and
+lease owner fields on claim, and
 ``submitted_at`` / ``sent`` / ``confirmation_evidence`` after confirmation.
 
 Stdlib only; no secrets. The live ``enqueue`` path needs ``gh`` and a resume
@@ -75,10 +78,16 @@ Usage:
                    [--include-submitted] [--prs FILE] [--tracker FILE]
   queue.py list  [--queue FILE] [--json] [--status STATUS]
   queue.py next  [--queue FILE] [--json]
-  queue.py claim --pr N [--repo DIR] [--profile FILE] [--queue FILE] [--json]
+  queue.py claim (--pr N | --next) [--runner-id ID --session-ref REF]
+                 [--repo DIR] [--profile FILE] [--queue FILE] [--json]
   queue.py prepare-snapshot --pr N --attempt-id ID --pdf FILE --answers FILE
                             --operator-verification TEXT
   queue.py verify-snapshot --pr N --attempt-id ID --pdf FILE --answers FILE
+  queue.py begin-submit --pr N --attempt-id ID --runner-id ID --session-ref REF
+  queue.py browser-owner --json
+  queue.py finish-attempt --pr N --attempt-id ID --runner-id ID --session-ref REF
+                         --termination-evidence JSON --json
+  queue.py resume --pr N --attempt-id ID --evidence-source TEXT --evidence-observation TEXT
   queue.py status --pr N --status submitted --attempt-id ID --date D --sent TEXT
                    --confirmation-evidence TEXT [--route TEXT] [--queue FILE]
   queue.py finalize-snapshot --pr N --attempt-id ID
@@ -124,13 +133,13 @@ TRACKER_PATH = "applications.yaml"
 VARIANT_RE = re.compile(r"^variants/(?:[^/]+/resume|[^/]+)\.tex$")
 TITLE_RE = re.compile(r"^app\((?P<slug>[^)]+)\)\s*:\s*(?P<rest>.*)$")
 
-STATUSES = ("queued", "in_progress", "submitted", "failed",
+STATUSES = ("queued", "in_progress", "submitted", "failed", "blocked",
             "outcome_unknown", "skipped")
 # Statuses that still need work: the queue is drained "one item at a time" and
 # ``next`` always returns the oldest of these (never skips past an in-flight
 # item to a newer one).
 UNFINISHED = ("queued", "in_progress")
-APPLICATION_GUARD_STATUSES = ("queued", "in_progress", "submitted",
+APPLICATION_GUARD_STATUSES = ("queued", "in_progress", "submitted", "blocked",
                               "outcome_unknown")
 
 # A claim older than this is abandoned, not live. The drain's own budget is
@@ -138,6 +147,9 @@ APPLICATION_GUARD_STATUSES = ("queued", "in_progress", "submitted",
 # cannot collide with a running submission and is short enough that one
 # crash costs at most a few hours of stalled queue instead of indefinite.
 STALE_CLAIM_SECONDS = 4 * 3600
+ATTEMPT_LEASE_SECONDS = 4 * 3600
+OWNER_ID_RE = re.compile(r"^[A-Za-z0-9._:@-]{1,128}$")
+TERMINATION_VERIFIER_CALLBACK = None
 
 
 def claim_is_stale(item, now=None):
@@ -175,8 +187,8 @@ def snapshot_verification_is_fresh(item, now=None):
     age = (current - checked).total_seconds()
     return -30 <= age <= 120
 
-# Status changes never create or reopen an external-submit attempt. A failed
-# item is terminal; claimed attempts are retried only through reconciliation.
+# Compatibility transition catalog; the attempt lifecycle commands enforce
+# the richer blocked/owner transitions.
 TRANSITIONS = {
     "queued": {"failed"},
     "in_progress": {"submitted"},
@@ -219,7 +231,7 @@ QUEUE_HEADER = (
     "# Application queue -- merged app/* tailoring PRs awaiting submission.\n"
     "# Managed by queue.py (stdlib only); do not hand-edit.\n"
     "# One item per merged tailoring PR. Attempts are durable and never auto-retried.\n"
-    "# status: queued -> in_progress -> submitted | outcome_unknown | failed\n"
+    "# status: queued -> in_progress -> submitted | blocked | outcome_unknown | failed | skipped\n"
     "# Merging the variant PR IS the per-CV approval: approved_at/approved_by\n"
     "# are stamped automatically from the merge (mergedAt / mergedBy). No\n"
     "# separate go-ahead is needed before the drain submits the next item.\n"
@@ -425,6 +437,181 @@ def now_utc():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _lease_expiry(seconds=ATTEMPT_LEASE_SECONDS, now=None):
+    current = now or datetime.now(timezone.utc)
+    return (current + timedelta(seconds=seconds)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _legacy_owner_for_item(item):
+    """Describe an old active claim without pretending its browser has stopped."""
+    status = str(item.get("status", ""))
+    attempt_id = str(item.get("attempt_id") or "")
+    if status not in ("in_progress", "outcome_unknown"):
+        return None
+    if not attempt_id and not item.get("submit_gate"):
+        return None
+    if attempt_id and item.get("browser_owner_released_attempt_id") == attempt_id:
+        return None
+    return {
+        "pr_number": pr_number_of(item),
+        "attempt_id": attempt_id or "legacy-pr-%s" % pr_number_of(item),
+        "runner_id": "legacy-unbound",
+        "session_ref": "legacy-unbound",
+        "lease_expires_at": "",
+        "owner_state": "active",
+        "legacy": True,
+    }
+
+
+def _owner_for_item(item):
+    """Return the persisted owner, or a fail-closed view of a legacy claim."""
+    owner_attempt = item.get("browser_owner_attempt_id")
+    owner_fields = ("runner_id", "session_ref", "lease_expires_at")
+    present = [name in item and item.get(name) is not None for name in owner_fields]
+    if owner_attempt not in (None, ""):
+        if not all(present):
+            raise QueueStateError("browser owner record is incomplete")
+        runner_id, session_ref = str(item["runner_id"]), str(item["session_ref"])
+        if (not OWNER_ID_RE.fullmatch(runner_id)
+                or not OWNER_ID_RE.fullmatch(session_ref)):
+            raise QueueStateError("browser owner identity is malformed")
+        return {
+            "pr_number": pr_number_of(item),
+            "attempt_id": str(owner_attempt),
+            "runner_id": runner_id,
+            "session_ref": session_ref,
+            "lease_expires_at": str(item.get("lease_expires_at") or ""),
+            "owner_state": str(item.get("browser_owner_state") or "active"),
+            "legacy": str(item.get("legacy_browser_owner") or "").casefold() == "true",
+        }
+    if any(present):
+        raise QueueStateError("browser owner record is incomplete")
+    return _legacy_owner_for_item(item)
+
+
+def _browser_owner_from_rows(rows):
+    owners = []
+    for row in rows:
+        owner = _owner_for_item(row)
+        if owner is not None:
+            owners.append(owner)
+    if len(owners) > 1:
+        raise QueueStateError("multiple browser owners require manual recovery")
+    return owners[0] if owners else None
+
+
+def _is_expired_lease(value, now=None):
+    stamp = norm_ts(value)
+    if not stamp:
+        return True
+    try:
+        expiry = datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc)
+    except ValueError:
+        return True
+    return expiry < (now or datetime.now(timezone.utc))
+
+
+def _materialize_legacy_owner(item):
+    """Persist an old claim's synthetic identity before changing its outcome."""
+    owner = _owner_for_item(item)
+    if owner is None or not owner["legacy"] or item.get("browser_owner_attempt_id"):
+        return owner
+    item.update({
+        "browser_owner_attempt_id": owner["attempt_id"],
+        "runner_id": owner["runner_id"],
+        "session_ref": owner["session_ref"],
+        "lease_expires_at": owner["lease_expires_at"],
+        "browser_owner_state": "active",
+        "legacy_browser_owner": "true",
+    })
+    return owner
+
+
+def _same_owner(left, right):
+    return bool(left and right and all(
+        str(left.get(key) or "") == str(right.get(key) or "")
+        for key in ("pr_number", "attempt_id", "runner_id", "session_ref")))
+
+
+def _termination_request(owner, evidence):
+    return {
+        "schema": "job-search-browser-termination-request/v1",
+        "challenge": uuid.uuid4().hex,
+        "owner": {key: owner.get(key) for key in (
+            "pr_number", "attempt_id", "runner_id", "session_ref",
+            "lease_expires_at", "legacy")},
+        "termination_evidence": evidence,
+    }
+
+
+def verify_browser_termination(owner, evidence, verifier=None):
+    """Ask an independent verifier to observe or fence the exact browser owner.
+
+    The verifier must inspect the real process/browser boundary. A lease, an
+    agent statement, or a caller-supplied ``verified`` flag is never sufficient.
+    """
+    if isinstance(evidence, str):
+        if len(evidence.encode("utf-8")) > 16384:
+            raise QueueStateError("termination evidence is too large")
+        try:
+            evidence = json.loads(evidence)
+        except ValueError as exc:
+            raise QueueStateError("termination evidence must be a JSON object") from exc
+    if not isinstance(evidence, dict):
+        raise QueueStateError("termination evidence must be a JSON object")
+    request = _termination_request(owner, evidence)
+    configured = (verifier if verifier is not None
+                  else TERMINATION_VERIFIER_CALLBACK)
+    if configured is not None:
+        if not callable(configured):
+            raise QueueStateError("browser ownership verifier callback is invalid")
+        try:
+            response = configured(dict(request))
+        except Exception as exc:
+            raise QueueStateError("browser ownership verifier failed: %s" %
+                                  type(exc).__name__) from None
+    else:
+        command_value = os.environ.get("JOBSEARCH_BROWSER_OWNERSHIP_VERIFIER", "")
+        try:
+            command = shlex.split(command_value)
+        except ValueError:
+            command = []
+        if not command:
+            raise QueueStateError("independent browser ownership verifier is not configured")
+        try:
+            proc = subprocess.run(command, input=json.dumps(request, sort_keys=True),
+                                  capture_output=True, text=True, timeout=30, check=False)
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise QueueStateError("browser ownership verifier could not run: %s" %
+                                  type(exc).__name__) from None
+        if proc.returncode != 0:
+            raise QueueStateError("browser ownership verifier rejected termination")
+        try:
+            response = json.loads(proc.stdout)
+        except ValueError as exc:
+            raise QueueStateError("browser ownership verifier returned invalid JSON") from exc
+    if not isinstance(response, dict) or response.get("verified") is not True:
+        raise QueueStateError("browser ownership verifier did not verify termination")
+    if response.get("schema") != "job-search-browser-termination-verdict/v1":
+        raise QueueStateError("browser ownership verifier schema mismatch")
+    for key in ("pr_number", "attempt_id", "runner_id", "session_ref"):
+        if response.get(key) != owner.get(key):
+            raise QueueStateError("browser ownership verifier binding mismatch")
+    if response.get("challenge") != request["challenge"]:
+        raise QueueStateError("browser ownership verifier challenge mismatch")
+    state = response.get("state")
+    if state not in ("terminated", "fenced"):
+        raise QueueStateError("browser ownership verifier did not establish termination")
+    if state == "fenced" and response.get("in_flight_rejected") is not True:
+        raise QueueStateError("browser fence does not reject in-flight actions")
+    verifier_id = response.get("verifier_id")
+    if not isinstance(verifier_id, str) or not OWNER_ID_RE.fullmatch(verifier_id):
+        raise QueueStateError("browser ownership verifier identity is missing")
+    return {"verifier_id": verifier_id, "state": state,
+            "verified_at": now_utc(), "challenge": request["challenge"]}
+
+
 def canonical_submitted(status):
     key = re.sub(r"[\s-]+", "_", norm_text(status).lower())
     return key in SUBMITTED_ALIASES
@@ -619,6 +806,12 @@ def sort_items(items):
     def key(it):
         return (str(it.get("enqueued_at") or ""), int(it.get("pr_number") or 0))
     return sorted(items, key=key)
+
+
+def select_next_candidate(items):
+    """Shared oldest-first selector, with PR number as the stable tie-breaker."""
+    return next((item for item in sort_items(items)
+                 if item.get("status", "queued") == "queued"), None)
 
 
 def pr_number_of(item):
@@ -1440,9 +1633,41 @@ def _read_claim_inputs(args, item, queue_items, log=lambda *a: None):
 
 
 def cmd_claim(args, log):
+    owner_ids = (getattr(args, "runner_id", None),
+                 getattr(args, "session_ref", None))
+    if bool(owner_ids[0]) != bool(owner_ids[1]):
+        log("queue: claim requires both --runner-id and --session-ref")
+        return 2
+    if any(value and not OWNER_ID_RE.fullmatch(str(value)) for value in owner_ids):
+        log("queue: runner and session identifiers must use letters, digits, . _ : @ or -")
+        return 2
+    lease_seconds = getattr(args, "lease_seconds", ATTEMPT_LEASE_SECONDS)
+    if isinstance(lease_seconds, bool) or not isinstance(lease_seconds, int) \
+            or not 1 <= lease_seconds <= 86400:
+        log("queue: --lease-seconds must be between 1 and 86400")
+        return 2
+    claim_next = bool(getattr(args, "claim_next", False))
+    if claim_next and not all(owner_ids):
+        log("queue: claim --next requires --runner-id and --session-ref")
+        return 2
+    if not claim_next and not getattr(args, "pr", None):
+        log("queue: claim requires --pr or --next")
+        return 2
+
     try:
         with queue_lock(args.queue):
             initial = load_queue(args.queue)
+            if _browser_owner_from_rows(initial) is not None:
+                raise QueueStateError("browser slot is still owned; finish the current attempt first")
+            if claim_next:
+                selected = select_next_candidate(initial)
+                if selected is None:
+                    if args.json:
+                        print("null")
+                    else:
+                        log("queue: no queued items")
+                    return 0
+                args.pr = pr_number_of(selected)
             idx = _unique_item_index(initial, args.pr)
             item = dict(initial[idx])
             if item.get("status") != "queued":
@@ -1462,6 +1687,12 @@ def cmd_claim(args, log):
     try:
         with queue_lock(args.queue):
             latest = load_queue(args.queue)
+            if _browser_owner_from_rows(latest) is not None:
+                raise QueueStateError("browser slot became owned while eligibility was checked")
+            if claim_next:
+                selected = select_next_candidate(latest)
+                if selected is None or pr_number_of(selected) != args.pr:
+                    raise QueueStateError("next queue selection changed while eligibility was checked")
             idx = _unique_item_index(latest, args.pr)
             current = dict(latest[idx])
             if (current.get("status") != "queued" or current.get("attempt_id")
@@ -1504,12 +1735,21 @@ def cmd_claim(args, log):
             if inputs.get("apply_url") and not current.get("apply_url"):
                 current["apply_url"] = norm_text(inputs["apply_url"])
             attempt_id = uuid.uuid4().hex
+            legacy_owner = not bool(owner_ids[0])
+            runner_id = str(owner_ids[0] or "legacy-unbound")
+            session_ref = str(owner_ids[1] or "legacy-unbound")
             current.update({
                 "status": "in_progress",
                 "attempt_id": attempt_id,
                 "attempt_state": "authorized",
                 "submit_gate": "durable",
                 "claimed_at": now_utc(),
+                "browser_owner_attempt_id": attempt_id,
+                "runner_id": runner_id,
+                "session_ref": session_ref,
+                "lease_expires_at": _lease_expiry(lease_seconds),
+                "browser_owner_state": "active",
+                "legacy_browser_owner": "true" if legacy_owner else "false",
                 "claim_application_id": inputs["application_id"],
                 "claim_profile_path": inputs["profile_path"],
                 "claim_profile_sha256": inputs["profile_sha256"],
@@ -1528,7 +1768,7 @@ def cmd_claim(args, log):
     except (OSError, QueueStateError) as exc:
         log("queue: claim not authorized: " + str(exc))
         return 2
-    log("queue: claim persisted for #%s; external submission gate is durable" % args.pr)
+    log("queue: claim and browser reservation persisted for #%s" % args.pr)
     if args.json:
         print(json.dumps(current, indent=2, ensure_ascii=False))
     else:
@@ -1802,7 +2042,7 @@ def cmd_release_stale(args, log):
         return 0
     for row in changed:
         verb = "would mark unknown" if args.dry_run else "marked unknown"
-        log("queue: %s #%s %s; reconcile before retry" %
+        log("queue: %s #%s %s; reconcile outcome, then verify browser termination before retry" %
             (verb, pr_number_of(row), row.get("company", "")))
     return 0
 
@@ -1833,9 +2073,287 @@ def cmd_next(args, log):
     return 0
 
 
+def _attempt_owner_matches(item, attempt_id, runner_id=None, session_ref=None,
+                           allow_legacy_omission=False):
+    owner = _owner_for_item(item)
+    if owner is None or owner.get("attempt_id") != str(attempt_id or ""):
+        return False
+    if owner.get("legacy") and allow_legacy_omission and not runner_id and not session_ref:
+        return True
+    return (str(owner.get("runner_id") or "") == str(runner_id or "")
+            and str(owner.get("session_ref") or "") == str(session_ref or ""))
+
+
+def cmd_browser_owner(args, log):
+    try:
+        with queue_lock(args.queue):
+            rows = load_queue(args.queue)
+            owner = _browser_owner_from_rows(rows)
+    except (OSError, QueueStateError) as exc:
+        log("queue: browser owner unavailable: " + str(exc))
+        return 1
+    if owner is not None:
+        owner = dict(owner)
+        owner["lease_expired"] = _is_expired_lease(owner.get("lease_expires_at"))
+    print(json.dumps(owner, indent=2, ensure_ascii=False))
+    return 0
+
+
+def cmd_begin_submit(args, log):
+    if (not OWNER_ID_RE.fullmatch(args.runner_id)
+            or not OWNER_ID_RE.fullmatch(args.session_ref)):
+        log("queue: runner and session identifiers are malformed")
+        return 2
+    try:
+        with queue_lock(args.queue):
+            rows = load_queue(args.queue)
+            idx = _unique_item_index(rows, args.pr)
+            item = dict(rows[idx])
+            owner = _owner_for_item(item)
+            if not _attempt_owner_matches(item, args.attempt_id, args.runner_id,
+                                          args.session_ref):
+                raise QueueStateError("attempt, runner, or session does not own this browser")
+            if owner.get("legacy"):
+                raise QueueStateError("begin-submit requires a runner-bound browser owner")
+            if (item.get("status") != "in_progress"
+                    or item.get("attempt_state") != "authorized"
+                    or item.get("attempt_id") != args.attempt_id):
+                raise QueueStateError("begin-submit requires the active authorized attempt")
+            if claim_is_stale(item):
+                raise QueueStateError("stale attempts cannot begin submission")
+            if _verification_state(item) != "fresh":
+                raise QueueStateError("begin-submit requires a fresh verified material snapshot")
+            if not item.get("submit_started_at"):
+                item["submit_started_at"] = now_utc()
+                item["submit_started_attempt_id"] = args.attempt_id
+                rows[idx] = item
+                _write_queue_unlocked(args.queue, rows)
+    except (OSError, QueueStateError) as exc:
+        log("queue: begin-submit blocked: " + str(exc))
+        return 2
+    log("queue: pre-submit marker persisted for #%s" % args.pr)
+    if args.json:
+        print(json.dumps(item, indent=2, ensure_ascii=False))
+    else:
+        print("submit_started_at: %s" % item["submit_started_at"])
+    return 0
+
+
+def _finish_result(item, args):
+    return {
+        "pr_number": args.pr,
+        "attempt_id": args.attempt_id,
+        "runner_id": args.runner_id,
+        "session_ref": args.session_ref,
+        "outcome": item.get("last_finished_outcome", "outcome_unknown"),
+        "status": item.get("status"),
+        "browser_owner_released": True,
+    }
+
+
+def _set_unknown_outcome(item):
+    item["status"] = "outcome_unknown"
+    item["attempt_state"] = "outcome_unknown"
+    item["outcome_unknown_at"] = item.get("outcome_unknown_at") or now_utc()
+    item["next_action"] = "reconcile"
+
+
+def _reconciled_retry_for_owner(item, attempt_id):
+    if item.get("status") != "queued" or item.get("reconciled_attempt_id") != attempt_id:
+        return False
+    try:
+        evidence = json.loads(item.get("reconciliation_evidence") or "{}")
+    except ValueError:
+        return False
+    return evidence.get("kind") == "not_submitted"
+
+
+def cmd_finish_attempt(args, log):
+    if (not OWNER_ID_RE.fullmatch(args.runner_id)
+            or not OWNER_ID_RE.fullmatch(args.session_ref)):
+        log("queue: runner and session identifiers are malformed")
+        return 2
+    try:
+        with queue_lock(args.queue):
+            rows = load_queue(args.queue)
+            idx = _unique_item_index(rows, args.pr)
+            item = dict(rows[idx])
+            owner = _owner_for_item(item)
+            if owner is None:
+                already_finished = (
+                    item.get("last_finished_attempt_id") == args.attempt_id
+                    and item.get("last_finished_runner_id") == args.runner_id
+                    and item.get("last_finished_session_ref") == args.session_ref)
+                if already_finished:
+                    result = _finish_result(item, args)
+                    print(json.dumps(result, indent=2, ensure_ascii=False))
+                    return 0
+                raise QueueStateError("attempt does not own the browser slot")
+            if not _same_owner(owner, {
+                    "pr_number": args.pr, "attempt_id": args.attempt_id,
+                    "runner_id": args.runner_id, "session_ref": args.session_ref}):
+                raise QueueStateError("attempt, runner, or session does not own this browser")
+    except (OSError, QueueStateError) as exc:
+        log("queue: finish-attempt blocked: " + str(exc))
+        return 2
+
+    try:
+        verification = verify_browser_termination(owner, args.termination_evidence)
+    except (QueueStateError, OSError, ValueError) as exc:
+        log("queue: browser ownership remains reserved: " + str(exc))
+        return 2
+
+    try:
+        with queue_lock(args.queue):
+            rows = load_queue(args.queue)
+            idx = _unique_item_index(rows, args.pr)
+            item = dict(rows[idx])
+            current_owner = _owner_for_item(item)
+            if current_owner is None:
+                already_finished = (
+                    item.get("last_finished_attempt_id") == args.attempt_id
+                    and item.get("last_finished_runner_id") == args.runner_id
+                    and item.get("last_finished_session_ref") == args.session_ref)
+                if already_finished:
+                    result = _finish_result(item, args)
+                    print(json.dumps(result, indent=2, ensure_ascii=False))
+                    return 0
+                raise QueueStateError("browser owner changed during termination verification")
+            if not _same_owner(current_owner, owner):
+                raise QueueStateError("browser owner changed during termination verification")
+
+            if _reconciled_retry_for_owner(item, args.attempt_id):
+                outcome = "retry"
+            elif item.get("status") == "submitted":
+                if (item.get("submitted_attempt_id")
+                        and item.get("submitted_attempt_id") != args.attempt_id):
+                    raise QueueStateError("confirmation belongs to a different attempt")
+                outcome = "submitted"
+                item["attempt_state"] = "submitted"
+            elif item.get("status") == "blocked" and not item.get("submit_started_at"):
+                outcome = "blocked"
+                item["attempt_state"] = "blocked"
+            elif item.get("status") in ("failed", "skipped") \
+                    and not item.get("submit_started_at"):
+                outcome = item["status"]
+                item["attempt_state"] = outcome
+            else:
+                _set_unknown_outcome(item)
+                outcome = "outcome_unknown"
+
+            item["last_finished_attempt_id"] = args.attempt_id
+            item["last_finished_runner_id"] = args.runner_id
+            item["last_finished_session_ref"] = args.session_ref
+            item["last_finished_outcome"] = outcome
+            item["browser_owner_released_attempt_id"] = args.attempt_id
+            item["browser_owner_released_at"] = now_utc()
+            item["browser_owner_release_state"] = verification["state"]
+            item["browser_owner_verifier_id"] = verification["verifier_id"]
+            item["browser_owner_release_challenge"] = verification["challenge"]
+            for key in ("browser_owner_attempt_id", "runner_id", "session_ref",
+                        "lease_expires_at", "browser_owner_state", "legacy_browser_owner"):
+                item.pop(key, None)
+            rows[idx] = item
+            _write_queue_unlocked(args.queue, rows)
+            result = _finish_result(item, args)
+            result["verification"] = verification
+    except (OSError, QueueStateError) as exc:
+        log("queue: browser ownership remains reserved: " + str(exc))
+        return 2
+    log("queue: finished attempt #%s with outcome %s; browser ownership verified free" %
+        (args.pr, outcome))
+    print(json.dumps(result, indent=2, ensure_ascii=False))
+    return 0
+
+
+def _resume_evidence(args):
+    source, observation = norm_text(args.evidence_source), norm_text(args.evidence_observation)
+    if len(source) < 8 or len(observation) < 20:
+        raise QueueStateError("resume requires a specific source and resolution observation")
+    import submission_snapshot
+    submission_snapshot.validate_confirmation_evidence(source + ". " + observation)
+    if not re.search(r"\b(portal|application|captcha|consent|form|owner decision|question)\b",
+                     source, re.I):
+        raise QueueStateError("resume evidence source must identify the resolved blocker")
+    if not re.search(r"\b(cleared|resolved|answered|fixed|verified|available|removed)\b",
+                     observation, re.I):
+        raise QueueStateError("resume observation must state how the blocker was resolved")
+    return source, observation
+
+
+def cmd_resume(args, log):
+    try:
+        source, observation = _resume_evidence(args)
+        with queue_lock(args.queue):
+            rows = load_queue(args.queue)
+            idx = _unique_item_index(rows, args.pr)
+            item = dict(rows[idx])
+            if item.get("status") != "blocked" or item.get("attempt_state") != "blocked":
+                raise QueueStateError("resume applies only to a finished blocked attempt")
+            if item.get("attempt_id") != args.attempt_id:
+                raise QueueStateError("attempt ID does not match the blocked application")
+            if _owner_for_item(item) is not None:
+                raise QueueStateError("browser ownership must be finished before resume")
+            if item.get("browser_owner_released_attempt_id") != args.attempt_id:
+                raise QueueStateError("blocked attempt has not been independently terminated")
+            if item.get("submit_started_at") or item.get("submit_started_attempt_id"):
+                raise QueueStateError("a submit marker makes the outcome unknown; reconcile it first")
+            if item.get("outcome_unknown_at"):
+                raise QueueStateError("an unknown submission outcome cannot use blocked resume")
+            history_evidence = {
+                "kind": "blocked_resolved", "source": source,
+                "observation": observation, "checked_at": now_utc(),
+            }
+            _append_attempt_history(item, {
+                "kind": "blocked", "source": source,
+                "observation": observation,
+            })
+            item["resume_evidence"] = json.dumps(
+                history_evidence, sort_keys=True, separators=(",", ":"))
+            for key in ("attempt_id", "attempt_state", "submit_gate", "claimed_at",
+                        "outcome_unknown_at", "next_action", "claim_application_id",
+                        "claim_profile_path", "claim_profile_sha256", "claim_jd_sha256",
+                        "eligibility_evidence", "blocked_at", "blocked_evidence",
+                        "submit_started_at", "submit_started_attempt_id"):
+                item.pop(key, None)
+            item["status"] = "queued"
+            rows[idx] = item
+            _write_queue_unlocked(args.queue, rows)
+    except (OSError, QueueStateError, ValueError) as exc:
+        log("queue: resume blocked: " + str(exc))
+        return 2
+    if args.json:
+        print(json.dumps(item, indent=2, ensure_ascii=False))
+    else:
+        print("queued: %s" % render_item_line(item))
+    return 0
+
+
+def _outcome_evidence(args, outcome):
+    source = norm_text(getattr(args, "evidence_source", ""))
+    observation = norm_text(getattr(args, "evidence_observation", ""))
+    note = norm_text(getattr(args, "notes", ""))
+    if len(source) < 8 or len(observation) < 20:
+        raise QueueStateError("%s requires a specific evidence source and observation" % outcome)
+    import submission_snapshot
+    submission_snapshot.validate_confirmation_evidence(source + ". " + observation + ". " + note)
+    if not re.search(r"\b(portal|application|form|posting|employer|captcha|consent|eligibility|ATS)\b",
+                     source, re.I):
+        raise QueueStateError("outcome evidence source must name the form, portal, or posting")
+    if outcome == "blocked" and not re.search(
+            r"\b(block|blocked|unanswered|captcha|consent|question|missing|ambiguous|error)\b",
+            observation, re.I):
+        raise QueueStateError("blocked evidence must identify the unresolved form condition")
+    if outcome == "skipped" and not re.search(
+            r"\b(closed|duplicate|ineligible|excluded|withdrawn|unavailable)\b",
+            observation, re.I):
+        raise QueueStateError("skipped evidence must identify the exclusion")
+    return {"source": source, "observation": observation}
+
+
 def cmd_status(args, log):
     new = args.status
-    if new not in ("submitted", "failed"):
+    if new not in ("submitted", "failed", "blocked", "skipped"):
         log("queue: status cannot claim or reopen an item; use claim or reconcile")
         return 2
     if args.dry_run:
@@ -1859,8 +2377,15 @@ def cmd_status(args, log):
             log("queue: --date must be YYYY-MM-DD")
             return 2
     elif not args.notes:
-        log("queue: failed requires --notes")
+        log("queue: %s requires --notes" % new)
         return 2
+    evidence = None
+    if new in ("blocked", "skipped"):
+        try:
+            evidence = _outcome_evidence(args, new)
+        except (ImportError, QueueStateError, ValueError) as exc:
+            log("queue: %s evidence cannot be safely recorded: %s" % (new, exc))
+            return 2
     if new == "submitted" and not _valid_confirmation_evidence(args.confirmation_evidence):
         log("queue: confirmation evidence must describe the observed success")
         return 2
@@ -1879,39 +2404,75 @@ def cmd_status(args, log):
             it = dict(items[idx])
             cur = it.get("status", "queued")
             if new == "failed":
-                if cur != "queued" or it.get("attempt_id"):
-                    log("queue: a claimed attempt needs outcome_unknown reconciliation")
-                    return 2
-                it["status"] = "failed"
-                append_note(it, args.notes)
+                if cur == "queued" and not it.get("attempt_id"):
+                    it["status"] = "failed"
+                    append_note(it, args.notes)
+                elif cur == "in_progress":
+                    if (it.get("attempt_state") != "authorized"
+                            or it.get("submit_gate") != "durable"
+                            or not args.attempt_id or it.get("attempt_id") != args.attempt_id
+                            or claim_is_stale(it)):
+                        raise QueueStateError("failed outcome requires the current non-stale attempt")
+                    if not _attempt_owner_matches(
+                            it, args.attempt_id, args.runner_id, args.session_ref,
+                            allow_legacy_omission=True):
+                        raise QueueStateError("attempt, runner, or session does not own this browser")
+                    if it.get("submit_started_at"):
+                        raise QueueStateError("a started submission with no receipt is outcome_unknown")
+                    _materialize_legacy_owner(it)
+                    it.update({"status": "failed", "attempt_state": "failed",
+                               "failed_at": now_utc(), "failure_evidence": norm_text(args.notes)})
+                else:
+                    raise QueueStateError("failed applies only before claim or to the current attempt")
             else:
                 if (cur != "in_progress" or it.get("attempt_state") != "authorized"
                         or it.get("submit_gate") != "durable"):
-                    log("queue: submitted requires the active durable claim")
-                    return 2
-                if it.get("attempt_id") != args.attempt_id:
-                    log("queue: attempt ID does not match the durable claim")
-                    return 2
+                    raise QueueStateError("%s requires the active durable claim" % new)
+                if not args.attempt_id or it.get("attempt_id") != args.attempt_id:
+                    raise QueueStateError("attempt ID does not match the durable claim")
                 if claim_is_stale(it):
-                    log("queue: stale claims require reconciliation before confirmation")
-                    return 2
+                    raise QueueStateError("stale claims require reconciliation before outcome writes")
+                if not _attempt_owner_matches(
+                        it, args.attempt_id, args.runner_id, args.session_ref,
+                        allow_legacy_omission=True):
+                    raise QueueStateError("attempt, runner, or session does not own this browser")
+                owner = _owner_for_item(it)
+                if new in ("blocked", "skipped") and it.get("submit_started_at"):
+                    raise QueueStateError("a started submission with no receipt is outcome_unknown")
+                if new == "failed" and it.get("submit_started_at"):
+                    raise QueueStateError("a started submission with no receipt is outcome_unknown")
+                _materialize_legacy_owner(it)
                 # Confirmation is terminal bookkeeping. Never require a new
                 # pre-submit check after the external action has succeeded.
-                it["snapshot_verification_at_confirmation"] = _verification_state(it)
-                it.update({
-                    "status": "submitted",
-                    "attempt_state": "submitted",
-                    "submitted_at": args.date,
-                    "sent": norm_text(args.sent),
-                    "confirmation_evidence": norm_text(args.confirmation_evidence),
-                    "tracker_sync": "pending",
-                    "tracker_sync_error": "",
-                    "route": norm_text(args.route),
-                    "submitted_attempt_id": args.attempt_id,
-                    "snapshot_provenance": "pending",
-                    "snapshot_error": "",
-                })
-                it.pop("next_action", None)
+                if new == "submitted":
+                    it["snapshot_verification_at_confirmation"] = _verification_state(it)
+                    it.update({
+                        "status": "submitted",
+                        "attempt_state": "submitted",
+                        "submitted_at": args.date,
+                        "sent": norm_text(args.sent),
+                        "confirmation_evidence": norm_text(args.confirmation_evidence),
+                        "tracker_sync": "pending",
+                        "tracker_sync_error": "",
+                        "route": norm_text(args.route),
+                        "submitted_attempt_id": args.attempt_id,
+                        "snapshot_provenance": "pending",
+                        "snapshot_error": "",
+                    })
+                    it.pop("next_action", None)
+                elif new == "blocked":
+                    it.update({"status": "blocked", "attempt_state": "blocked",
+                               "blocked_at": now_utc(), "blocked_notes": norm_text(args.notes),
+                               "blocked_evidence": json.dumps(
+                                   evidence, sort_keys=True, separators=(",", ":")),
+                               "next_action": "resume-after-blocker-clear"})
+                elif new == "skipped":
+                    it.update({"status": "skipped", "attempt_state": "skipped",
+                               "skipped_at": now_utc(), "skip_evidence": json.dumps(
+                                   evidence, sort_keys=True, separators=(",", ":"))})
+                else:
+                    it.update({"status": "failed", "attempt_state": "failed",
+                               "failed_at": now_utc(), "failure_evidence": norm_text(args.notes)})
             items[idx] = it
             _write_queue_unlocked(args.queue, items)
     except (QueueStateError, OSError) as exc:
@@ -1934,7 +2495,7 @@ def cmd_status(args, log):
     return 1 if sync_rc or snapshot_failure else 0
 
 
-def _snapshot_claim(queue_path, pr_number, attempt_id):
+def _snapshot_claim(queue_path, pr_number, attempt_id, runner_id=None, session_ref=None):
     """Read one live claim; callers perform snapshot I/O outside the lock."""
     with queue_lock(queue_path):
         rows = load_queue(queue_path)
@@ -1944,6 +2505,9 @@ def _snapshot_claim(queue_path, pr_number, attempt_id):
                 or item.get("submit_gate") != "durable"
                 or item.get("attempt_id") != attempt_id):
             raise QueueStateError("snapshot requires the exact active durable attempt")
+        if not _attempt_owner_matches(item, attempt_id, runner_id, session_ref,
+                                      allow_legacy_omission=True):
+            raise QueueStateError("snapshot write does not match the browser owner")
         if claim_is_stale(item):
             raise QueueStateError("stale claims require reconciliation before snapshot work")
         application_id = _canonical_queue_identity(item)
@@ -1959,7 +2523,8 @@ def _snapshot_store(root, repo):
 
 
 def _clear_snapshot_verification(queue_path, pr_number, attempt_id,
-                                 application_id, snapshot_id):
+                                 application_id, snapshot_id,
+                                 runner_id=None, session_ref=None):
     """Invalidate any old pre-submit check before reading current materials."""
     with queue_lock(queue_path):
         rows = load_queue(queue_path)
@@ -1973,6 +2538,9 @@ def _clear_snapshot_verification(queue_path, pr_number, attempt_id,
                 or _canonical_queue_identity(current) != application_id
                 or claim_is_stale(current)):
             raise QueueStateError("attempt or prepared snapshot changed before verification")
+        if not _attempt_owner_matches(current, attempt_id, runner_id, session_ref,
+                                      allow_legacy_omission=True):
+            raise QueueStateError("snapshot write does not match the browser owner")
         for key in ("snapshot_verified_id", "snapshot_verified_application_id",
                     "snapshot_verified_attempt_id", "snapshot_verified_at"):
             current.pop(key, None)
@@ -1984,12 +2552,14 @@ def _clear_snapshot_verification(queue_path, pr_number, attempt_id,
 def cmd_prepare_snapshot(args, log):
     try:
         import submission_snapshot as snapshots
-        item, application_id = _snapshot_claim(args.queue, args.pr, args.attempt_id)
+        item, application_id = _snapshot_claim(args.queue, args.pr, args.attempt_id,
+                                               args.runner_id, args.session_ref)
         # A failed re-prepare cannot leave an older verification authorizing Submit.
         old_id = item.get("prepared_snapshot_id")
         if old_id:
             _clear_snapshot_verification(args.queue, args.pr, args.attempt_id,
-                                         application_id, old_id)
+                                         application_id, old_id,
+                                         args.runner_id, args.session_ref)
         root = _snapshot_store(SNAPSHOT_ROOT, args.repo)
         prepared = snapshots.prepare_snapshot(
             args.pdf, args.answers, root, application_id, args.attempt_id,
@@ -2004,6 +2574,9 @@ def cmd_prepare_snapshot(args, log):
                     or current.get("claim_application_id") != application_id
                     or claim_is_stale(current)):
                 raise QueueStateError("attempt changed while the snapshot was being prepared")
+            if not _attempt_owner_matches(current, args.attempt_id, args.runner_id,
+                                          args.session_ref, allow_legacy_omission=True):
+                raise QueueStateError("snapshot write does not match the browser owner")
             current.update({
                 "prepared_snapshot_id": prepared["snapshot_id"],
                 "prepared_snapshot_application_id": application_id,
@@ -2027,14 +2600,16 @@ def cmd_prepare_snapshot(args, log):
 def cmd_verify_snapshot(args, log):
     try:
         import submission_snapshot as snapshots
-        item, application_id = _snapshot_claim(args.queue, args.pr, args.attempt_id)
+        item, application_id = _snapshot_claim(args.queue, args.pr, args.attempt_id,
+                                               args.runner_id, args.session_ref)
         snapshot_id = item.get("prepared_snapshot_id")
         if (item.get("prepared_snapshot_application_id") != application_id
                 or item.get("prepared_snapshot_attempt_id") != args.attempt_id
                 or not snapshot_id):
             raise QueueStateError("no prepared snapshot belongs to this application and attempt")
         _clear_snapshot_verification(args.queue, args.pr, args.attempt_id,
-                                     application_id, snapshot_id)
+                                     application_id, snapshot_id,
+                                     args.runner_id, args.session_ref)
         root = _snapshot_store(SNAPSHOT_ROOT, args.repo)
         snapshots.verify_snapshot(root, snapshot_id, application_id, args.attempt_id,
                                   args.pdf, args.answers)
@@ -2050,6 +2625,9 @@ def cmd_verify_snapshot(args, log):
                     or _canonical_queue_identity(current) != application_id
                     or claim_is_stale(current)):
                 raise QueueStateError("attempt or prepared snapshot changed during verification")
+            if not _attempt_owner_matches(current, args.attempt_id, args.runner_id,
+                                          args.session_ref, allow_legacy_omission=True):
+                raise QueueStateError("snapshot write does not match the browser owner")
             current.update({
                 "snapshot_verified_id": snapshot_id,
                 "snapshot_verified_application_id": application_id,
@@ -2081,10 +2659,14 @@ def _verification_state(item):
 def _post_submission_snapshot(args, log):
     """Shared post-confirmation repair; the durable outcome never reopens."""
     try:
-        _finalize_snapshot_attempt(args.queue, args.pr, args.attempt_id, args.repo)
+        _finalize_snapshot_attempt(args.queue, args.pr, args.attempt_id, args.repo,
+                                   getattr(args, "runner_id", None),
+                                   getattr(args, "session_ref", None))
         return False
     except (OSError, QueueStateError, ValueError):
-        _record_snapshot_failure(args.queue, args.pr, args.attempt_id)
+        _record_snapshot_failure(args.queue, args.pr, args.attempt_id,
+                                 getattr(args, "runner_id", None),
+                                 getattr(args, "session_ref", None))
         log("queue: submission is recorded; snapshot provenance needs attention. "
             "Inspect snapshot_error; repair retained evidence with queue.py "
             "finalize-snapshot --pr %s --attempt-id %s. Never resubmit."
@@ -2092,7 +2674,8 @@ def _post_submission_snapshot(args, log):
         return True
 
 
-def _finalize_snapshot_attempt(queue_path, pr_number, attempt_id, private_repo=None):
+def _finalize_snapshot_attempt(queue_path, pr_number, attempt_id, private_repo=None,
+                               runner_id=None, session_ref=None):
     """Finalize only an already submitted row; never creates a submission."""
     import submission_snapshot as snapshots
     with queue_lock(queue_path):
@@ -2103,6 +2686,10 @@ def _finalize_snapshot_attempt(queue_path, pr_number, attempt_id, private_repo=N
                 or item.get("attempt_id") != attempt_id
                 or item.get("submitted_attempt_id") != attempt_id):
             raise QueueStateError("snapshot finalization requires the matching submitted attempt")
+        owner = _owner_for_item(item)
+        if owner is not None and not _attempt_owner_matches(
+                item, attempt_id, runner_id, session_ref, allow_legacy_omission=True):
+            raise QueueStateError("snapshot finalization does not match the browser owner")
         application_id = _canonical_queue_identity(item)
         snapshot_id = item.get("prepared_snapshot_id")
         if (not snapshot_id or item.get("prepared_snapshot_attempt_id") != attempt_id
@@ -2123,6 +2710,11 @@ def _finalize_snapshot_attempt(queue_path, pr_number, attempt_id, private_repo=N
                 or current.get("prepared_snapshot_id") != snapshot_id
                 or _canonical_queue_identity(current) != application_id):
             raise QueueStateError("submitted attempt changed during snapshot finalization")
+        owner = _owner_for_item(current)
+        if owner is not None and not _attempt_owner_matches(
+                current, attempt_id, runner_id, session_ref,
+                allow_legacy_omission=True):
+            raise QueueStateError("snapshot finalization does not match the browser owner")
         verified = _verification_state(current) != "missing_or_mismatched"
         current.update({"snapshot_id": finalized_id,
                         "snapshot_provenance": "complete" if verified else "incomplete",
@@ -2137,7 +2729,8 @@ def _finalize_snapshot_attempt(queue_path, pr_number, attempt_id, private_repo=N
         raise QueueStateError("pre-submit verification is missing")
 
 
-def _record_snapshot_failure(queue_path, pr_number, attempt_id):
+def _record_snapshot_failure(queue_path, pr_number, attempt_id,
+                             runner_id=None, session_ref=None):
     """Keep a terminal submission and prepared reference after a storage fault."""
     try:
         with queue_lock(queue_path):
@@ -2147,6 +2740,11 @@ def _record_snapshot_failure(queue_path, pr_number, attempt_id):
             if (current.get("status") != "submitted"
                     or current.get("attempt_id") != attempt_id
                     or current.get("submitted_attempt_id") != attempt_id):
+                return
+            owner = _owner_for_item(current)
+            if owner is not None and not _attempt_owner_matches(
+                    current, attempt_id, runner_id, session_ref,
+                    allow_legacy_omission=True):
                 return
             if not current.get("prepared_snapshot_id"):
                 current["snapshot_provenance"] = "unknown"
@@ -2174,9 +2772,11 @@ def _record_snapshot_failure(queue_path, pr_number, attempt_id):
 
 def cmd_finalize_snapshot(args, log):
     try:
-        _finalize_snapshot_attempt(args.queue, args.pr, args.attempt_id, args.repo)
+        _finalize_snapshot_attempt(args.queue, args.pr, args.attempt_id, args.repo,
+                                   args.runner_id, args.session_ref)
     except (OSError, QueueStateError, ValueError) as exc:
-        _record_snapshot_failure(args.queue, args.pr, args.attempt_id)
+        _record_snapshot_failure(args.queue, args.pr, args.attempt_id,
+                                 args.runner_id, args.session_ref)
         log("queue: submitted attempt remains terminal; snapshot repair failed: " + str(exc))
         return 1
     log("queue: finalized snapshot provenance for submitted attempt #%s" % args.pr)
@@ -2251,6 +2851,13 @@ def cmd_reconcile(args, log):
                 raise QueueStateError("reconcile applies only to outcome_unknown attempts")
             if not item.get("attempt_id") or item.get("attempt_id") != args.attempt_id:
                 raise QueueStateError("attempt ID does not match the unresolved attempt")
+            owner = _owner_for_item(item)
+            if owner is not None:
+                if not _attempt_owner_matches(
+                        item, args.attempt_id, args.runner_id, args.session_ref,
+                        allow_legacy_omission=True):
+                    raise QueueStateError("attempt, runner, or session does not own this browser")
+                _materialize_legacy_owner(item)
             evidence = {
                 "kind": "not_submitted" if args.result == "retry" else "submission_confirmed",
                 "source": evidence_source,
@@ -2261,10 +2868,12 @@ def cmd_reconcile(args, log):
                 evidence, sort_keys=True, separators=(",", ":"))
             if args.result == "retry":
                 _append_attempt_history(item, evidence)
+                item["reconciled_attempt_id"] = args.attempt_id
                 for key in ("attempt_id", "attempt_state", "submit_gate", "claimed_at",
                             "outcome_unknown_at", "next_action", "claim_application_id",
                             "claim_profile_path", "claim_profile_sha256", "claim_jd_sha256",
-                            "eligibility_evidence"):
+                            "eligibility_evidence", "submit_started_at",
+                            "submit_started_attempt_id"):
                     item.pop(key, None)
                 item["status"] = "queued"
             else:
@@ -2409,7 +3018,14 @@ def build_parser():
     c.add_argument("--repo", default=REPO_DIR,
                    help="resume clone with current postings, profile, and tracker")
     c.add_argument("--profile", help="exact profile.yaml path (default: <repo>/data/profile.yaml)")
-    c.add_argument("--pr", type=int, required=True, help="PR number of the queued item")
+    claim_target = c.add_mutually_exclusive_group(required=True)
+    claim_target.add_argument("--pr", type=int, help="PR number of the queued item")
+    claim_target.add_argument("--next", dest="claim_next", action="store_true",
+                              help="atomically claim the oldest queued eligible item")
+    c.add_argument("--runner-id", help="unique browser runner owner")
+    c.add_argument("--session-ref", help="exact browser session reference")
+    c.add_argument("--lease-seconds", type=int, default=ATTEMPT_LEASE_SECONDS,
+                   help="recovery deadline metadata; expiry never releases ownership")
     c.add_argument("--json", action="store_true")
 
     s = sub.add_parser("status", help="update an item (drain bookkeeping)")
@@ -2419,15 +3035,20 @@ def build_parser():
                         "(env JOBSEARCH_REPO)")
     s.add_argument("--pr", type=int, required=True, help="PR number of the item")
     s.add_argument("--status", required=True,
-                   choices=["queued", "in_progress", "submitted", "failed"],
-                   help="only submitted confirmation or terminal pre-claim failure")
+                   choices=["queued", "in_progress", "submitted", "failed",
+                            "blocked", "skipped"],
+                   help="record an exact attempt outcome or terminal pre-claim failure")
     s.add_argument("--attempt-id", help="ID returned by a successful durable claim")
+    s.add_argument("--runner-id", help="must match the attempt's browser owner")
+    s.add_argument("--session-ref", help="must match the attempt's browser session")
     s.add_argument("--date", help="submission date (YYYY-MM-DD); required for submitted")
     s.add_argument("--sent", help="exactly what was sent, required for submitted")
     s.add_argument("--confirmation-evidence",
                     help="observed employer confirmation, required for submitted")
     s.add_argument("--route", help="submission route (site/ATS or LinkedIn Easy Apply)")
     s.add_argument("--notes", help="free-form note (required for failed)")
+    s.add_argument("--evidence-source", help="specific source for blocked or skipped outcome")
+    s.add_argument("--evidence-observation", help="concrete blocker or exclusion evidence")
     s.add_argument("--no-tracker", action="store_true",
                    help="skip the automatic applications.yaml write-back "
                         "(e.g. when the row was appended by hand)")
@@ -2443,6 +3064,8 @@ def build_parser():
                       help="private resume repo used to verify available source commits")
     prep.add_argument("--pr", type=int, required=True)
     prep.add_argument("--attempt-id", required=True)
+    prep.add_argument("--runner-id", help="must match the attempt's browser owner")
+    prep.add_argument("--session-ref", help="must match the attempt's browser session")
     prep.add_argument("--pdf", required=True, help="exact selected resume PDF")
     prep.add_argument("--answers", required=True, help="exact selected answers JSON")
     prep.add_argument("--operator-verification", required=True,
@@ -2455,8 +3078,42 @@ def build_parser():
                         help="private resume repo, excluded from snapshot storage")
     verify.add_argument("--pr", type=int, required=True)
     verify.add_argument("--attempt-id", required=True)
+    verify.add_argument("--runner-id", help="must match the attempt's browser owner")
+    verify.add_argument("--session-ref", help="must match the attempt's browser session")
     verify.add_argument("--pdf", required=True, help="same selected resume PDF")
     verify.add_argument("--answers", required=True, help="same selected answers JSON")
+
+    begin = sub.add_parser("begin-submit",
+                           help="persist the exact attempt's pre-submit marker")
+    add_common(begin)
+    begin.add_argument("--pr", type=int, required=True)
+    begin.add_argument("--attempt-id", required=True)
+    begin.add_argument("--runner-id", required=True)
+    begin.add_argument("--session-ref", required=True)
+    begin.add_argument("--json", action="store_true")
+
+    owner = sub.add_parser("browser-owner", help="show the durable browser slot owner")
+    add_common(owner)
+    owner.add_argument("--json", action="store_true")
+
+    finish = sub.add_parser("finish-attempt",
+                            help="release browser ownership after independent verification")
+    add_common(finish)
+    finish.add_argument("--pr", type=int, required=True)
+    finish.add_argument("--attempt-id", required=True)
+    finish.add_argument("--runner-id", required=True)
+    finish.add_argument("--session-ref", required=True)
+    finish.add_argument("--termination-evidence", required=True,
+                        help="JSON passed to the independent ownership verifier")
+    finish.add_argument("--json", action="store_true")
+
+    resume = sub.add_parser("resume", help="requeue a blocked attempt after evidence clears it")
+    add_common(resume)
+    resume.add_argument("--pr", type=int, required=True)
+    resume.add_argument("--attempt-id", required=True)
+    resume.add_argument("--evidence-source", required=True)
+    resume.add_argument("--evidence-observation", required=True)
+    resume.add_argument("--json", action="store_true")
 
     finalize = sub.add_parser("finalize-snapshot",
                               help="repair provenance for a recorded submission; never submits")
@@ -2465,6 +3122,8 @@ def build_parser():
                           help="private resume repo, excluded from snapshot storage")
     finalize.add_argument("--pr", type=int, required=True)
     finalize.add_argument("--attempt-id", required=True)
+    finalize.add_argument("--runner-id", help="must match an active browser owner, when present")
+    finalize.add_argument("--session-ref", help="must match an active browser session, when present")
 
     r = sub.add_parser("release-stale",
                        help="move abandoned claims to outcome_unknown for reconciliation")
@@ -2476,6 +3135,8 @@ def build_parser():
     rec.add_argument("--repo", default=REPO_DIR, help="resume clone for tracker sync")
     rec.add_argument("--pr", type=int, required=True)
     rec.add_argument("--attempt-id", required=True)
+    rec.add_argument("--runner-id", help="must match a runner-owned attempt, when present")
+    rec.add_argument("--session-ref", help="must match a runner-owned session, when present")
     rec.add_argument("--result", required=True, choices=["retry", "submitted"])
     rec.add_argument("--evidence-source", required=True,
                      help="specific portal/history/email source inspected")
@@ -2520,6 +3181,14 @@ def main(argv=None):
             return cmd_prepare_snapshot(args, log)
         if args.cmd == "verify-snapshot":
             return cmd_verify_snapshot(args, log)
+        if args.cmd == "begin-submit":
+            return cmd_begin_submit(args, log)
+        if args.cmd == "browser-owner":
+            return cmd_browser_owner(args, log)
+        if args.cmd == "finish-attempt":
+            return cmd_finish_attempt(args, log)
+        if args.cmd == "resume":
+            return cmd_resume(args, log)
         if args.cmd == "finalize-snapshot":
             return cmd_finalize_snapshot(args, log)
         if args.cmd == "release-stale":
