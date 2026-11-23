@@ -23,7 +23,7 @@ Never do the mechanical half by hand. Never do the judgement half with a regex.
 
 ## Outputs
 
-- A branch named `app/<company-slug>-<role-slug>`.
+- A branch named `app/<slug>`, where `slug` is the work item's recorded value.
 - A changed `variants/<slug>/resume.tex` plus the rendered PDF.
 - One pull request against `main`, body stating the company, role, posting link,
   and which evidence was chosen and why.

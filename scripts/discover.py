@@ -33,7 +33,9 @@ import urllib.error
 import urllib.request
 from datetime import date, datetime, timedelta
 from urllib.parse import urljoin, urlsplit
-from application_identity import identity_evidence, normalize_posting_url, posting_keys, same_posting
+from application_identity import (
+    enrich_posting, identity_evidence, normalize_posting_url, requisition_key, same_posting,
+)
 from config import (default_repo_dir, float_setting, github_repo_setting,
                     int_setting, path_setting, value_setting)
 
@@ -173,8 +175,8 @@ def is_generic_link(link):
 
 
 def dedup_key(p):
-    keys = posting_keys(p)
-    return max(keys, default="")
+    link = normalize_url(p.get("link"))
+    return requisition_key(p) or ("link:" + link if link else "")
 
 
 # ---------------------------------------------------------------- parsing
@@ -526,8 +528,7 @@ def coalesce(postings):
         for f in ("location", "posted", "company", "role"):
             if not cur.get(f) and p.get(f):
                 cur[f] = p[f]
-        for field, value in identity_evidence(p).items():
-            cur.setdefault(field, value)
+        enrich_posting(cur, p)
     return merged
 
 
@@ -540,12 +541,19 @@ def role_filter_split(postings):
     return kept, rejected
 
 
-def merge_postings(existing, incoming, today):
-    """Append new requisitions without conflating identical role titles."""
-    merged, new = list(existing), []
+def merge_postings(existing, incoming, today, limit=0):
+    """Append new requisitions and retain stronger evidence across runs."""
+    merged, new = [dict(row) for row in existing], []
     for p in incoming:
         k = dedup_key(p)
-        if not k or any(same_posting(p, row) for row in merged):
+        if not k:
+            continue
+        matches = [row for row in merged if same_posting(p, row)]
+        if matches:
+            if len(matches) == 1:
+                enrich_posting(matches[0], p)
+            continue
+        if limit > 0 and len(new) >= limit:
             continue
         entry = dict(p)
         entry["key"] = k
@@ -718,12 +726,9 @@ def main(argv=None):
         ensure_repo(args.repo, log)
         existing = read_store(args.repo)
 
-    merged, new = merge_postings(existing, filtered, today)
-    if args.limit and args.limit > 0:
-        new = new[:args.limit]
-        merged = list(existing) + new
+    merged, new = merge_postings(existing, filtered, today, args.limit)
 
-    if not args.dry_run and new:
+    if not args.dry_run and merged != existing:
         write_store(args.repo, merged)
         commit_and_push(args.repo, len(new), log)
     elif not args.dry_run and not new:

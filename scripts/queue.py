@@ -1182,6 +1182,7 @@ def _check_claim_identities(item, queue_items, tracker_rows, posting):
     import application_identity as identity
     _canonical_queue_identity(item)
     target = dict(item, **identity.identity_evidence(posting))
+    target["link"] = posting.get("link") or item.get("link")
     if sum(1 for row in queue_items if identity.same_posting(row, target)) != 1:
         raise QueueStateError("queue posting link has a duplicate or conflicting alias")
     target_index = queue_items.index(item)
@@ -1233,8 +1234,8 @@ def _read_claim_inputs(args, item, queue_items):
         raise QueueStateError("current postings are unavailable or malformed") from exc
     if not isinstance(postings, list) or any(not isinstance(row, dict) for row in postings):
         raise QueueStateError("current postings must be a list of objects")
-    matches = [row for row in postings if identity.same_posting(row, item)]
-    if len(matches) != 1:
+    matches = identity.matching_routes(item, postings)
+    if len(matches) != 1 or not identity.same_posting(matches[0], item):
         raise QueueStateError("posting link does not identify exactly one current posting")
     posting = dict(matches[0])
     clean_meta, meta_verdict, meta_findings = tailor.guard_posting_metadata(posting)
@@ -1544,7 +1545,7 @@ def enqueue(existing, prs_with_trackers, include_submitted=False, limit=0):
     Each PR mapping carries ``files`` (its changed paths) and ``_tracker`` (the
     ``applications.yaml`` text at its merge commit). Idempotent by PR number.
     """
-    from application_identity import identity_evidence, posting_keys, same_posting
+    from application_identity import identity_evidence, matching_routes, posting_keys, same_posting
     items = [dict(it) for it in existing]
     seen = {pr_number_of(it) for it in items}
     seen.discard(0)
@@ -1569,12 +1570,13 @@ def enqueue(existing, prs_with_trackers, include_submitted=False, limit=0):
             skipped.append((number, "already submitted in tracker"))
             continue
         item = build_item(pr, entry, vp, include_submitted=include_submitted)
-        postings = [row for row in pr.get("_postings", ()) if same_posting(item, row)]
-        if len(postings) > 1:
+        postings = matching_routes(item, pr.get("_postings", ()))
+        if len(postings) > 1 or (postings and not same_posting(item, postings[0])):
             skipped.append((number, "posting identity requires review"))
             continue
         if postings:
             item.update(identity_evidence(postings[0]))
+            item["link"] = normalize_url(postings[0].get("link")) or item["link"]
         if any(same_posting(item, row)
                or (not posting_keys(item) and active_key(item) == active_key(row))
                for row in active):

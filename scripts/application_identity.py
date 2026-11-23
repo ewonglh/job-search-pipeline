@@ -1,6 +1,6 @@
 """Shared application identity and conservative tracker/queue reconciliation.
 
-IDs are stable strings: ``link:<normalized posting URL>``, ``pr:<number>``, or
+IDs are stable strings scoped to a verified requisition, a posting URL, a PR, or
 ``identity:<exact employer>|<exact role>``. The resolver returns a routing map
 for every accepted alias and explicit, inspectable conflicts for anything it
 cannot safely reconcile.
@@ -105,6 +105,23 @@ def identity_evidence(row: dict) -> dict:
     return {key: row[key] for key in ("requisition_id", "requisition_evidence",
                                       "apply_url", "apply_url_evidence")
             if row.get(key)}
+
+
+def enrich_posting(existing: dict, observed: dict) -> None:
+    """Keep each new value paired with the evidence that established it."""
+    if not requisition_key(existing) and requisition_key(observed):
+        for key in ("requisition_id", "requisition_evidence"):
+            existing[key] = observed[key]
+    if (not existing.get("apply_url_evidence") and observed.get("apply_url_evidence")
+            and normalize_posting_url(observed.get("apply_url"))):
+        for key in ("apply_url", "apply_url_evidence"):
+            existing[key] = observed[key]
+
+
+def matching_routes(posting: dict, rows) -> list[dict]:
+    """Include conflicting claims on a route so callers can surface ambiguity."""
+    keys = posting_keys(posting)
+    return [row for row in rows if keys & posting_keys(row)]
 
 
 def application_id(row: dict) -> str:
@@ -246,6 +263,11 @@ def resolve_applications(tracker_rows: list[dict], queue_rows: list[dict],
             continue
         prs = {alias for i in indexes for alias in records[i]["aliases"]
                if alias.startswith("pr:")}
+        requisitions = {requisition_key(records[i]["row"]) for i in indexes} - {""}
+        if len(requisitions) > 1:
+            emit_conflict("conflicting_requisitions", indexes, requested | requisitions,
+                          "An explicit alias cannot combine different verified requisitions.")
+            continue
         if len(prs) > 1:
             emit_conflict("explicit_alias_pr_conflict", indexes, requested | prs,
                           "An explicit alias cannot combine contradictory PR submission facts.")
@@ -280,12 +302,12 @@ def resolve_applications(tracker_rows: list[dict], queue_rows: list[dict],
 
     # Link identity groups are definitive only when each source contributes
     # one distinct row. Multiple rows with the same link can be contradictory.
-    by_link = defaultdict(set)
+    by_posting = defaultdict(set)
     for index, record in enumerate(records):
         if index in consumed:
             continue
         for key in posting_keys(record["row"]):
-            by_link[key].add(index)
+            by_posting[key].add(index)
     for index, record in enumerate(records):
         if index in consumed:
             continue
@@ -296,7 +318,7 @@ def resolve_applications(tracker_rows: list[dict], queue_rows: list[dict],
                 continue
             connected.add(current)
             for key in posting_keys(records[current]["row"]):
-                pending.extend(by_link[key] - connected)
+                pending.extend(by_posting[key] - connected)
         if len(connected) < 2:
             continue
         indexes = sorted(connected)
@@ -347,6 +369,11 @@ def resolve_applications(tracker_rows: list[dict], queue_rows: list[dict],
                           "PR reference does not identify exactly one tracker and one queue row.")
             continue
         combined = tracker + queue
+        requisitions = {requisition_key(records[i]["row"]) for i in combined} - {""}
+        if len(requisitions) > 1:
+            emit_conflict("conflicting_requisitions", combined, {pr_id} | requisitions,
+                          "A shared PR points to different verified requisitions.")
+            continue
         td = _submission_dates([records[i]["row"] for i in tracker], "tracker")
         qd = _submission_dates([records[i]["row"] for i in queue], "queue")
         if td and qd and td != qd:

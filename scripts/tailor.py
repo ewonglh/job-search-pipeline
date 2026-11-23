@@ -917,15 +917,16 @@ def bare_app_branches(repo_dir, open_heads, log=lambda *a: None):
     return sorted(b for b in branches if b not in open_heads)
 
 
+def work_slug(posting):
+    """Derive a work filename and branch slug from its requisition."""
+    from application_identity import application_id
+    base = f"{slugify(posting.get('company', ''))}-{slugify(posting.get('role', ''))}"
+    return f"{base}-{_digest_bytes(application_id(posting).encode('utf-8'))[:12]}"
+
+
 def assign_slugs(selected):
     """Derive filenames that remain stable across independent runs."""
-    from application_identity import application_id
-    out = []
-    for p in selected:
-        base = f"{slugify(p.get('company', ''))}-{slugify(p.get('role', ''))}"
-        slug = f"{base}-{_digest_bytes(application_id(p).encode('utf-8'))[:12]}"
-        out.append((p, slug))
-    return out
+    return [(posting, work_slug(posting)) for posting in selected]
 
 
 # ---------------------------------------------------------------- work items
