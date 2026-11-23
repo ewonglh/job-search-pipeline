@@ -29,7 +29,10 @@ import subprocess
 import sys
 import urllib.parse
 
-from review_contract import approval_result, canonical_sha256
+from application_identity import (application_id, normalize_posting_url as normalize_url,
+                                  posting_keys)
+from posting_admission import configured_max_age_days, freshness_exclusion
+from review_contract import approval_result, canonical_sha256, posting_evidence
 from config import (default_repo_dir, default_runtime_path, github_repo_setting,
                     path_setting)
 
@@ -56,17 +59,6 @@ def gh_json(args):
     if proc.returncode != 0:
         raise RuntimeError(proc.stderr.strip() or "gh failed")
     return json.loads(proc.stdout or "null")
-
-
-def normalize_url(url):
-    try:
-        p = urllib.parse.urlsplit(str(url or "").strip())
-    except ValueError:
-        return ""
-    if p.scheme.lower() not in ("http", "https") or not p.netloc:
-        return ""
-    return urllib.parse.urlunsplit(
-        (p.scheme.lower(), p.netloc.lower(), p.path.rstrip("/"), "", "")).lower()
 
 
 def _strip_yaml_comment(line):
@@ -296,7 +288,7 @@ def _git_blob_sha256(repo, revision, path):
 
 def preflight_candidate(pr, review, work_item=None, queue_module=None,
                         tailor_module=None, queue_file=None, gates_file=None,
-                        repo_dir=None):
+                        repo_dir=None, max_age_days=None, today=None):
     """Fail closed on snapshot provenance, caps, queue duplicates and tracker state."""
     q = queue_module or _load_service_module("jobsearch_queue_for_automerge", "queue.py")
     tailor = tailor_module or _load_service_module("jobsearch_tailor_for_automerge", "tailor.py")
@@ -312,11 +304,14 @@ def preflight_candidate(pr, review, work_item=None, queue_module=None,
             return False, "review posting identity differs from the work item"
         if not isinstance(work_item.get("jd_text"), str) or not work_item["jd_text"].strip():
             return False, "current job description is unavailable"
-        jd_hash = hashlib.sha256(work_item["jd_text"].encode("utf-8")).hexdigest()
+        observed = posting_evidence(work_item, work_item["jd_text"])
+        for key in ("posting_evidence_version", "posting_identity"):
+            if provenance.get(key) != observed[key]:
+                return False, "review requisition evidence requires revalidation"
         profile = work_item.get("profile")
         if not isinstance(profile, dict):
             return False, "current profile is unavailable"
-        if provenance.get("current_jd_sha256") != jd_hash:
+        if provenance.get("current_jd_sha256") != observed["current_jd_sha256"]:
             return False, "review is for a different job description"
         if provenance.get("profile_sha256") != canonical_sha256(profile):
             return False, "review is for a different profile"
@@ -417,12 +412,16 @@ def preflight_candidate(pr, review, work_item=None, queue_module=None,
         company, role = str(work_item.get("company") or "").strip(), str(work_item.get("role") or "").strip()
         if not company or not role:
             return False, "work item company or role is missing"
-        candidate = {"company": company, "role": role, "link": posting_link,
-                     "pr_number": int(pr["number"])}
-        active = q.active_key(candidate)
+        candidate = {key: work_item[key] for key in
+                     ("requisition_id", "requisition_evidence", "apply_url",
+                      "apply_url_evidence") if key in work_item}
+        candidate.update({"company": company, "role": role, "link": posting_link,
+                          "pr_number": int(pr["number"])})
+        candidate_keys = posting_keys(candidate)
         unfinished = set(getattr(q, "UNFINISHED", ("queued", "in_progress"))) | {"outcome_unknown"}
         for item in queue_items:
-            if item.get("status") in unfinished and q.active_key(item) == active:
+            if (item.get("status") in unfinished
+                    and candidate_keys & posting_keys(item)):
                 return False, "posting already has an active queue item"
 
         tracker = _strict_rows(main_revision.text, "current applications tracker", q)
@@ -436,8 +435,33 @@ def preflight_candidate(pr, review, work_item=None, queue_module=None,
             if link in tracker_links:
                 return False, "current applications tracker has duplicate posting identities"
             tracker_links.add(link)
-            if link == posting_link and q.canonical_submitted(item.get("status")):
+            if (q.canonical_submitted(item.get("status"))
+                    and candidate_keys & posting_keys(item)):
                 return False, "posting already submitted in applications tracker"
+
+        try:
+            postings = json.loads(_git_output(repo, "show", main_commit + ":" + tailor.POSTINGS_PATH))
+        except (ValueError, OSError):
+            return False, "current posting store is unavailable or malformed"
+        if not isinstance(postings, list) or any(not isinstance(row, dict) for row in postings):
+            return False, "current posting store is malformed"
+        matched = [posting for posting in postings
+                   if normalize_url(posting.get("link")) == posting_link]
+        if len(matched) != 1 or application_id(matched[0]) != observed["posting_identity"]:
+            return False, "current posting identity is unavailable or conflicts with the review"
+        posting = matched[0]
+        reason = freshness_exclusion(posting, today=today,
+                                     max_age_days=max_age_days)
+        if reason:
+            return False, reason
+        fetched = tailor.fetch_jd(posting)
+        if not isinstance(fetched, dict):
+            return False, "current job description is unavailable"
+        current = posting_evidence(posting, fetched.get("jd_text"))
+        if tailor.is_explicitly_closed(fetched["jd_text"]):
+            return False, "current posting is explicitly closed"
+        if current != observed:
+            return False, "current job description differs from the reviewed evidence"
         return True, "clear"
     except Exception as exc:
         return False, "preflight failed: " + str(exc)
@@ -464,7 +488,7 @@ def evaluate_readiness(prs, reviewed, skip_prs, skip_links, merged_index,
                        preflight=None, work_items=None):
     """Produce auditable ready/blocked rows without performing any write."""
     preflight = preflight or preflight_candidate
-    prepared, numbers, links = [], {}, {}
+    prepared, numbers, identities = [], {}, {}
     for pr in prs:
         try:
             number = int(pr.get("number"))
@@ -479,9 +503,11 @@ def evaluate_readiness(prs, reviewed, skip_prs, skip_links, merged_index,
             item = (work_items[number] if work_items is not None
                     else load_work_item(pr))
             identity = candidate_links(pr, item)[0]
-            links.setdefault(identity, []).append(number)
+            keys = posting_keys(item)
+            for key in keys:
+                identities.setdefault(key, []).append(number)
             prepared.append({"pr": pr, "number": number, "item": item,
-                             "link": identity})
+                             "link": identity, "identity_keys": keys})
         except Exception as exc:
             prepared.append({"pr": pr, "number": number,
                              "reason": "posting identity unavailable: " + str(exc)})
@@ -512,7 +538,8 @@ def evaluate_readiness(prs, reviewed, skip_prs, skip_links, merged_index,
             reason = "posting link is in skipped.yaml (owner skip)"
         if not reason and link in merged_index:
             reason = "posting link already has a merged PR"
-        if not reason and len(links.get(link, [])) > 1:
+        if not reason and any(len(identities.get(key, [])) > 1
+                              for key in row.get("identity_keys", ())):
             reason = "another open PR has the same posting identity"
         if not reason and unavailable_identity:
             reason = "another open app PR has an unavailable posting identity"
@@ -531,15 +558,22 @@ def main(argv=None):
                     help="report readiness without changing GitHub or local state")
     ap.parse_args(argv)
     try:
+        max_age_days = configured_max_age_days()
+        run_date = datetime.date.today()
         reviewed = load_reviewed()
         skip_prs, skip_links = load_skips()
         merged_index = load_merged_pr_index()
         prs = open_app_prs()
-    except Exception as exc:
+    except (Exception, SystemExit) as exc:
         log("automerge: blocked because an input is unavailable or malformed: " + str(exc))
         return 2
 
-    results = evaluate_readiness(prs, reviewed, skip_prs, skip_links, merged_index)
+    def command_preflight(pr, review, item):
+        return preflight_candidate(pr, review, item, max_age_days=max_age_days,
+                                   today=run_date)
+
+    results = evaluate_readiness(prs, reviewed, skip_prs, skip_links, merged_index,
+                                 preflight=command_preflight)
     if not results:
         print("automerge: no open app/* PRs")
         return 0
