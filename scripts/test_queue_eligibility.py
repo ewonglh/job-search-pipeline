@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Synthetic claim-boundary checks for current identity and eligibility."""
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -8,6 +9,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+from datetime import date
 from unittest import mock
 
 import queue as q
@@ -27,7 +29,7 @@ def publish_tracker(clone, text):
     """Commit a tracker on the clone's main and push it to its origin."""
     with open(os.path.join(clone, "applications.yaml"), "w", encoding="utf-8") as fh:
         fh.write(text)
-    git(clone, "add", "applications.yaml")
+    git(clone, "add", "-A")
     git(clone, "commit", "-q", "--allow-empty", "-m", "tracker")
     git(clone, "push", "-q", "origin", "main")
     return git(clone, "rev-parse", "HEAD")
@@ -41,6 +43,19 @@ def other_lane(case):
                               other], check=True, capture_output=True)
     git(other, "pull", "-q", "--ff-only", "origin", "main")
     return other
+
+
+def publish_postings(case, rows):
+    """Change the authoritative synthetic main posting snapshot."""
+    lane = other_lane(case)
+    with open(os.path.join(lane, "data", "postings.json"), "w", encoding="utf-8") as fh:
+        json.dump(rows, fh)
+    git(lane, "add", "data/postings.json")
+    git(lane, "commit", "-q", "-m", "postings")
+    git(lane, "push", "-q", "origin", "main")
+    git(case["repo"], "fetch", "-q", "origin",
+        "+refs/heads/main:refs/remotes/origin/main")
+    return git(lane, "rev-parse", "HEAD")
 
 
 PROFILE = """availability: 1 May 2027 to 31 August 2027
@@ -96,11 +111,12 @@ def make_case(root, *, posting_rows=None, item=None, profile=PROFILE,
             "gates": gates_path, "queue": queue_path, "posting": posting}
 
 
-def run_claim(case):
+def run_claim(case, error=None):
     args = ["claim", "--queue", case["queue"], "--repo", case["repo"],
             "--profile", case["profile"], "--pr", "12",
             "--runner-id", "eligibility-runner", "--session-ref", "eligibility-session"]
-    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+    with contextlib.redirect_stdout(io.StringIO()), \
+            contextlib.redirect_stderr(error if error is not None else io.StringIO()):
         with mock.patch.object(tailor, "SKIPPED_FILE", case["skipped"]), \
                 mock.patch.object(tailor, "GATE_FILE", case["gates"]), \
                 mock.patch.dict(os.environ, {
@@ -130,8 +146,48 @@ with tempfile.TemporaryDirectory() as directory:
     # The claim records the exact tracker commit its checks were bound to.
     assert evidence["tracker_commit"] == git(case["repo"], "rev-parse", "origin/main")
     assert len(evidence["tracker_sha256"]) == 64
+    assert evidence["posting_revision"] == evidence["tracker_commit"]
+    assert evidence["postings_sha256"] == hashlib.sha256(
+        git(case["repo"], "show", evidence["posting_revision"] + ":data/postings.json")
+        .encode("utf-8")).hexdigest()
     assert git(case["repo"], "for-each-ref", "refs/jobsearch") == ""
     assert run_claim(case) == 2
+
+
+# A stale worktree cannot override posting facts from the successfully fetched
+# main commit. The fetched valid row still claims despite conflicting local data.
+with tempfile.TemporaryDirectory() as directory:
+    case = make_case(directory)
+    stale = dict(case["posting"], company="Stale Working Tree", role="Closed Role",
+                 added="2020-01-01")
+    with open(os.path.join(case["repo"], "data", "postings.json"), "w", encoding="utf-8") as fh:
+        json.dump([stale], fh)
+    with mock.patch.object(q, "_run_date", return_value=date(2026, 11, 23)), \
+            mock.patch("posting_admission.int_setting", return_value=7), \
+            mock.patch.object(tailor, "fetch_jd", return_value={"jd_text": JD_FIT}):
+        assert run_claim(case) == 0
+    claimed = q.load_queue(case["queue"])[0]
+    evidence = json.loads(claimed["eligibility_evidence"])
+    assert claimed["company"] == "Fixture Co"
+    assert evidence["posting_revision"] == git(case["repo"], "rev-parse", "origin/main")
+
+
+# The shared discovery-age rule blocks a posting that grew stale while queued,
+# before fetching a JD or acquiring a browser owner.
+with tempfile.TemporaryDirectory() as directory:
+    case = make_case(directory, posting_rows=[dict(
+        company="Fixture Co", role="Software Engineering Intern",
+        title="Software Engineering Intern", source="Company ATS", link=LINK,
+        added="2026-11-15")])
+    error = io.StringIO()
+    with mock.patch.object(q, "_run_date", return_value=date(2026, 11, 23)), \
+            mock.patch("posting_admission.int_setting", return_value=7), \
+            mock.patch.object(tailor, "fetch_jd") as fetch:
+        assert run_claim(case, error=error) == 2
+        fetch.assert_not_called()
+    assert "older than 7 days" in error.getvalue(), error.getvalue()
+    stale_row = q.load_queue(case["queue"])[0]
+    assert stale_row["status"] == "queued" and not stale_row.get("attempt_id")
 
 
 # Unknown, conflicting, hostile, owner-skipped, capped, and ambiguous identity
@@ -226,8 +282,6 @@ with tempfile.TemporaryDirectory() as directory:
 with tempfile.TemporaryDirectory() as directory:
     case = make_case(directory, tracker="- company: Other Fixture\n  role: Design Intern\n"
                      "  link: https://fixture.invalid/jobs/other\n  pr_number: 99\n")
-    with open(os.path.join(case["repo"], "data", "postings.json"), "w", encoding="utf-8") as fh:
-        json.dump([case["posting"], dict(case["posting"], link="https://fixture.invalid/jobs/13")], fh)
     prs = [{"number": 13, "headRefName": "app/fixture-co-swe",
                     "title": "app(fixture-co): tailored resume - Software Engineering Intern",
                     "body": "Posting: https://fixture.invalid/jobs/13",
@@ -243,6 +297,8 @@ with tempfile.TemporaryDirectory() as directory:
         if inside_enqueue["active"]:
             return {"jd_text": JD_FIT}
         inside_enqueue["active"] = True
+        publish_postings(case, [case["posting"],
+                                dict(case["posting"], link="https://fixture.invalid/jobs/13")])
         with open(os.path.join(case["repo"], "applications.yaml"), encoding="utf-8") as fh:
             tracker = fh.read()
         def observed(_log, on_page=None):
@@ -362,6 +418,20 @@ with tempfile.TemporaryDirectory() as directory:
     # With nothing moving, the same case claims.
     with mock.patch.object(tailor, "fetch_jd", return_value={"jd_text": JD_FIT}):
         assert run_claim(case) == 0
+
+# A posting update in another lane during JD retrieval invalidates the pinned
+# posting digest under the queue lock, even when the tracker text is unchanged.
+with tempfile.TemporaryDirectory() as directory:
+    case = make_case(directory)
+    error = io.StringIO()
+    def fetch_then_posting_moves(_posting):
+        publish_postings(case, [dict(case["posting"], source="Refreshed source")])
+        return {"jd_text": JD_FIT}
+    with mock.patch.object(tailor, "fetch_jd", side_effect=fetch_then_posting_moves):
+        assert run_claim(case, error=error) == 2
+    assert "posting changed on origin/main after it was refreshed" in error.getvalue(), \
+        error.getvalue()
+    assert_unclaimed(case, "posting moved")
 
 # The local queue is rechecked under the same lock: another row for the same
 # application appears while the JD is fetched, so no attempt marker is written.

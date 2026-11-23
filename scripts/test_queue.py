@@ -76,7 +76,19 @@ def other_lane(clone, root):
     return other
 
 
-def live_enqueue(queue_path, repo, prs=PRS, extra=()):
+def commit_postings(repo):
+    lane = other_lane(repo, os.path.dirname(repo))
+    os.makedirs(os.path.join(lane, "data"), exist_ok=True)
+    shutil.copyfile(os.path.join(repo, "data", "postings.json"),
+                    os.path.join(lane, "data", "postings.json"))
+    git(lane, "add", "data/postings.json")
+    if git(lane, "status", "--porcelain"):
+        git(lane, "commit", "-q", "-m", "postings")
+        git(lane, "push", "-q", "origin", "main")
+
+
+def live_enqueue(queue_path, repo, prs=PRS, extra=(), worktree_postings=None,
+                 posting_added=None, commit_fixture=True):
     # Inject the authenticated GitHub boundary, never a writable fixture CLI
     # flag. The tracker is read through the real refresh from a local origin.
     # Real calls still require the observed owner's merge.
@@ -96,9 +108,15 @@ def live_enqueue(queue_path, repo, prs=PRS, extra=()):
         if link and not any(row["link"] == link for row in postings):
             company, role = q.title_parts(pr)
             postings.append({"company": company, "role": role, "title": role,
-                             "link": link, "added": date.today().isoformat()})
+                             "link": link,
+                             "added": posting_added or date.today().isoformat()})
     with open(os.path.join(repo, "data", "postings.json"), "w", encoding="utf-8") as fh:
         json.dump(postings, fh)
+    if commit_fixture:
+        commit_postings(repo)
+    if worktree_postings is not None:
+        with open(os.path.join(repo, "data", "postings.json"), "w", encoding="utf-8") as fh:
+            json.dump(worktree_postings, fh)
     skipped = os.path.join(root, "skipped.yaml")
     gates = os.path.join(root, "gates.yaml")
     for path in (skipped, gates):
@@ -593,7 +611,23 @@ with tempfile.TemporaryDirectory() as root:
     with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
         assert live_enqueue(path, repo, extra=("--json",)) == 0
     assert "skip #9: already submitted in tracker" in err.getvalue(), err.getvalue()
-    assert "pinned to origin/main " + new_head[:12] in err.getvalue()
+    refreshed_head = git(repo, "rev-parse", "origin/main")
+    assert "pinned to origin/main " + refreshed_head[:12] in err.getvalue()
+
+
+# Enqueue uses postings from the fetched main commit even when the working
+# tree disagrees with it. The current synthetic snapshot admits both PRs.
+with tempfile.TemporaryDirectory() as root:
+    repo = make_remote(root, "[]\n")
+    path = os.path.join(root, "queue.yaml")
+    assert quiet(q.main, ["init", "--queue", path]) == 0
+    with mock.patch.object(q, "_run_date", return_value=date(2026, 11, 23)), \
+            mock.patch("posting_admission.int_setting", return_value=7):
+        assert live_enqueue(path, repo, worktree_postings=[],
+                            posting_added="2026-11-23") == 0
+    rows = q.load_queue(path)
+    assert [row["pr_number"] for row in rows] == [9, 12, 14]
+    assert all(row.get("link") for row in rows)
 
 
 # ---------------------------------------------------------------- failed refresh, cached data
@@ -613,7 +647,7 @@ with tempfile.TemporaryDirectory() as root:
     err = io.StringIO()
     with mock.patch.object(q, "gh_pr_files") as files, \
             contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
-        assert live_enqueue(path, repo, prs) == 1
+        assert live_enqueue(path, repo, prs, commit_fixture=False) == 1
     files.assert_not_called()
     assert "tracker refresh failed" in err.getvalue(), err.getvalue()
     assert "cached data was not used" in err.getvalue()
@@ -687,6 +721,7 @@ with tempfile.TemporaryDirectory() as root:
     with open(os.path.join(repo, "data", "postings.json"), "w", encoding="utf-8") as fh:
         json.dump([{"company": "Dup Co", "role": "Swe", "title": "Swe",
                     "link": duplicate_link, "added": date.today().isoformat()}], fh)
+    commit_postings(repo)
     skipped_path = os.path.join(root, "skipped.yaml")
     gates_path = os.path.join(root, "gates.yaml")
     for fixture_path in (skipped_path, gates_path):

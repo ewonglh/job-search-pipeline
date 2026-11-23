@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Synthetic replay, pagination and admission checks for merge intake."""
 import contextlib
-import hashlib
 import io
 import json
 import os
@@ -18,16 +17,54 @@ import tailor
 LINK = "https://fixture.invalid/jobs/52"
 FILES = [{"path": "variants/fixture-co/resume.tex"}]
 JD = "Current internship description. " * 20
+GIT = ["git", "-c", "user.name=Synthetic", "-c", "user.email=synthetic@example.invalid",
+       "-c", "commit.gpgsign=false"]
+
+
+def git(repo, *args):
+    done = subprocess.run(GIT + ["-C", repo, *args], capture_output=True, text=True)
+    assert done.returncode == 0, (args, done.stderr)
+    return done.stdout.strip()
+
+
+def other_lane(case):
+    other = os.path.join(os.path.dirname(case["repo"]), "other-lane")
+    if not os.path.isdir(other):
+        subprocess.run(GIT + ["clone", "-q", "--branch", "main",
+                              git(case["repo"], "remote", "get-url", "origin"), other],
+                       check=True, capture_output=True)
+    git(other, "pull", "-q", "--ff-only", "origin", "main")
+    return other
+
+
+def publish_postings(case, rows):
+    lane = other_lane(case)
+    with open(os.path.join(lane, "data", "postings.json"), "w", encoding="utf-8") as fh:
+        json.dump(rows, fh)
+    git(lane, "add", "data/postings.json")
+    git(lane, "commit", "-q", "-m", "postings")
+    git(lane, "push", "-q", "origin", "main")
+    git(case["repo"], "fetch", "-q", "origin",
+        "+refs/heads/main:refs/remotes/origin/main")
 
 
 def make_case(root, *, added=None, skipped="[]\n", gates="[]\n"):
     repo = os.path.join(root, "repo")
     os.makedirs(os.path.join(repo, "data"), exist_ok=True)
+    origin = os.path.join(root, "origin.git")
+    subprocess.run(GIT + ["init", "--bare", "-q", "-b", "main", origin], check=True)
+    subprocess.run(GIT + ["init", "-q", "-b", "main", repo], check=True)
+    git(repo, "remote", "add", "origin", origin)
     posting = {"company": "Fixture Co", "role": "Software Engineer Intern",
                "title": "Software Engineer Intern", "source": "Fixture",
                "link": LINK, "added": added or date.today().isoformat()}
     with open(os.path.join(repo, "data", "postings.json"), "w", encoding="utf-8") as fh:
         json.dump([posting], fh)
+    with open(os.path.join(repo, "applications.yaml"), "w", encoding="utf-8") as fh:
+        fh.write("[]\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "fixture")
+    git(repo, "push", "-q", "origin", "main")
     skipped_path = os.path.join(root, "skipped.yaml")
     gates_path = os.path.join(root, "gates.yaml")
     with open(skipped_path, "w", encoding="utf-8") as fh:
@@ -65,12 +102,11 @@ def run_live(case, prs, *, files=FILES, jd_text=JD, fetch_error=None,
                    mock.patch.object(tailor, "fetch_jd", side_effect=fetch_error)
                    if fetch_error else
                    mock.patch.object(tailor, "fetch_jd", return_value={"jd_text": jd_text}))
-    revision = q.TrackerRevision(
-        "a" * 40, tracker, hashlib.sha256(tracker.encode("utf-8")).hexdigest())
+    revision = q.refresh_main_tracker(case["repo"])
+    assert revision.text == tracker
     with mock.patch.object(q, "gh_merged_prs", side_effect=observed), \
             mock.patch.object(q, "gh_pr_files", return_value=files), \
             mock.patch.object(q, "refresh_main_tracker", return_value=revision), \
-            mock.patch.object(q, "verify_tracker_revision", return_value=None), \
             mock.patch.object(q, "GH_REPO", "demo-user/resume"), \
             mock.patch.object(tailor, "SKIPPED_FILE", case["skipped"]), \
             mock.patch.object(tailor, "GATE_FILE", case["gates"]), \
@@ -114,9 +150,6 @@ with tempfile.TemporaryDirectory() as root:
                  for page in pages]
     with mock.patch.object(q, "_run", side_effect=completed), \
             mock.patch.object(q, "gh_pr_files", return_value=FILES), \
-            mock.patch.object(q, "refresh_main_tracker", return_value=q.TrackerRevision(
-                "a" * 40, "[]\n", hashlib.sha256(b"[]\n").hexdigest())), \
-            mock.patch.object(q, "verify_tracker_revision", return_value=None), \
             mock.patch.object(q, "GH_REPO", "demo-user/resume"), \
             mock.patch.object(tailor, "SKIPPED_FILE", case["skipped"]), \
             mock.patch.object(tailor, "GATE_FILE", case["gates"]), \
@@ -167,9 +200,6 @@ with tempfile.TemporaryDirectory() as root:
     with mock.patch.object(q, "gh_merged_prs", side_effect=lambda _log, on_page=None: (
             on_page([pr()]) or [pr()])), \
             mock.patch.object(q, "gh_pr_files", side_effect=AssertionError("should reuse queue")), \
-            mock.patch.object(q, "refresh_main_tracker", return_value=q.TrackerRevision(
-                "a" * 40, "[]\n", hashlib.sha256(b"[]\n").hexdigest())), \
-            mock.patch.object(q, "verify_tracker_revision", return_value=None), \
             mock.patch.object(q, "GH_REPO", "demo-user/resume"), \
             contextlib.redirect_stdout(io.StringIO()):
         assert q.main(["enqueue", "--queue", case["queue"],
@@ -189,20 +219,34 @@ with tempfile.TemporaryDirectory() as root:
     assert saved["state"] == "excluded" and "older than" in saved["reason"]
 
 
-# A posting that ages out during the JD check is rejected before queue insertion.
+# A stale worktree cannot override the posting from fetched main.
 with tempfile.TemporaryDirectory() as root:
     case = make_case(root)
     postings_path = os.path.join(case["repo"], "data", "postings.json")
-    def age_posting_during_fetch(_posting):
+    def stale_worktree_during_fetch(_posting):
         stale = dict(case["posting"], added="2026-01-01")
         with open(postings_path, "w", encoding="utf-8") as fh:
             json.dump([stale], fh)
         return {"jd_text": JD}
-    with mock.patch("posting_admission.int_setting", return_value=7):
-        code, _ = run_live(case, [pr()], fetch_side_effect=age_posting_during_fetch)
-    assert code == 0 and q.load_queue(case["queue"]) == []
+    with mock.patch.object(q, "_run_date", return_value=date(2026, 11, 23)), \
+            mock.patch("posting_admission.int_setting", return_value=7):
+        code, _ = run_live(case, [pr()], fetch_side_effect=stale_worktree_during_fetch)
+    assert code == 0 and len(q.load_queue(case["queue"])) == 1
     saved = q.load_merge_intake(case["queue"])["records"]["52"]
-    assert saved["state"] == "excluded" and "older than" in saved["reason"]
+    assert saved["state"] == "admitted"
+
+
+# A posting commit racing the JD fetch is rejected by the locked digest check.
+with tempfile.TemporaryDirectory() as root:
+    case = make_case(root)
+    def posting_changes_during_fetch(_posting):
+        publish_postings(case, [dict(case["posting"], source="Refreshed source")])
+        return {"jd_text": JD}
+    code, _ = run_live(case, [pr()], fetch_side_effect=posting_changes_during_fetch)
+    assert code == 1 and q.load_queue(case["queue"]) == []
+    saved = q.load_merge_intake(case["queue"])["records"]["52"]
+    assert saved["state"] == "pending"
+    assert "posting changed on origin/main" in saved["reason"]
 
 
 # An authoritative empty changed-file list is a completed non-tailoring exclusion.

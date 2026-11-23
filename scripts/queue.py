@@ -123,7 +123,7 @@ import sys
 import tempfile
 import time
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from config import (default_repo_dir, default_runtime_path, github_repo_setting,
                     path_setting)
 
@@ -1468,17 +1468,39 @@ def _git_bytes(repo, *args, timeout=60):
 
 def _tracker_blob(repo, revision):
     """Tracker bytes at ``revision`` (a commit or local ref); local, no network."""
+    return _revision_blob(repo, revision, TRACKER_PATH, "tracker")
+
+
+def _revision_blob(repo, revision, path, label):
+    """Read one file from a pinned revision without consulting the worktree."""
     try:
-        proc = _git_bytes(repo, "show", "%s:%s" % (revision, TRACKER_PATH))
+        proc = _git_bytes(repo, "show", "%s:%s" % (revision, path))
     except (OSError, subprocess.SubprocessError) as exc:
         raise TrackerRefreshError(
-            "tracker cannot be read at %s: %s" % (revision, type(exc).__name__))
+            "%s cannot be read at %s: %s" % (label, str(revision)[:12],
+                                                type(exc).__name__))
     if proc.returncode != 0:
         raise TrackerRefreshError(
-            "tracker cannot be read at %s: %s" % (
-                revision, _redact(proc.stderr.decode("utf-8", "replace"))
+            "%s cannot be read at %s: %s" % (
+                label, str(revision)[:12],
+                _redact(proc.stderr.decode("utf-8", "replace"))
                 or proc.returncode))
     return proc.stdout
+
+
+def _read_postings_revision(repo, revision):
+    """Return parsed posting facts and their digest from the pinned main commit."""
+    import tailor
+
+    commit = getattr(revision, "commit", revision)
+    blob = _revision_blob(repo, commit, tailor.POSTINGS_PATH, "posting store")
+    try:
+        postings = json.loads(blob.decode("utf-8"))
+    except (UnicodeError, ValueError) as exc:
+        raise QueueStateError("current postings are unavailable or malformed") from exc
+    if not isinstance(postings, list) or any(not isinstance(row, dict) for row in postings):
+        raise QueueStateError("current postings must be a list of objects")
+    return blob, postings, hashlib.sha256(blob).hexdigest()
 
 
 def refresh_main_tracker(repo, log=lambda *a: None, timeout=60):
@@ -1501,18 +1523,26 @@ def refresh_main_tracker(repo, log=lambda *a: None, timeout=60):
     hint = ("tracker refresh failed, so cached data was not used; check network "
             "access and `gh auth status`, then retry")
     try:
-        try:
-            fetched = _git(repo, "fetch", "--quiet", "--no-tags", "origin",
-                           "+refs/heads/main:" + ref,
-                           "+refs/heads/main:refs/remotes/origin/main",
-                           timeout=timeout)
-        except (OSError, subprocess.SubprocessError) as exc:
-            log("queue: tracker refresh failed: " + type(exc).__name__)
-            raise TrackerRefreshError(hint)
-        if fetched.returncode != 0:
-            log("queue: tracker refresh failed: "
-                + (_redact(fetched.stderr) or str(fetched.returncode)))
-            raise TrackerRefreshError(hint)
+        for attempt in range(3):
+            try:
+                fetched = _git(repo, "fetch", "--quiet", "--no-tags", "origin",
+                               "+refs/heads/main:" + ref,
+                               "+refs/heads/main:refs/remotes/origin/main",
+                               timeout=timeout)
+            except (OSError, subprocess.SubprocessError) as exc:
+                log("queue: tracker refresh failed: " + type(exc).__name__)
+                raise TrackerRefreshError(hint)
+            if fetched.returncode == 0:
+                break
+            detail = _redact(fetched.stderr) or str(fetched.returncode)
+            # Concurrent fetches can invalidate Git's expected old value for
+            # origin/main. Refresh the unique pin again against the latest ref.
+            ref_race = ("incorrect old value provided" in detail
+                        or ("cannot lock ref 'refs/remotes/origin/main'" in detail
+                            and "but expected" in detail))
+            if not ref_race or attempt == 2:
+                log("queue: tracker refresh failed: " + detail)
+                raise TrackerRefreshError(hint)
         try:
             proc = _git_bytes(repo, "rev-parse", "--verify", "--quiet",
                               ref + "^{commit}")
@@ -1540,19 +1570,51 @@ def refresh_main_tracker(repo, log=lambda *a: None, timeout=60):
     return TrackerRevision(commit, text, hashlib.sha256(blob).hexdigest())
 
 
-def verify_tracker_revision(repo, revision):
-    """Recheck pinned tracker evidence locally, for use under the queue lock.
+def verify_tracker_revision(repo, revision, postings_sha256=None):
+    """Recheck pinned main evidence locally, for use under the queue lock.
 
     Makes no network call. The pinned commit must still yield identical bytes,
-    and the local ``origin/main`` must not carry a different tracker, which
-    would mean another lane fetched newer state after this refresh.
+    and the local ``origin/main`` must not carry different tracker or (when
+    requested) posting facts, which would mean another lane fetched newer
+    evidence after this refresh.
     """
     if hashlib.sha256(_tracker_blob(repo, revision.commit)).hexdigest() != revision.sha256:
         raise TrackerRefreshError("pinned tracker revision no longer verifies; retry")
-    current = hashlib.sha256(_tracker_blob(repo, "refs/remotes/origin/main")).hexdigest()
+    try:
+        proc = _git_bytes(repo, "rev-parse", "--verify", "--quiet",
+                          "refs/remotes/origin/main^{commit}")
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise TrackerRefreshError(
+            "current origin/main revision cannot be revalidated: %s" % type(exc).__name__)
+    current_commit = proc.stdout.decode("utf-8", "replace").strip()
+    if proc.returncode != 0 or not _COMMIT_RE.fullmatch(current_commit):
+        raise TrackerRefreshError("current origin/main revision cannot be revalidated")
+    current = hashlib.sha256(_tracker_blob(repo, current_commit)).hexdigest()
     if current != revision.sha256:
         raise TrackerRefreshError(
             "tracker changed on origin/main after it was refreshed; retry")
+    if postings_sha256 is not None:
+        import tailor
+
+        pinned_postings = _revision_blob(
+            repo, revision.commit, tailor.POSTINGS_PATH, "posting store")
+        if hashlib.sha256(pinned_postings).hexdigest() != postings_sha256:
+            raise TrackerRefreshError("pinned posting revision no longer verifies; retry")
+        current_postings = _revision_blob(
+            repo, current_commit, tailor.POSTINGS_PATH, "posting store")
+        if hashlib.sha256(current_postings).hexdigest() != postings_sha256:
+            raise TrackerRefreshError(
+                "posting changed on origin/main after it was refreshed; retry")
+    try:
+        latest_proc = _git_bytes(repo, "rev-parse", "--verify", "--quiet",
+                                 "refs/remotes/origin/main^{commit}")
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise TrackerRefreshError(
+            "current origin/main revision changed during revalidation") from exc
+    latest_commit = latest_proc.stdout.decode("utf-8", "replace").strip()
+    if latest_proc.returncode != 0 or latest_commit != current_commit:
+        raise TrackerRefreshError(
+            "origin/main changed during input revalidation; retry")
 
 
 # ---------------------------------------------------------------- enqueue core
@@ -1874,10 +1936,17 @@ def _check_claim_identities(item, queue_items, tracker_rows, posting):
             raise QueueStateError("application is already recorded as submitted")
 
 
-def _read_claim_inputs(args, item, queue_items, log=lambda *a: None):
+def _run_date():
+    """Return the command's run date; tests can pin this boundary explicitly."""
+    return date.today()
+
+
+def _read_claim_inputs(args, item, queue_items, max_age_days, run_date,
+                       log=lambda *a: None):
     import application_identity as identity
     import eligibility
     import tailor
+    from posting_admission import admission_exclusion
     from posting_guard import guard_text
 
     app_id = _canonical_queue_identity(item)
@@ -1888,15 +1957,8 @@ def _read_claim_inputs(args, item, queue_items, log=lambda *a: None):
     tracker_rows = _parse_flat_entries(revision.text, "current application tracker",
                                        required=True)
 
-    postings_path = os.path.join(args.repo, "data", "postings.json")
-    try:
-        with open(postings_path, "rb") as fh:
-            postings_bytes = fh.read()
-        postings = json.loads(postings_bytes.decode("utf-8"))
-    except (OSError, UnicodeError, ValueError) as exc:
-        raise QueueStateError("current postings are unavailable or malformed") from exc
-    if not isinstance(postings, list) or any(not isinstance(row, dict) for row in postings):
-        raise QueueStateError("current postings must be a list of objects")
+    _postings_bytes, postings, postings_sha256 = _read_postings_revision(
+        args.repo, revision)
     matches = identity.matching_routes(item, postings)
     if len(matches) != 1 or not identity.same_posting(matches[0], item):
         raise QueueStateError("posting link does not identify exactly one current posting")
@@ -1929,7 +1991,10 @@ def _read_claim_inputs(args, item, queue_items, log=lambda *a: None):
 
     skipped = _read_flat_entries(args.skipped, "owner skip list", required=True)
     gates = _read_gate_entries(args.gates, required=True)
-    _check_owner_controls(posting, skipped, gates)
+    reason = admission_exclusion(posting, skipped, gates, today=run_date,
+                                 max_age_days=max_age_days)
+    if reason:
+        raise QueueStateError(reason)
     skip_sha256 = _optional_file_hash(args.skipped, "owner skip list", True)
     gate_sha256 = _optional_file_hash(args.gates, "owner application caps", True)
 
@@ -1956,7 +2021,8 @@ def _read_claim_inputs(args, item, queue_items, log=lambda *a: None):
         "decision": decision,
         "profile_path": os.path.abspath(profile_path),
         "profile_sha256": hashlib.sha256(profile_source).hexdigest(),
-        "postings_sha256": hashlib.sha256(postings_bytes).hexdigest(),
+        "posting_revision": revision.commit,
+        "postings_sha256": postings_sha256,
         "tracker_revision": revision,
         "tracker_sha256": revision.sha256,
         "skip_sha256": skip_sha256,
@@ -1983,6 +2049,13 @@ def cmd_claim(args, log):
     claim_next = bool(getattr(args, "claim_next", False))
     if not claim_next and not getattr(args, "pr", None):
         log("queue: claim requires --pr or --next")
+        return 2
+    try:
+        from posting_admission import configured_max_age_days
+        max_age_days = configured_max_age_days()
+        run_date = _run_date()
+    except ValueError as exc:
+        log("queue: claim blocked by freshness configuration: " + str(exc))
         return 2
     try:
         verifier_pin = pin_browser_ownership_verifier()
@@ -2020,7 +2093,7 @@ def cmd_claim(args, log):
         return 2
 
     try:
-        inputs = _read_claim_inputs(args, item, initial, log)
+        inputs = _read_claim_inputs(args, item, initial, max_age_days, run_date, log)
     except (OSError, ValueError, RuntimeError) as exc:
         log("queue: claim blocked: " + str(exc))
         return 2
@@ -2041,7 +2114,8 @@ def cmd_claim(args, log):
             if _canonical_queue_identity(current) != inputs["application_id"]:
                 raise QueueStateError("posting identity changed while eligibility was being checked")
             current_inputs = _read_claim_validation_inputs(
-                args, current, latest, inputs["posting"], inputs["tracker_revision"])
+                args, current, latest, inputs["posting"], inputs["tracker_revision"],
+                inputs["postings_sha256"], max_age_days, run_date)
             expected_inputs = (inputs["profile_sha256"], inputs["postings_sha256"],
                                inputs["tracker_sha256"], inputs["skip_sha256"],
                                inputs["gate_sha256"])
@@ -2103,6 +2177,10 @@ def cmd_claim(args, log):
                     "provenance": inputs["decision"].get("provenance", {}),
                     "tracker_commit": inputs["tracker_revision"].commit,
                     "tracker_sha256": inputs["tracker_revision"].sha256,
+                    "posting_revision": inputs["posting_revision"],
+                    "postings_sha256": inputs["postings_sha256"],
+                    "freshness_run_date": run_date.isoformat(),
+                    "max_age_days": max_age_days,
                     "evaluated_at": now_utc(),
                 }, sort_keys=True, separators=(",", ":")),
             })
@@ -2120,23 +2198,26 @@ def cmd_claim(args, log):
     return 0
 
 
-def _read_claim_validation_inputs(args, item, queue_items, posting, revision):
+def _read_claim_validation_inputs(args, item, queue_items, posting, revision,
+                                  postings_sha256, max_age_days, run_date):
     """Cheap local recheck while holding the queue lock; no network calls.
 
-    Rechecks the pinned tracker revision, then the current local queue, profile,
-    posting store and owner controls against the same identity gates.
+    Rechecks the pinned tracker and posting evidence, then the current queue,
+    profile and owner controls against the same identity gates.
     """
     import application_identity as identity
+    from posting_admission import admission_exclusion
     profile_path = args.profile or os.path.join(args.repo, "data", "profile.yaml")
-    postings_path = os.path.join(args.repo, "data", "postings.json")
     try:
         with open(profile_path, "rb") as fh:
             profile_bytes = fh.read()
-        with open(postings_path, "rb") as fh:
-            postings_bytes = fh.read()
     except OSError as exc:
-        raise QueueStateError("profile or posting store became unavailable") from exc
-    verify_tracker_revision(args.repo, revision)
+        raise QueueStateError("profile became unavailable") from exc
+    _postings_bytes, _postings, current_postings_sha256 = _read_postings_revision(
+        args.repo, revision)
+    if current_postings_sha256 != postings_sha256:
+        raise QueueStateError("pinned posting evidence changed during claim checks")
+    verify_tracker_revision(args.repo, revision, postings_sha256)
     if _canonical_queue_identity(item) != identity.application_id(item):
         raise QueueStateError("application identity changed")
     tracker_rows = _parse_flat_entries(revision.text, "current application tracker",
@@ -2144,9 +2225,12 @@ def _read_claim_validation_inputs(args, item, queue_items, posting, revision):
     _check_claim_identities(item, queue_items, tracker_rows, posting)
     skipped = _read_flat_entries(args.skipped, "owner skip list", required=True)
     gates = _read_gate_entries(args.gates, required=True)
-    _check_owner_controls(posting, skipped, gates)
+    reason = admission_exclusion(posting, skipped, gates, today=run_date,
+                                 max_age_days=max_age_days)
+    if reason:
+        raise QueueStateError(reason)
     return (hashlib.sha256(profile_bytes).hexdigest(),
-            hashlib.sha256(postings_bytes).hexdigest(),
+            current_postings_sha256,
             revision.sha256,
             _optional_file_hash(args.skipped, "owner skip list", True),
             _optional_file_hash(args.gates, "owner application caps", True))
@@ -2206,19 +2290,11 @@ def _emit_intake_report(report, log, allow_seam=True, emit_stdout=True):
     return False
 
 
-def _read_intake_admission_inputs(repo, tailor):
-    postings_path = os.path.join(repo, "data", "postings.json")
-    try:
-        with open(postings_path, "rb") as fh:
-            postings_bytes = fh.read()
-        postings = json.loads(postings_bytes.decode("utf-8"))
-    except (OSError, UnicodeError, ValueError) as exc:
-        raise QueueStateError("current postings are unavailable or malformed") from exc
-    if not isinstance(postings, list) or any(not isinstance(row, dict) for row in postings):
-        raise QueueStateError("current postings must be a list of objects")
+def _read_intake_admission_inputs(repo, tailor, revision):
+    _postings_bytes, postings, postings_sha256 = _read_postings_revision(repo, revision)
     skipped = _read_flat_entries(tailor.SKIPPED_FILE, "owner skip list", required=True)
     gates = _read_gate_entries(tailor.GATE_FILE, required=True)
-    return postings, skipped, gates
+    return postings, skipped, gates, postings_sha256
 
 
 def _match_intake_posting(link, postings):
@@ -2233,21 +2309,27 @@ def _match_intake_posting(link, postings):
     return dict(matches[0]), ""
 
 
-def _intake_admission_decision(args, item):
+def _intake_admission_decision(args, item, revision, expected_postings_sha256,
+                               max_age_days, run_date):
     """Check fresh posting age, current owner controls and explicit closure."""
     import application_identity as identity
     import tailor
     from posting_admission import admission_exclusion
 
     try:
-        postings, skipped, gates = _read_intake_admission_inputs(args.repo, tailor)
+        postings, skipped, gates, postings_sha256 = _read_intake_admission_inputs(
+            args.repo, tailor, revision)
     except (OSError, UnicodeError, QueueStateError, ValueError) as exc:
         return "pending", "source_unavailable", str(exc), False, None
+    if postings_sha256 != expected_postings_sha256:
+        return ("pending", "source_unavailable",
+                "pinned posting evidence changed before admission", False, None)
     posting, reason = _match_intake_posting(item.get("link"), postings)
     if posting is None:
         return "excluded", "identity_review", reason, False, None
     try:
-        reason = admission_exclusion(posting, skipped, gates)
+        reason = admission_exclusion(posting, skipped, gates, today=run_date,
+                                     max_age_days=max_age_days)
     except (TypeError, ValueError) as exc:
         return "pending", "source_unavailable", str(exc), False, posting
     if reason:
@@ -2267,16 +2349,20 @@ def _intake_admission_decision(args, item):
         str(posting.get("title") or ""), jd_text)))
 
     try:
-        latest_postings, latest_skipped, latest_gates = _read_intake_admission_inputs(
-            args.repo, tailor)
+        latest_postings, latest_skipped, latest_gates, latest_postings_sha256 = (
+            _read_intake_admission_inputs(args.repo, tailor, revision))
     except (OSError, UnicodeError, QueueStateError, ValueError) as exc:
         return "pending", "source_unavailable", str(exc), closed, posting
+    if latest_postings_sha256 != expected_postings_sha256:
+        return ("pending", "source_unavailable",
+                "pinned posting evidence changed during admission", closed, posting)
     latest, reason = _match_intake_posting(item.get("link"), latest_postings)
     if latest is None:
         return "excluded", "identity_review", reason, closed, posting
     try:
         reason = admission_exclusion(latest, latest_skipped, latest_gates,
-                                     explicitly_closed=closed)
+                                     explicitly_closed=closed, today=run_date,
+                                     max_age_days=max_age_days)
     except (TypeError, ValueError) as exc:
         return "pending", "source_unavailable", str(exc), closed, latest
     if reason:
@@ -2292,21 +2378,26 @@ def _intake_admission_decision(args, item):
             "current posting passed age, owner-control and closure checks", closed, latest)
 
 
-def _final_intake_admission_check(args, item, expected_posting, closed):
+def _final_intake_admission_check(args, item, expected_posting, closed, revision,
+                                  expected_postings_sha256, max_age_days, run_date):
     """Re-read local age and owner controls while holding the insertion lock."""
     import tailor
     from posting_admission import admission_exclusion
 
     try:
-        postings, skipped, gates = _read_intake_admission_inputs(args.repo, tailor)
+        postings, skipped, gates, postings_sha256 = _read_intake_admission_inputs(
+            args.repo, tailor, revision)
     except (OSError, UnicodeError, QueueStateError, ValueError) as exc:
         return "pending", "source_unavailable", str(exc)
+    if postings_sha256 != expected_postings_sha256:
+        return "pending", "source_unavailable", "pinned posting evidence changed before queue insertion"
     posting, reason = _match_intake_posting(item.get("link"), postings)
     if posting is None:
         return "excluded", "identity_review", reason
     try:
         reason = admission_exclusion(posting, skipped, gates,
-                                     explicitly_closed=closed)
+                                     explicitly_closed=closed, today=run_date,
+                                     max_age_days=max_age_days)
     except (TypeError, ValueError) as exc:
         return "pending", "source_unavailable", str(exc)
     if reason:
@@ -2361,7 +2452,7 @@ def _print_enqueue_result(args, added, skipped, report, include_summary=False):
         print(json.dumps({"intake_run": report}, ensure_ascii=False))
 
 
-def _process_pending_intake(args, log, report, revision):
+def _process_pending_intake(args, log, report, revision, max_age_days, run_date):
     import tailor
 
     added_rows, skipped_rows = [], []
@@ -2453,7 +2544,8 @@ def _process_pending_intake(args, log, report, revision):
         pr["body"] = pr.get("posting_url") or ""
         pr["_tracker"] = tracker_text
         try:
-            postings, _skipped, _gates = _read_intake_admission_inputs(args.repo, tailor)
+            postings, _skipped, _gates, postings_sha256 = (
+                _read_intake_admission_inputs(args.repo, tailor, revision))
         except (OSError, UnicodeError, QueueStateError, ValueError) as exc:
             _set_intake_outcome(args.queue, number, "pending", "source_unavailable",
                                 "posting admission inputs are unavailable: " + str(exc))
@@ -2500,7 +2592,7 @@ def _process_pending_intake(args, log, report, revision):
             continue
 
         decision, code, reason, closed, expected_posting = _intake_admission_decision(
-            args, candidate)
+            args, candidate, revision, postings_sha256, max_age_days, run_date)
         if decision != "admitted":
             _set_intake_outcome(args.queue, number, decision, code, reason)
             _count_reason(report, code)
@@ -2517,9 +2609,10 @@ def _process_pending_intake(args, log, report, revision):
                 merged_items, added, final_skips = enqueue(
                     latest, [pr], args.include_submitted, limit=1)
                 if added:
-                    verify_tracker_revision(args.repo, revision)
+                    verify_tracker_revision(args.repo, revision, postings_sha256)
                     final_admission = _final_intake_admission_check(
-                        args, candidate, expected_posting, closed)
+                        args, candidate, expected_posting, closed, revision,
+                        postings_sha256, max_age_days, run_date)
                     if final_admission[0] == "admitted":
                         _write_queue_unlocked(args.queue, merged_items)
                     else:
@@ -2628,6 +2721,16 @@ def cmd_enqueue(args, log):
         return 0 if not unavailable else 1
 
     try:
+        from posting_admission import configured_max_age_days
+        max_age_days = configured_max_age_days()
+        run_date = _run_date()
+    except ValueError as exc:
+        report["outcome"] = "failed"
+        _emit_intake_report(report, log)
+        log("queue: enqueue blocked by freshness configuration: " + str(exc))
+        return 2
+
+    try:
         load_merge_intake(args.queue)
     except QueueStateError as exc:
         report["outcome"] = "failed"
@@ -2683,7 +2786,7 @@ def cmd_enqueue(args, log):
     else:
         try:
             added, skipped, pending_failed = _process_pending_intake(
-                args, log, report, revision)
+                args, log, report, revision, max_age_days, run_date)
         except (QueueStateError, OSError, ValueError) as exc:
             log("queue: merge intake processing failed: " + str(exc))
             report["outcome"] = "failed"
