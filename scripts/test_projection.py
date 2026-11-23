@@ -14,6 +14,7 @@ from unittest import mock
 import urllib.request
 
 import funnel_report
+import intake_reporting
 import pipeline_health
 import projection
 import review_contract
@@ -131,6 +132,7 @@ def _fixture(root, *, tracker=None, queue=None, events=None, reviews=None,
     runtime.mkdir(exist_ok=True)
     tracker_path = repo / "applications.yaml"
     queue_path = runtime / "queue.yaml"
+    intake_dir = runtime / "intake"
     event_path = runtime / "events.json"
     ingestion_path = runtime / "ingestion.json"
     snapshot_root = runtime / "snapshots"
@@ -150,6 +152,7 @@ def _fixture(root, *, tracker=None, queue=None, events=None, reviews=None,
         CANARY: {"last_scan_at": "2026-11-16T05:30:00Z", "mailbox": CANARY}}}),
                               encoding="utf-8")
     snapshot_root.mkdir(exist_ok=True)
+    intake_dir.mkdir(exist_ok=True)
     review_doc = reviews if reviews is not None else {"reviewed": {}}
     review_path.write_text(review_text if review_text is not None else json.dumps(review_doc),
                            encoding="utf-8")
@@ -158,6 +161,7 @@ def _fixture(root, *, tracker=None, queue=None, events=None, reviews=None,
                               encoding="utf-8")
     return {"repo": str(repo), "tracker": str(tracker_path), "queue": str(queue_path),
             "ledger": str(event_path), "ingestion": str(ingestion_path),
+            "intake_dir": str(intake_dir),
             "snapshot_root": str(snapshot_root), "review_state": str(review_path),
             "preflight_state": str(preflight_path)}
 
@@ -607,6 +611,131 @@ with tempfile.TemporaryDirectory(prefix="synthetic-projection-i11-") as temp:
     retained_catalog = projection.read_snapshot(str(catalog_db))
     assert retained_catalog["facts"]["company_catalog"] == catalog_snapshot["facts"]["company_catalog"]
     assert retained_catalog["sources"]["companies"]["error_code"] == "source_invalid"
+
+    # The health view joins latest discovery/enqueue runs with queue ages,
+    # browser ownership, and snapshot/sync recovery backlog.
+    diagnostics_paths = _fixture(root / "intake-health", queue=[
+        {"company": "Ready Co", "role": "Ready Intern", "pr_number": 101,
+         "status": "queued", "enqueued_at": "2026-11-15T06:00:00Z",
+         "approved_at": "2026-11-15T06:00:00Z", "session_ref": "private@example.invalid"},
+        {"company": "Owner Co", "role": "Owner Intern", "pr_number": 102,
+         "status": "in_progress", "attempt_id": "attempt-102",
+         "claimed_at": "2026-11-16T01:00:00Z", "runner_id": "runner-a",
+         "session_ref": "session:owner-102"},
+        {"company": "Released Co", "role": "Released Intern", "pr_number": 106,
+         "status": "in_progress", "attempt_id": "attempt-106",
+         "claimed_at": "2026-11-15T06:00:00Z", "runner_id": "runner-b",
+         "session_ref": "session:owner-106",
+         "browser_owner_released_at": "2026-11-16T02:00:00Z"},
+        {"company": "Blocked Co", "role": "Blocked Intern", "pr_number": 103,
+         "status": "blocked", "blocker_code": "eligibility_hold",
+         "blocked_at": "2026-11-13T06:00:00Z"},
+        {"company": "Unknown Co", "role": "Unknown Intern", "pr_number": 104,
+         "status": "outcome_unknown", "attempt_state": "outcome_unknown",
+         "claimed_at": "2026-11-15T06:00:00Z",
+         "outcome_unknown_at": "2026-11-16T00:00:00Z"},
+        {"company": "Submitted Co", "role": "Submitted Intern", "pr_number": 105,
+         "status": "submitted", "attempt_id": "attempt-105",
+         "submitted_at": "2026-11-15T06:00:00Z",
+         "tracker_sync_pending_at": "2026-11-14T06:00:00Z",
+         "tracker_sync": "pending", "snapshot_provenance": "complete",
+         "snapshot_id": "a" * 64},
+    ])
+    intake_dir = Path(diagnostics_paths["intake_dir"])
+    source_id = intake_reporting.source_id("company", "synthetic")
+    discovery_run = {"recorded_at": "2026-11-16T04:00:00Z",
+                     **intake_reporting.sanitize_summary({
+                         "outcome": "healthy_empty",
+                         "counts": {"processed": 0, "accepted": 0, "added": 0},
+                         "reasons": {"no_postings": 1},
+                         "sources": [{"kind": "company", "source_id": source_id,
+                                      "fetch": "ok", "parse": "empty",
+                                      "processed": 0, "accepted": 0}],
+                     })}
+    enqueue_run = {"recorded_at": "2026-11-16T05:00:00Z",
+                   **intake_reporting.sanitize_summary({
+                       "outcome": "partial_failure",
+                       "counts": {"observed": 8, "added": 0,
+                                  "excluded": 2, "pending_metadata": 1,
+                                  "active_work": 2, "closed_history": 3},
+                       "reasons": {"no_eligible_prs": 1},
+                   })}
+    (intake_dir / "discovery.json").write_text(
+        json.dumps({"schema_version": 1, "runs": [discovery_run]}), encoding="utf-8")
+    (intake_dir / "enqueue.json").write_text(
+        json.dumps({"schema_version": 1, "runs": [enqueue_run]}), encoding="utf-8")
+    diagnostics_db = root / "intake-health-db" / "index.sqlite3"
+    _collect(diagnostics_db, diagnostics_paths)
+    diagnostics_snapshot = projection.read_snapshot(str(diagnostics_db))
+    health = pipeline_health.build_report(
+        diagnostics_snapshot, timezone_name="Asia/Singapore", weekday_goal=1,
+        weekend_goal=0, ready_buffer=1, as_of="2026-11-16")
+    assert health["intake"]["discovery"]["status"] == "healthy_empty"
+    assert health["intake"]["discovery"]["age_seconds"] == 7200
+    assert health["intake"]["enqueue"]["status"] == "partial_failure"
+    assert health["intake"]["enqueue"]["latest"]["counts"]["closed_history"] == 3
+    assert health["intake"]["enqueue"]["latest"]["counts"]["pending_metadata"] == 1
+    assert health["ready_buffer"]["queued"] == 1
+    assert health["ready_buffer"]["oldest_age_seconds"] == 86400
+    assert health["attempts"]["blocked"] == 1
+    assert health["attempts"]["oldest_blocked_age_seconds"] == 3 * 86400
+    assert health["attempts"]["oldest_unknown_age_seconds"] == 6 * 3600
+    assert health["browser_ownership"]["active"] == 1
+    assert health["browser_ownership"]["released"] == 1
+    assert health["browser_ownership"]["owners"] == [{
+        "runner_id": "runner-a", "session_ref": "session:owner-102",
+        "attempt_age_seconds": 5 * 3600}]
+    assert health["snapshot_gaps"]["known"] == 1
+    assert health["snapshot_gaps"]["oldest_age_seconds"] == 86400
+    assert health["tracker_sync"]["pending_or_error"] == 1
+    assert health["tracker_sync"]["oldest_age_seconds"] == 2 * 86400
+    assert "pending metadata 1" in pipeline_health.render_text(health)
+    exported_health = json.dumps(health)
+    assert "private@example.invalid" not in exported_health
+    assert "PRIVATE-CANARY" not in exported_health
+
+    # No history is unknown, while one malformed lane leaves the good lane
+    # usable and marks intake coverage partial.
+    missing_paths = _fixture(root / "missing-intake")
+    missing_db = root / "missing-intake-db" / "index.sqlite3"
+    _collect(missing_db, missing_paths)
+    missing_snapshot = projection.read_snapshot(str(missing_db))
+    missing_health = pipeline_health.build_report(
+        missing_snapshot, timezone_name="Asia/Singapore", weekday_goal=1,
+        weekend_goal=0, ready_buffer=1, as_of="2026-11-16")
+    assert missing_health["intake"]["discovery"]["status"] == "unknown"
+    assert missing_health["intake"]["source_status"] == "unavailable"
+    partial_paths = _fixture(root / "partial-intake")
+    partial_dir = Path(partial_paths["intake_dir"])
+    (partial_dir / "discovery.json").write_text(
+        json.dumps({"schema_version": 1, "runs": [discovery_run]}), encoding="utf-8")
+    (partial_dir / "enqueue.json").write_text("{malformed", encoding="utf-8")
+    partial_db = root / "partial-intake-db" / "index.sqlite3"
+    _collect(partial_db, partial_paths)
+    partial_snapshot = projection.read_snapshot(str(partial_db))
+    partial_health = pipeline_health.build_report(
+        partial_snapshot, timezone_name="Asia/Singapore", weekday_goal=1,
+        weekend_goal=0, ready_buffer=1, as_of="2026-11-16")
+    assert partial_snapshot["sources"]["intake"]["coverage_status"] == "partial"
+    assert partial_health["intake"]["discovery"]["status"] == "healthy_empty"
+    assert partial_health["intake"]["enqueue"]["status"] == "unknown"
+    zero_paths = _fixture(root / "zero-admissions")
+    zero_dir = Path(zero_paths["intake_dir"])
+    zero_run = {"recorded_at": "2026-11-16T05:30:00Z",
+                **intake_reporting.sanitize_summary({
+                    "outcome": "healthy_empty", "counts": {"admitted": 0}})}
+    (zero_dir / "discovery.json").write_text(
+        json.dumps({"schema_version": 1, "runs": []}), encoding="utf-8")
+    (zero_dir / "enqueue.json").write_text(
+        json.dumps({"schema_version": 1, "runs": [zero_run]}), encoding="utf-8")
+    zero_db = root / "zero-admissions-db" / "index.sqlite3"
+    _collect(zero_db, zero_paths)
+    zero_snapshot = projection.read_snapshot(str(zero_db))
+    zero_health = pipeline_health.build_report(
+        zero_snapshot, timezone_name="Asia/Singapore", weekday_goal=1,
+        weekend_goal=0, ready_buffer=1, as_of="2026-11-16")
+    assert zero_health["intake"]["enqueue"]["latest"]["reasons"] == {"unknown": 1}
+    assert "enqueue [unknown=1]" in pipeline_health.render_text(zero_health)
 
 _projection_clock.stop()
 print("test_projection: incremental generations, privacy, cached reads and review facts passed")

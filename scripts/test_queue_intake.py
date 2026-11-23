@@ -11,6 +11,7 @@ from datetime import date
 from unittest import mock
 
 import queue as q
+import intake_reporting
 import tailor
 
 
@@ -86,6 +87,21 @@ def graphql_page(nodes, *, more, cursor=None):
         "pageInfo": {"hasNextPage": more, "endCursor": cursor}}}}}
 
 
+# The history hook preserves the existing stdout summary and keeps persistence
+# failures out of operator diagnostics.
+report = q._new_enqueue_report()
+report["reasons"]["no_eligible_prs"] = 1
+lines = []
+output = io.StringIO()
+with mock.patch.object(intake_reporting, "record_run",
+                       side_effect=RuntimeError("PRIVATE-CANARY")), \
+        contextlib.redirect_stdout(output):
+    q._emit_intake_report(report, lines.append)
+assert lines == ["queue: intake reporting failed"], lines
+assert "PRIVATE-CANARY" not in output.getvalue()
+assert json.loads(output.getvalue())["intake_run"]["reasons"] == {"no_eligible_prs": 1}
+
+
 # A merge on a later GraphQL page is checkpointed and admitted.
 with tempfile.TemporaryDirectory() as root:
     case = make_case(root)
@@ -117,11 +133,16 @@ with tempfile.TemporaryDirectory() as root:
 # File lookup failure stays pending and retries successfully on the next run.
 with tempfile.TemporaryDirectory() as root:
     case = make_case(root)
-    code, _ = run_live(case, [pr()], files=None)
+    with mock.patch.object(intake_reporting, "record_run") as record_run:
+        code, _ = run_live(case, [pr()], files=None)
     assert code == 1 and q.load_queue(case["queue"]) == []
     saved = q.load_merge_intake(case["queue"])["records"]["52"]
     assert saved["state"] == "pending"
     assert saved["reason_code"] == "metadata_unavailable"
+    summary = record_run.call_args.args[1]
+    assert summary["counts"]["pending_metadata"] == 1, summary
+    assert summary["reasons"]["metadata_unavailable"] == 1, summary
+    assert intake_reporting.sanitize_summary(summary)["counts"]["pending_metadata"] == 1
     code, _ = run_live(case, [pr()], files=FILES)
     assert code == 0 and len(q.load_queue(case["queue"])) == 1
 

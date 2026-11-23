@@ -4,8 +4,15 @@
 No network. Run: python3 test_discover.py
 """
 from datetime import date
+import io
+import json
+from pathlib import Path
+import tempfile
+from unittest import mock
 
 import discover as d
+import intake_reporting
+import probe_boards
 
 TODAY = date(2026, 10, 6)
 
@@ -330,29 +337,54 @@ import sys
 import types
 fake = types.ModuleType("probe_boards")
 fake.BOARDS = [{"name": "Good", "ats": "x"}, {"name": "Broken", "ats": "y"},
-               {"name": "Quiet", "ats": "z"}]
+               {"name": "Quiet", "ats": "z"}, {"name": "Challenged", "ats": "c"},
+               {"name": "Bad JSON", "ats": "p"}]
 fake.probe = lambda cfg: {
     "Good": ("PROBED", [board_rows[0]], "1 rows, 1 Singapore"),
     "Broken": ("BAD-TENANT", [], "HTTP 422 from api"),
     "Quiet": ("PROBED 0", [], "40 rows, 0 Singapore"),
+    "Challenged": ("CHALLENGE", [], "challenge response"),
+    "Bad JSON": ("PARSE-FAILED", [], "response was not valid JSON"),
 }[cfg["name"]]
 _saved = sys.modules.get("probe_boards")
 sys.modules["probe_boards"] = fake
 lines = []
+coverage = []
 try:
-    got, errs = d.collect_boards(TODAY, log=lines.append)
+    got, errs = d.collect_boards(TODAY, log=lines.append, coverage=coverage)
 finally:
     if _saved is None:
         del sys.modules["probe_boards"]
     else:
         sys.modules["probe_boards"] = _saved
 assert [p["company"] for p in got] == ["Acme Corp"], got
-assert len(errs) == 1 and "BAD-TENANT" in errs[0], errs
-assert any("board-error: Broken" in line for line in lines), lines
-assert any("board-empty: Quiet" in line for line in lines), lines
+assert len(coverage) == 5 and coverage[0]["parse"] == "ok", coverage
+assert coverage[1]["fetch"] == "failed" and coverage[1]["parse"] == "not_attempted", coverage
+assert coverage[2]["parse"] == "empty", coverage
+assert coverage[3]["fetch"] == "failed" and coverage[3]["parse"] == "challenge", coverage
+assert coverage[4]["fetch"] == "ok" and coverage[4]["parse"] == "failed", coverage
+assert errs == ["source_unavailable", "challenge_page", "parse_failed"], errs
+assert any("board-error: source_unavailable" in line for line in lines), lines
+assert any("board: " in line and "empty processed=0" in line for line in lines), lines
+assert not any("BAD-TENANT" in line or "HTTP 422" in line for line in lines), lines
+
+# Board fetches keep HTTP challenges distinct from response parse failures.
+for status, body, expected in (
+        (403, "<title>Just a moment...</title> challenge-platform", "CHALLENGE"),
+        (200, "<html>captcha</html>", "CHALLENGE"),
+        (200, "not json", "PARSE-FAILED")):
+    try:
+        probe_boards._json_or_raise(status, body, "synthetic endpoint")
+    except probe_boards.BoardError as exc:
+        assert exc.label == expected, (status, body, exc.label)
+    else:
+        raise AssertionError("board error response should be classified")
 
 # a board whose probe() raises (incompatible module) is one line, not a crash
-fake.probe = lambda cfg: (_ for _ in ()).throw(RuntimeError("boom")) if cfg["name"] == "Broken" else ("PROBED", [board_rows[0]], "1 rows")
+fake.probe = lambda cfg: (
+    (_ for _ in ()).throw(RuntimeError("boom")) if cfg["name"] == "Broken" else
+    ("PROBED", [board_rows[0]], "1 rows") if cfg["name"] in ("Good", "Quiet") else
+    ("PROBED 0", [], "0 rows"))
 _saved = sys.modules.get("probe_boards")
 sys.modules["probe_boards"] = fake
 lines = []
@@ -364,7 +396,7 @@ finally:
     else:
         sys.modules["probe_boards"] = _saved
 assert [p["company"] for p in got3] == ["Acme Corp"] * 2, got3
-assert len(errs3) == 1 and "RuntimeError: boom" in errs3[0], errs3
+assert errs3 == ["source_unavailable"], errs3
 
 # a missing probe_boards module degrades to one logged line, never a raise
 sys.modules["probe_boards"] = None
@@ -375,7 +407,42 @@ finally:
         del sys.modules["probe_boards"]
     else:
         sys.modules["probe_boards"] = _saved
-assert got2 == [] and len(errs2) == 1 and "unavailable" in errs2[0], errs2
+assert got2 == [] and errs2 == ["source_unavailable"], errs2
+
+# Per-page reporting separates a valid empty listing, a challenge, an
+# unrecognized shell, and a fetch failure without retaining source details.
+for body, expected_fetch, expected_parse, expected_errors in (
+        ("No current jobs", "ok", "empty", []),
+        ("cf-chl- challenge-platform", "ok", "challenge", ["challenge_page"]),
+        ("<main>career content changed</main>", "ok", "unrecognized", ["parse_unrecognized"])):
+    coverage = []
+    lines = []
+    with mock.patch.object(d, "fetch", return_value=body):
+        rows, errors = d._collect_page("https://example.invalid/careers", lambda _: [],
+                                       "company", coverage, lines.append)
+    assert rows == [] and errors == expected_errors, (rows, errors)
+    assert coverage[0]["fetch"] == expected_fetch
+    assert coverage[0]["parse"] == expected_parse
+    assert "example.invalid" not in " ".join(lines)
+coverage = []
+lines = []
+with mock.patch.object(d, "fetch", side_effect=RuntimeError("PRIVATE-CANARY")):
+    rows, errors = d._collect_page("https://example.invalid/careers", lambda _: [],
+                                   "company", coverage, lines.append)
+assert rows == [] and errors == ["source_unavailable"]
+assert coverage[0]["fetch"] == "failed" and "PRIVATE-CANARY" not in " ".join(lines)
+
+coverage = []
+lines = []
+http_error = d.urllib.error.HTTPError(
+    "https://private.invalid/careers", 403, "Forbidden", {},
+    io.BytesIO(b"<title>Just a moment</title> challenge-platform"))
+with mock.patch.object(d, "fetch", side_effect=http_error):
+    rows, errors = d._collect_page("https://private.invalid/careers", lambda _: [],
+                                   "company", coverage, lines.append)
+assert rows == [] and errors == ["challenge_page"]
+assert coverage[0]["fetch"] == "failed" and coverage[0]["parse"] == "challenge"
+assert "private.invalid" not in " ".join(lines)
 
 
 print("test_discover: all assertions passed")
@@ -394,3 +461,72 @@ print("  ok: --boards + --import-json refused with rc=2")
 assert "--boards" in d.build_parser().format_help(), (
     "--boards must be documented in the parser help")
 print("  ok: --boards present in parser help")
+
+# Aggregate accepted counts use the same pre-deduplication definition as each
+# source row; added remains the unique count after coalescing.
+with tempfile.TemporaryDirectory(prefix="discover-source-counts-") as temp:
+    source = Path(temp) / "import.json"
+    posting = {"company": "Count Co", "role": "Software Engineer Intern",
+               "link": "https://jobs.example.invalid/123", "location": "Singapore"}
+    source.write_text(json.dumps([posting, posting]), encoding="utf-8")
+    reports = []
+    with mock.patch.object(d, "_report_intake",
+                           side_effect=lambda summary, *_args: reports.append(summary)):
+        assert d.main(["--import-json", str(source), "--repo", str(Path(temp) / "repo"),
+                       "--dry-run"]) == 0
+    assert reports[0]["counts"]["accepted"] == 2, reports[0]
+    assert reports[0]["sources"][0]["accepted"] == 2, reports[0]
+    assert reports[0]["counts"]["added"] == 1, reports[0]
+
+# Total failure records diagnostics and exits before opening or changing the
+# valid posting store.
+with tempfile.TemporaryDirectory(prefix="discover-total-failure-") as temp:
+    root = Path(temp)
+    companies = root / "companies.yaml"
+    companies.write_text("[]\n", encoding="utf-8")
+    repo = root / "repo"
+    repo.mkdir()
+    sentinel = repo / "store-sentinel"
+    sentinel.write_text("preserve\n", encoding="utf-8")
+    def failed_internsg(today, log, coverage):
+        status = d._coverage_row("internsg", "synthetic-source")
+        status.update(fetch="failed", parse="not_attempted")
+        coverage.append(status)
+        return [], ["source_unavailable"]
+    with mock.patch.object(d, "collect_internsg", side_effect=failed_internsg), \
+            mock.patch.object(d, "ensure_repo", side_effect=AssertionError("store must stay untouched")), \
+            mock.patch.object(d.intake_reporting, "record_run") as record_run:
+        result = d.main(["--companies", str(companies), "--repo", str(repo)])
+    assert result == 1
+    assert sentinel.read_text(encoding="utf-8") == "preserve\n"
+    recorded = record_run.call_args.args[1]
+    assert recorded["outcome"] == "total_failure", recorded
+    assert recorded["reasons"] == {"source_unavailable": 1}, recorded
+
+    def empty_internsg(today, log, coverage):
+        status = d._coverage_row("internsg", "synthetic-empty")
+        status.update(fetch="ok", parse="empty")
+        coverage.append(status)
+        return [], []
+    with mock.patch.object(d, "collect_internsg", side_effect=empty_internsg), \
+            mock.patch.object(d, "collect_companies", return_value=([], [])), \
+            mock.patch.object(d, "ensure_repo"), \
+            mock.patch.object(d, "read_store", return_value=[]), \
+            mock.patch.object(d.intake_reporting, "record_run") as record_run:
+        result = d.main(["--companies", str(companies), "--repo", str(repo)])
+    assert result == 0
+    assert record_run.call_args.args[1]["outcome"] == "healthy_empty"
+
+    companies.write_text("- name: Challenge Co\n  url: https://challenge.invalid/careers\n",
+                         encoding="utf-8")
+    with mock.patch.object(d, "collect_internsg", side_effect=empty_internsg), \
+            mock.patch.object(d, "fetch", return_value="cf-chl- challenge-platform"), \
+            mock.patch.object(d, "ensure_repo"), \
+            mock.patch.object(d, "read_store", return_value=[]), \
+            mock.patch.object(d.intake_reporting, "record_run") as record_run:
+        result = d.main(["--companies", str(companies), "--repo", str(repo)])
+    assert result == 0
+    challenge_summary = record_run.call_args.args[1]
+    assert challenge_summary["outcome"] == "partial_failure", challenge_summary
+    assert challenge_summary["reasons"] == {"challenge_page": 1, "no_postings": 1}, challenge_summary
+    assert any(row["parse"] == "challenge" for row in challenge_summary["sources"])

@@ -28,7 +28,12 @@ SOURCE_FRESHNESS_SECONDS = {
 _APP_FIELDS = ("company", "role", "link", "pr", "pr_number", "source",
                "status", "stage", "stage_since", "applied_date", "submitted_at")
 _QUEUE_FIELDS = ("company", "role", "link", "pr", "pr_number", "source",
-                "status", "submitted_at", "claimed_at", "attempt_id", "tracker_sync",
+                "status", "submitted_at", "claimed_at", "enqueued_at", "approved_at",
+                "failed_at", "blocked_at", "updated_at", "outcome_unknown_at",
+                "browser_released_at", "browser_owner_released_at",
+                "tracker_sync_pending_at", "tracker_sync_started_at",
+                "tracker_sync_failed_at", "tracker_synced_at", "snapshot_prepared_at",
+                "snapshot_finalized_at", "runner_id", "session_ref", "attempt_id", "tracker_sync",
                 "snapshot_id", "prepared_snapshot_id", "snapshot_provenance",
                 "attempt_state", "blocker_code")
 
@@ -93,11 +98,20 @@ def _allow_fields(row, fields):
     for key in fields:
         value = row.get(key)
         if key in ("company", "role", "source", "status", "stage", "tracker_sync",
-                   "snapshot_provenance", "attempt_state", "blocker_code", "attempt_id"):
+                   "snapshot_provenance", "attempt_state", "blocker_code", "attempt_id",
+                   "runner_id", "session_ref"):
             value = _safe_text(value, 120 if key in ("role", "company") else 80)
+            if (value and key in ("runner_id", "session_ref")
+                    and not re.fullmatch(r"[A-Za-z0-9._:-]{1,120}", value)):
+                value = None
         elif key in ("applied_date", "stage_since"):
             value = _day(value)
-        elif key in ("submitted_at", "claimed_at"):
+        elif key in ("submitted_at", "claimed_at", "enqueued_at", "approved_at",
+                     "failed_at", "blocked_at", "updated_at", "outcome_unknown_at",
+                     "browser_released_at", "browser_owner_released_at",
+                     "tracker_sync_pending_at", "tracker_sync_started_at",
+                     "tracker_sync_failed_at", "tracker_synced_at",
+                     "snapshot_prepared_at", "snapshot_finalized_at"):
             value = _timestamp(value) or _day(value)
         elif key in ("resume_hash", "resume_sha256", "resume_pdf_sha256",
                      "resume_version_sha256", "resume_version_hash",
@@ -414,7 +428,8 @@ def collect_snapshot(*, tracker_path, queue_path, ledger_path, ingestion_path,
     tracker_rows, tracker_health = _read_yaml(tracker_path, summary_module.parse_yaml_list,
                                                "tracker", now)
     queue_rows, queue_health = _read_yaml(queue_path,
-                                           lambda value: queue_module.parse_queue(value),
+                                           lambda value: queue_module.parse_queue(
+                                               value, status_values=set(queue_module.STATUSES) | {"blocked"}),
                                            "queue", now)
     event_doc, event_health = _read_json(ledger_path, "events", now)
     if event_health["status"] != "unavailable" and (

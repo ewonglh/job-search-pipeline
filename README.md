@@ -392,6 +392,7 @@ or a repository inside this checkout. Empty path overrides fail immediately.
 | `JOBSEARCH_RANKINGS` | Ranking output used by reports | `~/.local/state/job-search-pipeline/rankings.json` |
 | `JOBSEARCH_DASHBOARD_OUT` | Dashboard output | `~/.local/state/job-search-pipeline/dashboard/index.html` |
 | `JOBSEARCH_INGEST_STATE` | Private email-ingestion cursors | `~/.local/state/job-search-pipeline/email_ingest_state.json` |
+| `JOBSEARCH_INTAKE_DIR` | Private discovery and enqueue run history | `~/.local/state/job-search-pipeline/intake` |
 | `JOBSEARCH_PROJECTION_DB` | Private cached report projection | `~/.local/state/job-search-pipeline/projection/index.sqlite3` |
 | `JOBSEARCH_ACTIVITY_STATE` | Private explicit tailoring completion ledger | `~/.local/state/job-search-pipeline/tailoring_activities.json` |
 | `JOBSEARCH_COMPANY_CATALOG` | Private offline company classifications | `~/.local/state/job-search-pipeline/company_catalog.json` |
