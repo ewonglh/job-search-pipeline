@@ -634,11 +634,10 @@ def pr_number_of(item):
 
 def active_key(item):
     """Identity of an application for the secondary duplicate guard."""
-    link = normalize_url(item.get("link", "")).lower()
-    if link:
-        return "link:" + link
-    return "name:" + norm_text(item.get("company", "")).lower() + "|" + \
-        norm_text(item.get("role", "")).lower()
+    from application_identity import application_id, posting_keys
+    if posting_keys(item):
+        return application_id(item)
+    return "name:" + norm_text(item.get("company")).casefold() + "|" + norm_text(item.get("role")).casefold()
 
 
 def append_note(item, text):
@@ -697,12 +696,14 @@ def _append_tracker_row(tracker_text, row):
 
 def build_tracker_row(item, date, sent, route, note=None):
     """The applications.yaml row for one submission (tracker schema per RULES.md)."""
+    from application_identity import identity_evidence
     company = norm_text(item.get("company"))
     role = norm_text(item.get("role"))
     source = norm_text(item.get("source"))
     link = norm_text(item.get("link"))
     variant = normalize_variant(item.get("variant"))
     row = {
+        **identity_evidence(item),
         "company": company,
         "role": role,
         "status": "applied",
@@ -762,13 +763,13 @@ def write_tracker_row(repo, item, date, sent, route, dry_run=False,
         import application_identity as identity
         try:
             tracker_rows = parse_queue(tracker_text, status_values=None)
-            target_id = _canonical_queue_identity(item)
+            _canonical_queue_identity(item)
             target_pr = identity.pr_number(item)
             resolution = identity.resolve_applications(tracker_rows, [item])
         except (QueueStateError, TypeError, ValueError) as exc:
             log("queue: tracker write-back: application identity is ambiguous: " + str(exc))
             return TRACKER_CONFLICT
-        if any("queue:1" in conflict.get("row_refs", [])
+        if any(f"queue:{len(tracker_rows) + 1}" in conflict.get("row_refs", [])
                for conflict in resolution.get("conflicts", [])):
             log("queue: tracker write-back: tracker identity conflict for PR #"
                 + str(pr_number_of(item)))
@@ -780,13 +781,12 @@ def write_tracker_row(repo, item, date, sent, route, dry_run=False,
             except (TypeError, ValueError):
                 log("queue: tracker write-back: tracker row has contradictory PR aliases")
                 return TRACKER_CONFLICT
-            entry_link = identity.normalize_posting_url(entry.get("link"))
             if entry_pr == target_pr:
                 same_pr.append(entry)
-                if entry_link and entry_link != target_id[5:]:
+                if identity.posting_keys(entry) and not identity.same_posting(entry, item):
                     log("queue: tracker write-back: PR points at a different posting")
                     return TRACKER_CONFLICT
-            elif entry_link and entry_link == target_id[5:]:
+            elif identity.same_posting(entry, item):
                 log("queue: tracker write-back: posting is already attached to another PR")
                 return TRACKER_CONFLICT
         if len(same_pr) > 1:
@@ -1056,6 +1056,7 @@ def extract_entry(pr, tracker_text):
 
 
 def build_item(pr, entry, variant_path, include_submitted=False):
+    from application_identity import identity_evidence
     e = entry or {}
     t_company, t_role = title_parts(pr)
     company = norm_text(e.get("company")) or t_company or \
@@ -1072,6 +1073,7 @@ def build_item(pr, entry, variant_path, include_submitted=False):
         if m:
             link = m.group(0).rstrip(".,;")
     item = {
+        **identity_evidence(e),
         "company": company,
         "role": norm_text(e.get("role")) or t_role,
         "source": norm_text(e.get("source")),
@@ -1164,10 +1166,8 @@ def _canonical_queue_identity(item):
         if value and identity.normalize_posting_url(value) != link:
             raise QueueStateError("queue item has conflicting posting URL aliases")
     app_id = identity.application_id(item)
-    if app_id != "link:" + link:
-        raise QueueStateError("queue item has an ambiguous canonical identity")
     stored_id = str(item.get("application_id") or "").strip()
-    if stored_id and stored_id != app_id:
+    if stored_id and stored_id not in identity.posting_keys(item):
         raise QueueStateError("queue application_id conflicts with its posting link")
     return app_id
 
@@ -1304,12 +1304,13 @@ def _check_owner_controls(posting, skipped, gates):
 def _check_claim_identities(item, queue_items, tracker_rows, posting):
     """Apply the same identity gates before and after the network check."""
     import application_identity as identity
-    app_id = _canonical_queue_identity(item)
-    if sum(1 for row in queue_items
-           if identity.normalize_posting_url(row.get("link")) == app_id[5:]) != 1:
+    _canonical_queue_identity(item)
+    target = dict(item, **identity.identity_evidence(posting))
+    target["link"] = posting.get("link") or item.get("link")
+    if sum(1 for row in queue_items if identity.same_posting(row, target)) != 1:
         raise QueueStateError("queue posting link has a duplicate or conflicting alias")
     target_index = queue_items.index(item)
-    effective = dict(item)
+    effective = target
     for key in ("company", "role"):
         if not norm_text(effective.get(key)):
             effective[key] = posting.get(key, "")
@@ -1325,16 +1326,16 @@ def _check_claim_identities(item, queue_items, tracker_rows, posting):
             tracker_pr = identity.pr_number(tracker)
         except (TypeError, ValueError) as exc:
             raise QueueStateError("tracker contains contradictory PR aliases") from exc
-        tracker_link = identity.normalize_posting_url(tracker.get("link"))
-        same_id = tracker_link == app_id[5:] if tracker_link else False
+        same_id = identity.same_posting(tracker, effective)
         same_pr = tracker_pr and tracker_pr == pr_number_of(item)
-        if same_pr and tracker_link and tracker_link != app_id[5:]:
+        if same_pr and identity.posting_keys(tracker) and not same_id:
             raise QueueStateError("current tracker PR alias points at a different posting")
         same_name = (norm_text(tracker.get("company")).casefold(),
                      norm_text(tracker.get("role")).casefold()) == (
                          norm_text(posting.get("company")).casefold(),
                          norm_text(posting.get("role")).casefold())
-        if (same_id or same_pr or same_name) and not same_pr:
+        both_verified = identity.requisition_key(tracker) and identity.requisition_key(effective)
+        if (same_id or (same_name and not both_verified)) and not same_pr:
             raise QueueStateError("current tracker contains a conflicting application identity")
         if (same_id or same_pr) and canonical_submitted(tracker.get("status")):
             raise QueueStateError("application is already recorded as submitted")
@@ -1363,9 +1364,8 @@ def _read_claim_inputs(args, item, queue_items, log=lambda *a: None):
         raise QueueStateError("current postings are unavailable or malformed") from exc
     if not isinstance(postings, list) or any(not isinstance(row, dict) for row in postings):
         raise QueueStateError("current postings must be a list of objects")
-    matches = [row for row in postings
-               if identity.normalize_posting_url(row.get("link")) == app_id[5:]]
-    if len(matches) != 1:
+    matches = identity.matching_routes(item, postings)
+    if len(matches) != 1 or not identity.same_posting(matches[0], item):
         raise QueueStateError("posting link does not identify exactly one current posting")
     posting = dict(matches[0])
     clean_meta, meta_verdict, meta_findings = tailor.guard_posting_metadata(posting)
@@ -1379,7 +1379,7 @@ def _read_claim_inputs(args, item, queue_items, log=lambda *a: None):
     posting["title"] = clean_meta.get("title", "")
     for key in ("posting_url", "posting_link"):
         alias = posting.get(key)
-        if alias and identity.normalize_posting_url(alias) != app_id[5:]:
+        if alias and "link:" + identity.normalize_posting_url(alias) not in identity.posting_keys(posting):
             raise QueueStateError("current posting contains a conflicting URL alias")
 
     profile_path = args.profile or os.path.join(args.repo, "data", "profile.yaml")
@@ -1621,6 +1621,18 @@ def cmd_enqueue(args, log):
         log("queue: current tracker is malformed; enqueue stopped: " + str(exc))
         return 1
 
+    postings_path = os.path.join(args.repo, "data", "postings.json")
+    try:
+        with open(postings_path, encoding="utf-8") as fh:
+            postings = json.load(fh)
+        if not isinstance(postings, list) or any(not isinstance(row, dict) for row in postings):
+            raise ValueError("posting store must be a list of objects")
+    except FileNotFoundError:
+        postings = []
+    except (OSError, ValueError) as exc:
+        log("queue: could not read posting identities: " + str(exc))
+        return 1
+
     # Attach changed-file lists (live: one API call per unseen app/* candidate).
     # A deleted branch is never consulted -- only the PR metadata and diff.
     seen_numbers = {pr_number_of(it) for it in initial_items}
@@ -1634,6 +1646,7 @@ def cmd_enqueue(args, log):
             else:
                 pr["files"] = []
         pr["_tracker"] = tracker_text
+        pr["_postings"] = postings
         prs2.append(pr)
 
     try:
@@ -1672,11 +1685,11 @@ def enqueue(existing, prs_with_trackers, include_submitted=False, limit=0):
     Each PR mapping carries ``files`` (its changed paths) and ``_tracker`` (the
     ``applications.yaml`` text at its merge commit). Idempotent by PR number.
     """
+    from application_identity import identity_evidence, matching_routes, posting_keys, same_posting
     items = [dict(it) for it in existing]
     seen = {pr_number_of(it) for it in items}
     seen.discard(0)
-    active = {active_key(it) for it in items
-              if it.get("status") in APPLICATION_GUARD_STATUSES}
+    active = [it for it in items if it.get("status") in APPLICATION_GUARD_STATUSES]
     added, skipped = [], []
     for pr in sorted(prs_with_trackers, key=lambda p: int(p.get("number") or 0)):
         number = int(pr.get("number") or 0)
@@ -1697,14 +1710,28 @@ def enqueue(existing, prs_with_trackers, include_submitted=False, limit=0):
             skipped.append((number, "already submitted in tracker"))
             continue
         item = build_item(pr, entry, vp, include_submitted=include_submitted)
-        if active_key(item) in active:
+        postings = matching_routes(item, pr.get("_postings", ()))
+        if len(postings) > 1 or (postings and not same_posting(item, postings[0])):
+            skipped.append((number, "posting identity requires review"))
+            continue
+        if postings:
+            item.update(identity_evidence(postings[0]))
+            item["link"] = normalize_url(postings[0].get("link")) or item["link"]
+        if any(same_posting(item, row)
+               or (not posting_keys(item) and active_key(item) == active_key(row))
+               for row in active):
             skipped.append((number, "already active for this application"))
+            continue
+        if not include_submitted and any(
+                canonical_submitted(row.get("status")) and same_posting(item, row)
+                for row in parse_yaml_list(pr.get("_tracker") or "")):
+            skipped.append((number, "already submitted in tracker"))
             continue
         if limit and len(added) >= limit:
             skipped.append((number, "limit reached"))
             continue
         seen.add(number)
-        active.add(active_key(item))
+        active.append(item)
         added.append(item)
         items.append(item)
     return sort_items(items), added, skipped

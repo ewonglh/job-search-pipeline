@@ -209,11 +209,8 @@ def guard_posting_metadata(posting):
 
 
 def normalize_url(url):
-    url = (url or "").strip()
-    if not url:
-        return ""
-    p = urllib.parse.urlsplit(url)
-    return urllib.parse.urlunsplit((p.scheme, p.netloc, p.path.rstrip("/"), "", ""))
+    from application_identity import normalize_posting_url
+    return normalize_posting_url(url)
 
 
 def _ssl_context():
@@ -491,14 +488,15 @@ def load_repo_inputs(repo_dir):
 
 
 def tracker_keys(apps):
-    """Normalised link + company|role keys that count as already tracked."""
+    """Prefer posting identity and keep name matching for unkeyed legacy rows."""
     links, names = set(), set()
     for a in apps:
         if not isinstance(a, dict):
             continue
-        link = normalize_url(str(a.get("link") or ""))
-        if link:
-            links.add(link.lower())
+        keys = _posting_lookup_keys(a)
+        if keys:
+            links.update(keys)
+            continue
         company = norm_text(a.get("company", "")).lower()
         role = norm_text(a.get("role", "")).lower()
         if company or role:
@@ -506,9 +504,13 @@ def tracker_keys(apps):
     return links, names
 
 
+def _posting_lookup_keys(posting):
+    from application_identity import posting_keys
+    return {key.removeprefix("link:") for key in posting_keys(posting)}
+
+
 def is_tracked(posting, links, names):
-    link = normalize_url(posting.get("link", "")).lower()
-    if link and link in links:
+    if _posting_lookup_keys(posting) & links:
         return True
     company = norm_text(posting.get("company", "")).lower()
     role = norm_text(posting.get("role", "")).lower()
@@ -704,7 +706,7 @@ def _body_links(body):
     for m in re.finditer(r"https?://[^\s)\]<>{\"']+", str(body or "")):
         url = m.group(0)
         if "github.com" not in url:
-            links.add(normalize_url(url).lower())
+            links.add(normalize_url(url))
     return links
 
 
@@ -881,23 +883,15 @@ def in_flight_tracker(repo_dir, open_heads, log=lambda *a: None):
         if entries is None:
             unreadable.append(b)
             continue
-        for e in entries:
-            if not isinstance(e, dict):
-                continue
-            link = normalize_url(str(e.get("link") or "")).lower()
-            if link:
-                links.add(link)
-            c = norm_text(e.get("company", "")).lower()
-            r = norm_text(e.get("role", "")).lower()
-            if c or r:
-                names.add(f"{c}|{r}")
+        branch_links, branch_names = tracker_keys(entries)
+        links.update(branch_links)
+        names.update(branch_names)
     return links, names, unreadable
 
 
 def posting_in_flight(posting, links, names, unreadable):
     """True when the posting already has an open PR."""
-    link = normalize_url(posting.get("link", "")).lower()
-    if link and link in links:
+    if _posting_lookup_keys(posting) & links:
         return True
     company = norm_text(posting.get("company", "")).lower()
     role = norm_text(posting.get("role", "")).lower()
@@ -923,16 +917,16 @@ def bare_app_branches(repo_dir, open_heads, log=lambda *a: None):
     return sorted(b for b in branches if b not in open_heads)
 
 
+def work_slug(posting):
+    """Derive a work filename and branch slug from its requisition."""
+    from application_identity import application_id
+    base = f"{slugify(posting.get('company', ''))}-{slugify(posting.get('role', ''))}"
+    return f"{base}-{_digest_bytes(application_id(posting).encode('utf-8'))[:12]}"
+
+
 def assign_slugs(selected):
-    """Deterministic, collision-free slugs for work-item filenames."""
-    used, out = {}, []
-    for p in selected:
-        base = f"{slugify(p.get('company', ''))}-{slugify(p.get('role', ''))}"
-        n = used.get(base, 0) + 1
-        used[base] = n
-        slug = base if n == 1 else f"{base}-{n}"
-        out.append((p, slug))
-    return out
+    """Derive filenames that remain stable across independent runs."""
+    return [(posting, work_slug(posting)) for posting in selected]
 
 
 # ---------------------------------------------------------------- work items
@@ -942,8 +936,10 @@ def _digest_bytes(value):
 
 def build_work_item(posting, slug, jd, profile, profile_source,
                     master_source, eligibility_result, guarded_posting):
+    from application_identity import identity_evidence
     eligibility_provenance = eligibility_result.get("provenance", {})
     return {
+        **identity_evidence(posting),
         "slug": slug,
         "company": guarded_posting.get("company", posting.get("company", "")),
         "role": guarded_posting.get("role", posting.get("role", "")),
@@ -954,7 +950,7 @@ def build_work_item(posting, slug, jd, profile, profile_source,
         "posted": posting.get("posted", ""),
         "status": "ready",
         "jd_text": jd["jd_text"],
-        "apply_url": jd.get("apply_url"),
+        "apply_url": posting.get("apply_url") or jd.get("apply_url"),
         "apply_url_source": jd.get("apply_url_source"),
         "cover_letter_requested": bool(COVER_LETTER_RE.search(jd["jd_text"])),
         "profile": profile,
@@ -984,6 +980,29 @@ def write_work_item(work_dir, slug, item):
         fh.write("\n")
     os.replace(path + ".tmp", path)
     return path
+
+
+def _record_eligibility(work_dir, slug, posting, decision):
+    from application_identity import application_id
+    record = {"application_id": application_id(posting), "decision": decision}
+    encoded = json.dumps(record, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    digest = _digest_bytes(encoded)
+    relative = os.path.join("_eligibility", slug, digest + ".json")
+    if not os.path.isfile(os.path.join(work_dir, relative)):
+        write_work_item(os.path.join(work_dir, "_eligibility", slug), digest, record)
+    return relative.replace(os.sep, "/")
+
+
+def retain_eligibility_decision(work_dir, slug, posting, decision):
+    """Keep one record per posting decision as policy and evidence change."""
+    try:
+        with open(os.path.join(work_dir, slug + ".json"), encoding="utf-8") as fh:
+            previous = json.load(fh)
+    except FileNotFoundError:
+        previous = {}
+    if isinstance(previous.get("eligibility"), dict) and not previous.get("eligibility_decision_ref"):
+        _record_eligibility(work_dir, slug, posting, previous["eligibility"])
+    return _record_eligibility(work_dir, slug, posting, decision)
 
 
 def write_needs_jd(work_dir, pending):
@@ -1205,6 +1224,9 @@ def main(argv=None):
 
         eligibility_result = eligibility_mod.evaluate(
             guarded_posting, profile, jd["jd_text"], profile_source)
+        decision_ref = None
+        if not args.dry_run:
+            decision_ref = retain_eligibility_decision(args.work, slug, p, eligibility_result)
         if eligibility_result.get("status") != "eligible":
             eligibility_status = eligibility_result.get("status", "unknown")
             eligibility_conflict = eligibility_status == "ineligible"
@@ -1216,7 +1238,8 @@ def main(argv=None):
                             "status": "hold", "category": "eligibility",
                             "reason": code, "code": code,
                             "eligibility_status": eligibility_status,
-                            "eligibility": eligibility_result})
+                            "eligibility": eligibility_result,
+                            "eligibility_decision_ref": decision_ref})
             log(f"tailor: hold      {guarded_posting.get('company')} · "
                 f"{guarded_posting.get('role')} "
                 f"({code})")
@@ -1225,6 +1248,7 @@ def main(argv=None):
         item = build_work_item(p, slug, jd, profile, profile_source,
                                master_source, eligibility_result, guarded_posting)
         item["jd_guard"] = jd_guard
+        item["eligibility_decision_ref"] = decision_ref
         items.append(item)
         if not args.dry_run:
             created.append(write_work_item(args.work, slug, item))

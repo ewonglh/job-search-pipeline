@@ -203,6 +203,9 @@ def workday(cfg, today):
                 "source": "Workday",
                 "location": p.get("locationsText") or "",
             }
+            if p.get("jobReqId"):
+                row["requisition_id"] = f"workday:{tenant}:{p['jobReqId']}"
+                row["requisition_evidence"] = "Workday jobReqId"
             posted = _workday_posted(p.get("postedOn"), today)
             if posted:
                 row["posted"] = posted
@@ -231,6 +234,9 @@ def greenhouse(cfg, today):
             "source": "Greenhouse",
             "location": (p.get("location") or {}).get("name") or "",
         }
+        if p.get("id"):
+            row["requisition_id"] = f"greenhouse:{slug}:{p['id']}"
+            row["requisition_evidence"] = "Greenhouse job ID"
         posted = _iso_date(p.get("updated_at"))
         if posted:
             row["posted"] = posted
@@ -265,6 +271,8 @@ def smartrecruiters(cfg, today):
                 "role": p.get("name") or "",
                 "link": f"https://jobs.smartrecruiters.com/{slug}/{jid}",
                 "source": "SmartRecruiters",
+                "requisition_id": f"smartrecruiters:{slug}:{jid}",
+                "requisition_evidence": "SmartRecruiters posting ID",
                 "location": ", ".join(x for x in (city, country) if x),
             }
             posted = _iso_date(p.get("releasedDate"))
