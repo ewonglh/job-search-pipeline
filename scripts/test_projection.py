@@ -20,6 +20,17 @@ import review_contract
 
 
 NOW = datetime(2026, 11, 16, 6, 0, tzinfo=timezone.utc)
+
+
+class FixtureClock(datetime):
+    @classmethod
+    def now(cls, tz=None):
+        return NOW.astimezone(tz) if tz else NOW.replace(tzinfo=None)
+
+
+# Collection and read-time freshness must use the same synthetic clock.
+_projection_clock = mock.patch.object(projection, "datetime", FixtureClock)
+_projection_clock.start()
 CANARY = "PRIVATE-CANARY-I11-DO-NOT-PERSIST"
 OWNER_NAME = "PRIVATE-OWNER-NAME-I11"
 HEAD1 = "1" * 40
@@ -597,4 +608,5 @@ with tempfile.TemporaryDirectory(prefix="synthetic-projection-i11-") as temp:
     assert retained_catalog["facts"]["company_catalog"] == catalog_snapshot["facts"]["company_catalog"]
     assert retained_catalog["sources"]["companies"]["error_code"] == "source_invalid"
 
+_projection_clock.stop()
 print("test_projection: incremental generations, privacy, cached reads and review facts passed")

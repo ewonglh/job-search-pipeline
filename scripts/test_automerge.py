@@ -222,7 +222,7 @@ def test_provenance_preflight_and_cap():
         os.makedirs(os.path.join(repo, "data"))
         os.makedirs(os.path.join(repo, "variants", "synthetic-role"))
         origin = os.path.join(root, "origin.git")
-        subprocess.run(["git", "init", "--bare", "-q", origin], check=True)
+        subprocess.run(["git", "init", "--bare", "-q", "-b", "main", origin], check=True)
         with open(os.path.join(repo, "master", "resume.tex"), "w", encoding="utf-8") as fh:
             fh.write("Synthetic resume source.\n")
         with open(os.path.join(repo, "data", "profile.yaml"), "w", encoding="utf-8") as fh:
@@ -235,8 +235,9 @@ def test_provenance_preflight_and_cap():
             fh.write("Synthetic tailored resume.\n")
         with open(os.path.join(repo, "variants", "synthetic-role", "resume.pdf"), "wb") as fh:
             fh.write(b"synthetic pdf bytes")
-        subprocess.run(["git", "-C", repo, "init", "-q"], check=True)
-        subprocess.run(["git", "-C", repo, "add", "master/resume.tex", "data/profile.yaml", "data/postings.json",
+        subprocess.run(["git", "-C", repo, "init", "-q", "-b", "main"], check=True)
+        subprocess.run(["git", "-C", repo, "add", "master/resume.tex", "data/profile.yaml",
+                        "data/postings.json",
                         "applications.yaml"], check=True)
         subprocess.run(["git", "-C", repo, "-c", "user.name=Synthetic", "-c",
                         "user.email=synthetic@example.invalid", "commit", "-qm", "base fixture"], check=True)
