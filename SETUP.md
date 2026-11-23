@@ -50,19 +50,29 @@ python3 scripts/queue.py init
 ```
 
 - A missing queue is an error, never an empty queue. Every queue command stops
-  and prints the `init` command.
+  and prints the `init` command ([`scripts/queue.py:537`](scripts/queue.py#L537)).
 - `init` never overwrites. On an existing store it validates and leaves it as is.
+  ([`scripts/queue.py:598`](scripts/queue.py#L598))
 - A valid `[]` queue and a valid older queue load unchanged. A malformed queue
   stops writes and is not repaired automatically.
 - `enqueue` and `claim` refresh `origin/main` first and read
   `applications.yaml` from the commit that fetch returned. If the refresh fails
   they stop, even when a cached copy exists. Check network access and
-  `gh auth status`, then rerun.
+  `gh auth status`, then rerun ([`scripts/queue.py:929`](scripts/queue.py#L929)).
 - `automerge.py` applies the same rule to its tracker, master resume and profile
-  reads, and reports a missing queue with the `init` command.
+  reads, and reports a missing queue with the `init` command
+  ([`scripts/automerge.py:288`](scripts/automerge.py#L288),
+  [`scripts/automerge.py:329`](scripts/automerge.py#L329),
+  [`scripts/automerge.py:437`](scripts/automerge.py#L437)).
+- `automerge.py` validates the posting-age limit at startup and uses one run
+  date for freshness checks, including when there are no open PRs
+  ([`scripts/automerge.py:552`](scripts/automerge.py#L552),
+  [`scripts/posting_admission.py:7`](scripts/posting_admission.py#L7)).
 - Before writing, `enqueue` and `claim` recheck the pinned tracker and the
   current queue under the queue lock. A tracker that moved on `origin/main` in
-  between stops the write. Rerun to use the new revision.
+  between stops the write. Rerun to use the new revision
+  ([`scripts/queue.py:989`](scripts/queue.py#L989),
+  [`scripts/queue.py:1661`](scripts/queue.py#L1661)).
 
 ## Email ingestion
 

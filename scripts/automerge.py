@@ -30,7 +30,7 @@ import sys
 import urllib.parse
 
 from application_identity import application_id, normalize_posting_url as normalize_url
-from posting_admission import freshness_exclusion
+from posting_admission import configured_max_age_days, freshness_exclusion
 from review_contract import approval_result, canonical_sha256, posting_evidence
 from config import (default_repo_dir, default_runtime_path, github_repo_setting,
                     path_setting)
@@ -287,7 +287,7 @@ def _git_blob_sha256(repo, revision, path):
 
 def preflight_candidate(pr, review, work_item=None, queue_module=None,
                         tailor_module=None, queue_file=None, gates_file=None,
-                        repo_dir=None):
+                        repo_dir=None, max_age_days=None, today=None):
     """Fail closed on snapshot provenance, caps, queue duplicates and tracker state."""
     q = queue_module or _load_service_module("jobsearch_queue_for_automerge", "queue.py")
     tailor = tailor_module or _load_service_module("jobsearch_tailor_for_automerge", "tailor.py")
@@ -434,7 +434,7 @@ def preflight_candidate(pr, review, work_item=None, queue_module=None,
                 return False, "posting already submitted in applications tracker"
 
         try:
-            postings = json.loads(_git_output(repo, "show", "origin/main:" + tailor.POSTINGS_PATH))
+            postings = json.loads(_git_output(repo, "show", main_commit + ":" + tailor.POSTINGS_PATH))
         except (ValueError, OSError):
             return False, "current posting store is unavailable or malformed"
         if not isinstance(postings, list) or any(not isinstance(row, dict) for row in postings):
@@ -444,7 +444,8 @@ def preflight_candidate(pr, review, work_item=None, queue_module=None,
         if len(matched) != 1 or application_id(matched[0]) != observed["posting_identity"]:
             return False, "current posting identity is unavailable or conflicts with the review"
         posting = matched[0]
-        reason = freshness_exclusion(posting)
+        reason = freshness_exclusion(posting, today=today,
+                                     max_age_days=max_age_days)
         if reason:
             return False, reason
         fetched = tailor.fetch_jd(posting)
@@ -548,15 +549,22 @@ def main(argv=None):
                     help="report readiness without changing GitHub or local state")
     ap.parse_args(argv)
     try:
+        max_age_days = configured_max_age_days()
+        run_date = datetime.date.today()
         reviewed = load_reviewed()
         skip_prs, skip_links = load_skips()
         merged_index = load_merged_pr_index()
         prs = open_app_prs()
-    except Exception as exc:
+    except (Exception, SystemExit) as exc:
         log("automerge: blocked because an input is unavailable or malformed: " + str(exc))
         return 2
 
-    results = evaluate_readiness(prs, reviewed, skip_prs, skip_links, merged_index)
+    def command_preflight(pr, review, item):
+        return preflight_candidate(pr, review, item, max_age_days=max_age_days,
+                                   today=run_date)
+
+    results = evaluate_readiness(prs, reviewed, skip_prs, skip_links, merged_index,
+                                 preflight=command_preflight)
     if not results:
         print("automerge: no open app/* PRs")
         return 0

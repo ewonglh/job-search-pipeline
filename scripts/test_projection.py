@@ -26,6 +26,16 @@ HEAD1 = "1" * 40
 HEAD2 = "2" * 40
 
 
+class FixtureDateTime(datetime):
+    @classmethod
+    def now(cls, tz=None):
+        return NOW.replace(tzinfo=None) if tz is None else NOW.astimezone(tz)
+
+
+# Read-time freshness checks must use the fixture clock, not the machine date.
+projection.datetime = FixtureDateTime
+
+
 def _yaml(rows):
     if not rows:
         return "[]\n"
@@ -41,20 +51,24 @@ def _yaml(rows):
     return "\n".join(lines) + "\n"
 
 
-def _review_entry(head, *, valid=True):
+def _review_entry(head, *, legacy=False):
     artifacts = {
         "variants/example-role/resume.tex": "a" * 64,
         "variants/example-role/resume.pdf": "b" * 64,
     }
+    posting_evidence = review_contract.posting_evidence(
+        {"link": "https://example.invalid/job/1"},
+        "Synthetic description for a software internship.")
     provenance = {
         "schema": 1, "review_head_sha": head,
         "master_commit": "c" * 40, "master_resume_blob": "d" * 40,
         "master_resume_path": "master/resume.tex",
-        "current_jd_sha256": "e" * 64, "profile_sha256": "f" * 64,
+        "current_jd_sha256": posting_evidence["current_jd_sha256"],
+        "profile_sha256": "f" * 64,
         "artifacts": artifacts,
     }
-    if not valid:
-        provenance["review_head_sha"] = "0" * 40
+    if not legacy:
+        provenance.update(posting_evidence)
     audit = {
         "truthfulness": "pass", "eligibility": "eligible",
         "layout_checked": True, "onepage_checked": True, "no_tracker_edit": True,
@@ -165,7 +179,7 @@ with tempfile.TemporaryDirectory(prefix="synthetic-projection-i11-") as temp:
                             "verification": "verified", "origin": "unknown",
                             "evidence": CANARY, "raw_excerpt": CANARY}]},
         reviews={"reviewed": {"41": _review_entry(HEAD1),
-                               "42": _review_entry(HEAD2, valid=False)}},
+                               "42": _review_entry(HEAD2, legacy=True)}},
         preflight={"schema": 1, "records": [
             _preflight_record(HEAD1, accepted=True),
             _preflight_record(HEAD2, accepted=False, code="unsupported_number")]})
@@ -178,14 +192,15 @@ with tempfile.TemporaryDirectory(prefix="synthetic-projection-i11-") as temp:
     assert snapshot["schema_version"] == 1
     assert snapshot["sources"]["tracker"]["status"] == "stale"
     assert snapshot["sources"]["tracker"]["error_code"] == "observation_time_unknown"
-    assert snapshot["sources"]["events"]["status"] == "fresh"
+    assert snapshot["sources"]["events"]["status"] == "fresh", snapshot["sources"]["events"]
     assert snapshot["facts"]["events"][0]["event_type"] == "offer"
     review_quality = snapshot["facts"]["review_quality"]
     assert review_quality["unique_artifact_heads"] == 2
     by_head = {row["artifact_head"]: row for row in review_quality["records"]}
     assert by_head[HEAD1]["model_acceptance"] == "accepted"
     assert by_head[HEAD1]["owner_acceptance"] == "accepted"
-    assert by_head[HEAD2]["model_acceptance"] == "unknown"
+    assert by_head[HEAD2]["model_acceptance"] == "accepted"
+    assert by_head[HEAD2]["provenance_status"] == "unknown"
     assert by_head[HEAD2]["owner_acceptance"] == "unknown"
     assert review_quality["rework_by_code"] == {"unsupported_number": 1}
     exported = json.dumps(snapshot, sort_keys=True)

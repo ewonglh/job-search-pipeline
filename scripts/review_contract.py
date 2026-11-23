@@ -49,8 +49,8 @@ def posting_evidence(posting, jd_text):
     }
 
 
-def valid_provenance(provenance, head_sha):
-    """Return (valid, reason) for the immutable inputs reviewed by a model."""
+def valid_historical_provenance(provenance, head_sha):
+    """Validate the original immutable review fields, including legacy records."""
     if not isinstance(provenance, dict):
         return False, "provenance is missing or malformed"
     if type(provenance.get("schema")) is not int or provenance["schema"] != SCHEMA:
@@ -80,6 +80,45 @@ def valid_provenance(provenance, head_sha):
     if not any(path.endswith("/resume.pdf") for path in artifacts):
         return False, "provenance does not hash resume.pdf"
     return True, "valid"
+
+
+def valid_current_posting_evidence(provenance):
+    """Require a supported posting-evidence version and canonical identity."""
+    if not isinstance(provenance, dict):
+        return False, "provenance is missing or malformed"
+    version = provenance.get("posting_evidence_version")
+    if type(version) is not int or version != POSTING_EVIDENCE_VERSION:
+        return False, "current posting evidence is missing or unsupported"
+    identity = provenance.get("posting_identity")
+    if not isinstance(identity, str):
+        return False, "current posting identity is missing or malformed"
+    if identity.startswith("link:"):
+        url = identity[len("link:"):]
+        if not url or normalize_posting_url(url) != url:
+            return False, "current posting identity is not canonical"
+        return True, "valid current posting evidence"
+    if identity.startswith("requisition:"):
+        raw = identity[len("requisition:"):]
+        try:
+            parts = json.loads(raw)
+        except (TypeError, ValueError):
+            return False, "current posting identity is malformed"
+        if (not isinstance(parts, list) or len(parts) != 2
+                or any(not isinstance(value, str) or not value.strip() for value in parts)
+                or parts[0] != " ".join(parts[0].split()).casefold()
+                or parts[1] != parts[1].strip()
+                or json.dumps(parts, separators=(",", ":")) != raw):
+            return False, "current posting identity is not canonical"
+        return True, "valid current posting evidence"
+    return False, "current posting identity has an unsupported form"
+
+
+def valid_provenance(provenance, head_sha):
+    """Validate historical fields and the current versioned posting evidence."""
+    valid, reason = valid_historical_provenance(provenance, head_sha)
+    if not valid:
+        return False, reason
+    return valid_current_posting_evidence(provenance)
 
 
 def audit_eligible(audit, provenance):
@@ -163,5 +202,33 @@ def approval_result(entry, head_sha):
     return True, "valid current-head review"
 
 
+def historical_approval_result(entry, head_sha):
+    """Interpret a structurally valid pre-versioned approval as historical only."""
+    if not isinstance(entry, dict) or entry.get("verdict") != "approve":
+        return False, "review is not an approve verdict"
+    if not isinstance(head_sha, str) or not SHA_RE.fullmatch(head_sha):
+        return False, "current PR head is unavailable"
+    if entry.get("review_head_sha") != head_sha:
+        return False, "review is for a stale PR head"
+    provenance = entry.get("provenance")
+    if (not isinstance(provenance, dict)
+            or "posting_evidence_version" in provenance
+            or "posting_identity" in provenance):
+        return False, "review is not a legacy posting-evidence record"
+    valid, reason = valid_historical_provenance(provenance, head_sha)
+    if not valid:
+        return False, reason
+    reviewer = entry.get("reviewer_version")
+    if not isinstance(reviewer, str) or not reviewer.strip():
+        return False, "reviewer version is missing"
+    if not audit_eligible(entry.get("audit"), provenance):
+        return False, "review audit is incomplete or malformed"
+    return True, "valid historical review; current posting evidence requires revalidation"
+
+
 def approval_valid(entry, head_sha):
     return approval_result(entry, head_sha)[0]
+
+
+def historical_approval_valid(entry, head_sha):
+    return historical_approval_result(entry, head_sha)[0]

@@ -98,6 +98,35 @@ def test_main_reports_ready_without_merge():
         assert calls == [], calls
 
 
+def test_invalid_freshness_config_blocks_even_without_candidates():
+    error = io.StringIO()
+    with mock.patch.dict(os.environ, {"JOBSEARCH_MAX_AGE_DAYS": "invalid"}), \
+            mock.patch.object(am, "load_reviewed") as load_reviewed, \
+            mock.patch.object(am, "load_skips") as load_skips, \
+            mock.patch.object(am, "load_merged_pr_index") as load_merged, \
+            mock.patch.object(am, "open_app_prs") as open_prs, \
+            contextlib.redirect_stderr(error):
+        result = am.main([])
+    assert result == 2
+    assert "JOBSEARCH_MAX_AGE_DAYS must be an integer" in error.getvalue()
+    assert not any(call.called for call in (load_reviewed, load_skips,
+                                             load_merged, open_prs))
+
+
+def test_same_head_requisition_change_requires_revalidation():
+    item = dict(work_item(), requisition_id="REQ-41",
+                requisition_evidence="synthetic employer requisition record")
+    changed = dict(item, requisition_id="REQ-42")
+    entry = review(item=item)
+    allowed, reason = am.preflight_candidate(pr(), entry, changed)
+    assert not allowed and "requisition evidence" in reason, reason
+
+    changed_body = pr()
+    changed_body["body"] = "Posting: https://example.invalid/jobs/other-role"
+    allowed, reason = am.preflight_candidate(changed_body, review(), work_item())
+    assert not allowed and "PR body" in reason, reason
+
+
 def test_denials():
     base_item = work_item()
     base_pr = pr()
@@ -295,7 +324,7 @@ def test_provenance_preflight_and_cap():
              False, "[]\n", "[]\n", "[]\n", "profile"),
             ("JD", {"jd_text": "A revised job description."}, {}, False,
              "[]\n", "[]\n", "[]\n", "job description"),
-            ("aged posting", {}, {("show", "origin/main:data/postings.json"):
+            ("aged posting", {}, {("show", commit + ":" + tailor_module.POSTINGS_PATH):
                                   json.dumps([dict(item, added="2000-01-01")])}, False,
              "[]\n", "[]\n", "[]\n", "older than"),
             ("changed live JD", {}, {}, False, "[]\n", "[]\n", "[]\n", "reviewed evidence"),
@@ -310,6 +339,7 @@ def test_provenance_preflight_and_cap():
         ]
         git_output = am._git_output
         blob_digest = am._git_blob_sha256
+        posting_read_revisions = []
         for name, updates, git_overrides, bad_artifact, qtext, gtext, tracker, expected in cases:
             if os.path.isdir(queue_file):
                 os.rmdir(queue_file)
@@ -333,6 +363,15 @@ def test_provenance_preflight_and_cap():
                 # Match on command and path so overrides apply to whichever
                 # commit the preflight pinned its main reads to.
                 key = (args[0], args[1].split(":", 1)[-1]) if len(args) > 1 else None
+                exact_key = (args[0], args[1]) if len(args) > 1 else None
+                if (args and args[0] == "show" and len(args) > 1
+                        and args[1].split(":", 1)[-1] == tailor_module.POSTINGS_PATH):
+                    revision = args[1].split(":", 1)[0]
+                    assert len(revision) == 40 and all(ch in "0123456789abcdef"
+                                                       for ch in revision), args
+                    posting_read_revisions.append(revision)
+                if exact_key in git_overrides:
+                    return git_overrides[exact_key]
                 if key in git_overrides:
                     return git_overrides[key]
                 return git_output(path, *args)
@@ -352,6 +391,8 @@ def test_provenance_preflight_and_cap():
                     gates_file=gates_file, repo_dir=repo)
             assert not allowed and expected in reason, (name, allowed, reason)
 
+        assert posting_read_revisions, "current postings were not read"
+
         # Back to a clean, valid state: readiness passes.
         if os.path.isdir(queue_file):
             os.rmdir(queue_file)
@@ -362,7 +403,9 @@ def test_provenance_preflight_and_cap():
         args = (pr(head=head), entry, item)
         kwargs = dict(queue_module=queue_module, tailor_module=tailor_module,
                       queue_file=queue_file, gates_file=gates_file, repo_dir=repo)
-        allowed, reason = am.preflight_candidate(*args, **kwargs)
+        with mock.patch.object(tailor_module, "fetch_jd",
+                               return_value={"jd_text": item["jd_text"]}):
+            allowed, reason = am.preflight_candidate(*args, **kwargs)
         assert allowed, reason
 
         # A failed refresh blocks readiness even though the clone still holds a
@@ -381,6 +424,8 @@ def test_provenance_preflight_and_cap():
 
 
 test_main_reports_ready_without_merge()
+test_invalid_freshness_config_blocks_even_without_candidates()
+test_same_head_requisition_change_requires_revalidation()
 test_denials()
 test_strict_skip_input()
 test_duplicate_review_json_is_rejected()
