@@ -101,6 +101,7 @@ Usage:
   queue.py reconcile --pr N --attempt-id ID --result {retry,submitted}
                      --evidence-source TEXT --evidence-observation TEXT
   queue.py sync-tracker --pr N [--repo DIR] [--queue FILE]
+  queue.py recover-submissions [--repo DIR] [--queue FILE] [--json]
 
 **Tracker write-back.** A confirmed submission and ``tracker_sync: pending``
 are durably stored before tracker I/O. The tracker row is then appended and
@@ -797,6 +798,42 @@ def queue_lock(path):
                 except OSError:
                     if time.monotonic() >= deadline:
                         raise QueueStateError("timed out waiting for queue lock")
+                    time.sleep(0.05)
+            try:
+                yield
+            finally:
+                lock.seek(0)
+                msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
+@contextmanager
+def tracker_sync_lock(queue_path):
+    """Keep one tracker writer active per queue, without holding the queue lock."""
+    lock_path = os.path.abspath(queue_path) + ".tracker-sync.lock"
+    os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+    with open(lock_path, "a+b") as lock:
+        if os.name == "nt":
+            import msvcrt
+            lock.seek(0, os.SEEK_END)
+            if lock.tell() == 0:
+                lock.write(b"0")
+                lock.flush()
+            lock.seek(0)
+            deadline = time.monotonic() + 120
+            while True:
+                try:
+                    msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+                    break
+                except OSError:
+                    if time.monotonic() >= deadline:
+                        raise QueueStateError("timed out waiting for tracker sync lock")
                     time.sleep(0.05)
             try:
                 yield
@@ -3104,6 +3141,34 @@ def _outcome_evidence(args, outcome):
     return {"source": source, "observation": observation}
 
 
+def _record_submission_confirmation(item, attempt_id, date, sent,
+                                    confirmation_evidence, route):
+    """Persist the shared terminal fact and tracker outbox before any I/O."""
+    recorded_at = now_utc()
+    item.update({
+        "status": "submitted",
+        "attempt_state": "submitted",
+        "submitted_at": date,
+        "sent": norm_text(sent),
+        "confirmation_evidence": norm_text(confirmation_evidence),
+        "submitted_attempt_id": attempt_id,
+        "submission_confirmed_at": recorded_at,
+        "tracker_sync": "pending",
+        "tracker_sync_pending_at": recorded_at,
+        "tracker_sync_attempts": 0,
+        "tracker_sync_last_error": "",
+        "tracker_sync_error": "",
+        "route": norm_text(route),
+        "snapshot_provenance": "pending",
+        "snapshot_error": "",
+        "snapshot_error_code": "",
+    })
+    for key in ("tracker_sync_id", "tracker_sync_started_at",
+                "tracker_sync_failed_at", "tracker_synced_at", "tracker_commit"):
+        item.pop(key, None)
+    item.pop("next_action", None)
+
+
 def cmd_status(args, log):
     new = args.status
     if new not in ("submitted", "failed", "blocked", "skipped"):
@@ -3199,20 +3264,9 @@ def cmd_status(args, log):
                 # pre-submit check after the external action has succeeded.
                 if new == "submitted":
                     it["snapshot_verification_at_confirmation"] = _verification_state(it)
-                    it.update({
-                        "status": "submitted",
-                        "attempt_state": "submitted",
-                        "submitted_at": args.date,
-                        "sent": norm_text(args.sent),
-                        "confirmation_evidence": norm_text(args.confirmation_evidence),
-                        "tracker_sync": "pending",
-                        "tracker_sync_error": "",
-                        "route": norm_text(args.route),
-                        "submitted_attempt_id": args.attempt_id,
-                        "snapshot_provenance": "pending",
-                        "snapshot_error": "",
-                    })
-                    it.pop("next_action", None)
+                    _record_submission_confirmation(
+                        it, args.attempt_id, args.date, args.sent,
+                        args.confirmation_evidence, args.route)
                 elif new == "blocked":
                     it.update({"status": "blocked", "attempt_state": "blocked",
                                "blocked_at": now_utc(), "blocked_notes": norm_text(args.notes),
@@ -3232,6 +3286,11 @@ def cmd_status(args, log):
         log("queue: status write failed: " + str(exc))
         return 2
 
+    if new == "submitted":
+        try:
+            args.application_id = _canonical_queue_identity(it)
+        except QueueStateError:
+            args.application_id = None
     snapshot_failure = (new == "submitted" and
                         _post_submission_snapshot(args, log))
     if new == "submitted" and not args.no_tracker:
@@ -3337,6 +3396,7 @@ def cmd_prepare_snapshot(args, log):
                 "prepared_snapshot_at": prepared["captured_at"],
                 "snapshot_provenance": "prepared",
                 "snapshot_error": "",
+                "snapshot_error_code": "",
             })
             for key in ("snapshot_verified_id", "snapshot_verified_application_id",
                         "snapshot_verified_attempt_id", "snapshot_verified_at"):
@@ -3388,6 +3448,7 @@ def cmd_verify_snapshot(args, log):
                 "snapshot_verified_at": now_utc(),
                 "snapshot_provenance": "verified",
                 "snapshot_error": "",
+                "snapshot_error_code": "",
             })
             rows[idx] = current
             _write_queue_unlocked(args.queue, rows)
@@ -3414,12 +3475,15 @@ def _post_submission_snapshot(args, log):
     try:
         _finalize_snapshot_attempt(args.queue, args.pr, args.attempt_id, args.repo,
                                    getattr(args, "runner_id", None),
-                                   getattr(args, "session_ref", None))
+                                   getattr(args, "session_ref", None),
+                                   recovery=getattr(args, "recovery", False))
         return False
     except (OSError, QueueStateError, ValueError):
         _record_snapshot_failure(args.queue, args.pr, args.attempt_id,
                                  getattr(args, "runner_id", None),
-                                 getattr(args, "session_ref", None))
+                                 getattr(args, "session_ref", None),
+                                 getattr(args, "application_id", None),
+                                 recovery=getattr(args, "recovery", False))
         log("queue: submission is recorded; snapshot provenance needs attention. "
             "Inspect snapshot_error; repair retained evidence with queue.py "
             "finalize-snapshot --pr %s --attempt-id %s. Never resubmit."
@@ -3427,29 +3491,69 @@ def _post_submission_snapshot(args, log):
         return True
 
 
+def _consistent_alias(item, keys, label):
+    values = [norm_text(item.get(key)) for key in keys if norm_text(item.get(key))]
+    if len(set(values)) > 1:
+        raise QueueStateError("submitted row has conflicting %s aliases" % label)
+    return values[0] if values else ""
+
+
+def _submitted_attempt_id(item):
+    return _consistent_alias(item, ("submitted_attempt_id", "attempt_id"),
+                             "attempt ID")
+
+
+def _submitted_fields(item):
+    """Read established public/current fields without guessing missing facts."""
+    submitted_at = _consistent_alias(item, ("submitted_at", "applied_date"),
+                                     "submission date")
+    sent = _consistent_alias(item, ("sent",), "sent summary")
+    evidence = _consistent_alias(item, ("confirmation_evidence",),
+                                 "confirmation evidence")
+    if submitted_at:
+        try:
+            parsed = datetime.strptime(submitted_at, "%Y-%m-%d").date()
+        except ValueError as exc:
+            raise QueueStateError("submitted row has an invalid submission date") from exc
+        if parsed.isoformat() != submitted_at:
+            raise QueueStateError("submitted row has an invalid submission date")
+    return {"attempt_id": _submitted_attempt_id(item),
+            "submitted_at": submitted_at, "sent": sent,
+            "confirmation_evidence": evidence}
+
+
 def _finalize_snapshot_attempt(queue_path, pr_number, attempt_id, private_repo=None,
-                               runner_id=None, session_ref=None):
+                               runner_id=None, session_ref=None, recovery=False):
     """Finalize only an already submitted row; never creates a submission."""
     import submission_snapshot as snapshots
     with queue_lock(queue_path):
         rows = load_queue(queue_path)
         idx = _unique_item_index(rows, pr_number)
         item = dict(rows[idx])
-        if (item.get("status") != "submitted"
-                or item.get("attempt_id") != attempt_id
-                or item.get("submitted_attempt_id") != attempt_id):
+        fields = _submitted_fields(item)
+        if (item.get("status") != "submitted" or not attempt_id
+                or fields["attempt_id"] != attempt_id):
             raise QueueStateError("snapshot finalization requires the matching submitted attempt")
         owner = _owner_for_item(item)
-        if owner is not None and not _attempt_owner_matches(
-                item, attempt_id, runner_id, session_ref, allow_legacy_omission=True):
-            raise QueueStateError("snapshot finalization does not match the browser owner")
+        if owner is not None:
+            recovery_owner_match = recovery and owner.get("attempt_id") == attempt_id
+            if not recovery_owner_match and not _attempt_owner_matches(
+                    item, attempt_id, runner_id, session_ref,
+                    allow_legacy_omission=True):
+                raise QueueStateError("snapshot finalization does not match the browser owner")
         application_id = _canonical_queue_identity(item)
-        snapshot_id = item.get("prepared_snapshot_id")
-        if (not snapshot_id or item.get("prepared_snapshot_attempt_id") != attempt_id
-                or item.get("prepared_snapshot_application_id") != application_id):
+        snapshot_id = item.get("prepared_snapshot_id") or item.get("snapshot_id")
+        if not snapshot_id:
             raise QueueStateError("no prepared snapshot exists for this submitted attempt")
-        submitted_at = item.get("submitted_at")
-        evidence = item.get("confirmation_evidence")
+        bound_attempt = norm_text(item.get("prepared_snapshot_attempt_id"))
+        bound_application = norm_text(item.get("prepared_snapshot_application_id"))
+        if ((bound_attempt and bound_attempt != attempt_id)
+                or (bound_application and bound_application != application_id)):
+            raise QueueStateError("prepared snapshot binding does not match the submitted attempt")
+        submitted_at = fields["submitted_at"]
+        evidence = fields["confirmation_evidence"]
+        if not submitted_at or not evidence:
+            raise QueueStateError("snapshot finalization requires recorded confirmation evidence")
     root = _snapshot_store(SNAPSHOT_ROOT, private_repo)
     finalized_id = snapshots.finalize_snapshot(root, snapshot_id, application_id,
                                                 attempt_id, submitted_at, evidence)
@@ -3457,21 +3561,27 @@ def _finalize_snapshot_attempt(queue_path, pr_number, attempt_id, private_repo=N
         rows = load_queue(queue_path)
         idx = _unique_item_index(rows, pr_number)
         current = dict(rows[idx])
+        current_fields = _submitted_fields(current)
+        current_snapshot_id = (current.get("prepared_snapshot_id")
+                               or current.get("snapshot_id"))
         if (current.get("status") != "submitted"
-                or current.get("attempt_id") != attempt_id
-                or current.get("submitted_attempt_id") != attempt_id
-                or current.get("prepared_snapshot_id") != snapshot_id
+                or current_fields["attempt_id"] != attempt_id
+                or current_snapshot_id != snapshot_id
                 or _canonical_queue_identity(current) != application_id):
             raise QueueStateError("submitted attempt changed during snapshot finalization")
         owner = _owner_for_item(current)
-        if owner is not None and not _attempt_owner_matches(
-                current, attempt_id, runner_id, session_ref,
-                allow_legacy_omission=True):
-            raise QueueStateError("snapshot finalization does not match the browser owner")
+        if owner is not None:
+            recovery_owner_match = recovery and owner.get("attempt_id") == attempt_id
+            if not recovery_owner_match and not _attempt_owner_matches(
+                    current, attempt_id, runner_id, session_ref,
+                    allow_legacy_omission=True):
+                raise QueueStateError("snapshot finalization does not match the browser owner")
         verified = _verification_state(current) != "missing_or_mismatched"
         current.update({"snapshot_id": finalized_id,
                         "snapshot_provenance": "complete" if verified else "incomplete",
                         "snapshot_finalized_at": now_utc(),
+                        "snapshot_error_code": "" if verified else (
+                            "pre_submit_verification_missing"),
                         "snapshot_error": "" if verified else (
                             "Pre-submit verification was not recorded for these materials; "
                             "retained bytes are finalized, but historical verification "
@@ -3483,35 +3593,58 @@ def _finalize_snapshot_attempt(queue_path, pr_number, attempt_id, private_repo=N
 
 
 def _record_snapshot_failure(queue_path, pr_number, attempt_id,
-                             runner_id=None, session_ref=None):
+                             runner_id=None, session_ref=None,
+                             application_id=None, recovery=False):
     """Keep a terminal submission and prepared reference after a storage fault."""
     try:
         with queue_lock(queue_path):
             rows = load_queue(queue_path)
             idx = _unique_item_index(rows, pr_number)
             current = dict(rows[idx])
+            fields = _submitted_fields(current)
             if (current.get("status") != "submitted"
-                    or current.get("attempt_id") != attempt_id
-                    or current.get("submitted_attempt_id") != attempt_id):
+                    or fields["attempt_id"] != norm_text(attempt_id)):
+                return
+            if (application_id and
+                    _canonical_queue_identity(current) != application_id):
                 return
             owner = _owner_for_item(current)
-            if owner is not None and not _attempt_owner_matches(
-                    current, attempt_id, runner_id, session_ref,
-                    allow_legacy_omission=True):
-                return
-            if not current.get("prepared_snapshot_id"):
-                current["snapshot_provenance"] = "unknown"
+            if owner is not None:
+                recovery_owner_match = recovery and owner.get("attempt_id") == norm_text(attempt_id)
+                if not recovery_owner_match and not _attempt_owner_matches(
+                        current, attempt_id, runner_id, session_ref,
+                        allow_legacy_omission=True):
+                    return
+            if not fields["attempt_id"] and (
+                    current.get("prepared_snapshot_id") or current.get("snapshot_id")):
+                current["snapshot_provenance"] = "incomplete"
+                current["snapshot_error_code"] = "snapshot_attempt_binding_missing"
                 current["snapshot_error"] = (
-                    "No retained snapshot exists for this submitted attempt; "
+                    "The retained snapshot cannot be bound to an exact submitted attempt; "
                     "historical materials cannot be recreated. Never resubmit.")
+            elif not current.get("prepared_snapshot_id"):
+                if current.get("snapshot_id"):
+                    current["snapshot_provenance"] = "incomplete"
+                    current["snapshot_error_code"] = "snapshot_reference_invalid"
+                    current["snapshot_error"] = (
+                        "Snapshot reference could not be verified for this submitted attempt; "
+                        "historical materials cannot be recreated. Never resubmit.")
+                else:
+                    current["snapshot_provenance"] = "unknown"
+                    current["snapshot_error_code"] = "snapshot_missing_legacy"
+                    current["snapshot_error"] = (
+                        "No retained snapshot exists for this submitted attempt; "
+                        "historical materials cannot be recreated. Never resubmit.")
             elif (current.get("snapshot_id")
                   and _verification_state(current) == "missing_or_mismatched"):
                 current["snapshot_provenance"] = "incomplete"
+                current["snapshot_error_code"] = "pre_submit_verification_missing"
                 current["snapshot_error"] = (
                     "Pre-submit verification is missing; historical verification "
                     "cannot be recreated. Never resubmit.")
             else:
                 current["snapshot_provenance"] = "incomplete"
+                current["snapshot_error_code"] = "snapshot_finalize_failed"
                 current["snapshot_error"] = (
                     "Private snapshot finalization failed; retain this submitted attempt, "
                     "restore snapshot storage, then run queue.py finalize-snapshot "
@@ -3524,12 +3657,22 @@ def _record_snapshot_failure(queue_path, pr_number, attempt_id,
 
 
 def cmd_finalize_snapshot(args, log):
+    application_id = None
+    try:
+        with queue_lock(args.queue):
+            rows = load_queue(args.queue)
+            item = dict(rows[_unique_item_index(rows, args.pr)])
+            if (item.get("status") == "submitted"
+                    and _submitted_attempt_id(item) == args.attempt_id):
+                application_id = _canonical_queue_identity(item)
+    except (OSError, QueueStateError):
+        pass
     try:
         _finalize_snapshot_attempt(args.queue, args.pr, args.attempt_id, args.repo,
                                    args.runner_id, args.session_ref)
     except (OSError, QueueStateError, ValueError) as exc:
         _record_snapshot_failure(args.queue, args.pr, args.attempt_id,
-                                 args.runner_id, args.session_ref)
+                                 args.runner_id, args.session_ref, application_id)
         log("queue: submitted attempt remains terminal; snapshot repair failed: " + str(exc))
         return 1
     log("queue: finalized snapshot provenance for submitted attempt #%s" % args.pr)
@@ -3631,20 +3774,9 @@ def cmd_reconcile(args, log):
                 item["status"] = "queued"
             else:
                 item["snapshot_verification_at_confirmation"] = _verification_state(item)
-                item.update({
-                    "status": "submitted",
-                    "attempt_state": "submitted",
-                    "submitted_at": args.date,
-                    "sent": norm_text(args.sent),
-                    "confirmation_evidence": norm_text(args.confirmation_evidence),
-                    "submitted_attempt_id": args.attempt_id,
-                    "tracker_sync": "pending",
-                    "tracker_sync_error": "",
-                    "route": norm_text(args.route),
-                    "snapshot_provenance": "pending",
-                    "snapshot_error": "",
-                })
-                item.pop("next_action", None)
+                _record_submission_confirmation(
+                    item, args.attempt_id, args.date, args.sent,
+                    args.confirmation_evidence, args.route)
             items[idx] = item
             _write_queue_unlocked(args.queue, items)
     except (OSError, QueueStateError, ValueError) as exc:
@@ -3652,6 +3784,10 @@ def cmd_reconcile(args, log):
         return 2
     if args.result != "submitted":
         return 0
+    try:
+        args.application_id = _canonical_queue_identity(item)
+    except QueueStateError:
+        args.application_id = None
     snapshot_failure = _post_submission_snapshot(args, log)
     sync_rc = (0 if args.no_tracker else
                sync_tracker_attempt(args.queue, args.pr, args.repo, log))
@@ -3659,75 +3795,305 @@ def cmd_reconcile(args, log):
 
 
 def sync_tracker_attempt(queue_path, pr_number, repo, log, dry_run=False):
-    """Write only tracker bookkeeping, then merge the result for this attempt."""
+    """Write the confirmed row once at a time and fence stale completions."""
     sync_id = uuid.uuid4().hex
-    try:
+
+    def read_sync_item():
         with queue_lock(queue_path):
             items = load_queue(queue_path)
             idx = _unique_item_index(items, pr_number)
             item = dict(items[idx])
-            if (item.get("status") != "submitted" or not item.get("attempt_id")
-                    or not item.get("submitted_at") or not item.get("sent")):
-                raise QueueStateError("sync-tracker requires a durable submitted attempt")
-            if dry_run:
-                sync_item = item
-            else:
-                item.update({"tracker_sync": "syncing",
-                             "tracker_sync_id": sync_id,
-                             "tracker_sync_started_at": now_utc()})
-                items[idx] = item
-                _write_queue_unlocked(queue_path, items)
-                sync_item = dict(item)
-    except (QueueStateError, OSError) as exc:
-        log("queue: tracker sync could not start: " + str(exc))
-        return 1
+            if item.get("status") != "submitted":
+                raise QueueStateError("sync-tracker requires a durable submitted row")
+            fields = _submitted_fields(item)
+            if not fields["submitted_at"] or not fields["sent"]:
+                raise QueueStateError("submitted row is missing its date or sent summary")
+            application_id = _canonical_queue_identity(item)
+            sync_item = dict(item)
+            sync_item["submitted_at"] = fields["submitted_at"]
+            sync_item["sent"] = fields["sent"]
+            return sync_item, fields, application_id
+
+    def persist_sync_error(error_code):
+        try:
+            with queue_lock(queue_path):
+                latest = load_queue(queue_path)
+                idx = _unique_item_index(latest, pr_number)
+                current = dict(latest[idx])
+                if current.get("status") != "submitted":
+                    return
+                current.update({"tracker_sync": "error",
+                                "tracker_sync_error": error_code,
+                                "tracker_sync_last_error": error_code,
+                                "tracker_sync_failed_at": now_utc()})
+                latest[idx] = current
+                _write_queue_unlocked(queue_path, latest)
+        except (QueueStateError, OSError):
+            return
+
     if dry_run:
-        result = write_tracker_row(repo, sync_item, sync_item["submitted_at"],
-                                   sync_item["sent"], sync_item.get("route", ""),
+        try:
+            sync_item, fields, _application_id = read_sync_item()
+        except (QueueStateError, OSError) as exc:
+            log("queue: tracker sync could not start: " + str(exc))
+            return 1
+        result = write_tracker_row(repo, sync_item, fields["submitted_at"],
+                                   fields["sent"], sync_item.get("route", ""),
                                    dry_run=True, log=log)
         return 0 if result else 1
 
-    # Tracker fetch/push is deliberately outside the queue lock.
     try:
-        result = write_tracker_row(repo, sync_item, sync_item["submitted_at"],
-                                   sync_item["sent"], sync_item.get("route", ""),
-                                   log=log)
-    except Exception as exc:  # noqa: BLE001 - persisted submission stays terminal
-        log("queue: tracker sync interrupted: " + type(exc).__name__)
-        result = ""
-    try:
-        with queue_lock(queue_path):
-            latest = load_queue(queue_path)
-            idx = _unique_item_index(latest, pr_number)
-            current = dict(latest[idx])
-            if (current.get("status") != "submitted"
-                    or current.get("attempt_id") != sync_item.get("attempt_id")
-                    or current.get("tracker_sync_id") != sync_id):
-                log("queue: tracker result is stale; newer bookkeeping was preserved")
-                return 1 if not result or result == TRACKER_CONFLICT else 0
-            if result and result != TRACKER_CONFLICT:
-                current["tracker_sync"] = "synced"
-                current["tracker_synced_at"] = now_utc()
-                current.pop("tracker_sync_error", None)
-                if result != "present":
-                    current["tracker_commit"] = result
-            else:
-                current["tracker_sync"] = "error"
-                current["tracker_sync_error"] = (
-                    "tracker_identity_conflict" if result == TRACKER_CONFLICT
-                    else "tracker_write_failed")
-                current["tracker_sync_failed_at"] = now_utc()
-            latest[idx] = current
-            _write_queue_unlocked(queue_path, latest)
+        with tracker_sync_lock(queue_path):
+            try:
+                with queue_lock(queue_path):
+                    items = load_queue(queue_path)
+                    idx = _unique_item_index(items, pr_number)
+                    item = dict(items[idx])
+                    if item.get("status") != "submitted":
+                        raise QueueStateError("sync-tracker requires a durable submitted row")
+                    fields = _submitted_fields(item)
+                    if not fields["submitted_at"] or not fields["sent"]:
+                        raise QueueStateError("submitted row is missing its date or sent summary")
+                    application_id = _canonical_queue_identity(item)
+                    if item.get("tracker_sync") == "synced":
+                        return 0
+                    attempts = _tracker_sync_attempt_count(item)
+                    if not item.get("submitted_at"):
+                        item["submitted_at"] = fields["submitted_at"]
+                    if fields["attempt_id"] and not item.get("submitted_attempt_id"):
+                        item["submitted_attempt_id"] = fields["attempt_id"]
+                    item.update({"tracker_sync": "syncing",
+                                 "tracker_sync_id": sync_id,
+                                 "tracker_sync_attempt_id": fields["attempt_id"],
+                                 "tracker_sync_application_id": application_id,
+                                 "tracker_sync_started_at": now_utc(),
+                                 "tracker_sync_pending_at": (
+                                     norm_ts(item.get("tracker_sync_pending_at")
+                                             or item.get("submission_confirmed_at"))
+                                     or now_utc()),
+                                 "tracker_sync_attempts": attempts + 1})
+                    items[idx] = item
+                    _write_queue_unlocked(queue_path, items)
+                    sync_item = dict(item)
+                    sync_item["submitted_at"] = fields["submitted_at"]
+                    sync_item["sent"] = fields["sent"]
+            except (QueueStateError, OSError) as exc:
+                code = ("submission_identity_invalid" if str(exc).startswith("queue ")
+                        else "submission_fields_invalid")
+                persist_sync_error(code)
+                log("queue: tracker sync could not start: " + str(exc))
+                return 1
+
+            # The separate sync lock serializes writers; queue state remains
+            # unlocked while git fetch/push and verification run.
+            try:
+                result = write_tracker_row(
+                    repo, sync_item, fields["submitted_at"], fields["sent"],
+                    sync_item.get("route", ""), log=log)
+            except Exception as exc:  # noqa: BLE001 - confirmation stays terminal
+                log("queue: tracker sync interrupted: " + type(exc).__name__)
+                result = ""
+
+            with queue_lock(queue_path):
+                latest = load_queue(queue_path)
+                idx = _unique_item_index(latest, pr_number)
+                current = dict(latest[idx])
+                try:
+                    current_attempt = _submitted_attempt_id(current)
+                    current_identity = _canonical_queue_identity(current)
+                except QueueStateError:
+                    current_attempt, current_identity = None, None
+                if (current.get("status") != "submitted"
+                        or current_attempt != fields["attempt_id"]
+                        or current_identity != application_id
+                        or current.get("tracker_sync_id") != sync_id
+                        or current.get("tracker_sync_application_id") != application_id
+                        or current.get("tracker_sync_attempt_id") != fields["attempt_id"]):
+                    log("queue: tracker result is stale; newer bookkeeping was preserved")
+                    return 1
+                if result and result != TRACKER_CONFLICT:
+                    current["tracker_sync"] = "synced"
+                    current["tracker_synced_at"] = now_utc()
+                    current.pop("tracker_sync_error", None)
+                    if result != "present":
+                        current["tracker_commit"] = result
+                else:
+                    error_code = ("tracker_identity_conflict" if result == TRACKER_CONFLICT
+                                  else "tracker_write_failed")
+                    current["tracker_sync"] = "error"
+                    current["tracker_sync_error"] = error_code
+                    current["tracker_sync_last_error"] = error_code
+                    current["tracker_sync_failed_at"] = now_utc()
+                latest[idx] = current
+                _write_queue_unlocked(queue_path, latest)
+            return 0 if result and result != TRACKER_CONFLICT else 1
     except (QueueStateError, OSError) as exc:
-        log("queue: tracker result could not be persisted: " + str(exc))
+        log("queue: tracker sync could not start: " + str(exc))
         return 1
-    return 0 if result and result != TRACKER_CONFLICT else 1
 
 
 def cmd_sync_tracker(args, log):
     return sync_tracker_attempt(args.queue, args.pr, args.repo, log,
                                 dry_run=args.dry_run)
+
+
+def _tracker_sync_attempt_count(item):
+    value = item.get("tracker_sync_attempts")
+    return value if type(value) is int and value >= 0 else 0
+
+
+def _tracker_sync_pending_age(item, now=None):
+    stamp = norm_ts(item.get("tracker_sync_pending_at")
+                    or item.get("submission_confirmed_at"))
+    if not stamp:
+        return None
+    try:
+        start = datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc)
+    except ValueError:
+        return None
+    current = now or datetime.now(timezone.utc)
+    return max(0, int((current - start).total_seconds()))
+
+
+def _safe_recovery_id(value):
+    value = norm_text(value)
+    return value if re.fullmatch(r"[A-Za-z0-9._:-]{1,96}", value) else None
+
+
+def _recovery_state(value, allowed, fallback):
+    return value if isinstance(value, str) and value in allowed else fallback
+
+
+def _recovery_error_code(value, allowed):
+    return value if isinstance(value, str) and value in allowed else None
+
+
+def _recovery_summary(queue_path, rows, now=None):
+    snapshot_codes = {"snapshot_missing_legacy", "snapshot_reference_invalid",
+                      "snapshot_finalize_failed", "snapshot_attempt_binding_missing",
+                      "pre_submit_verification_missing"}
+    tracker_codes = {"tracker_identity_conflict", "tracker_write_failed",
+                     "submission_fields_invalid", "submission_identity_invalid"}
+    items = []
+    for row in rows:
+        try:
+            fields = _submitted_fields(row)
+        except QueueStateError:
+            fields = {"attempt_id": ""}
+        item = {
+            "pr_number": pr_number_of(row),
+            "attempt_id": _safe_recovery_id(fields.get("attempt_id")),
+            "snapshot_provenance": _recovery_state(
+                row.get("snapshot_provenance"),
+                {"complete", "pending", "prepared", "verified", "incomplete", "unknown"},
+                "unknown"),
+            "snapshot_error_code": _recovery_error_code(
+                row.get("snapshot_error_code"), snapshot_codes),
+            "tracker_sync": _recovery_state(
+                row.get("tracker_sync"), {"pending", "syncing", "synced", "error"},
+                "pending"),
+            "tracker_error_code": _recovery_error_code(
+                row.get("tracker_sync_error") if row.get("tracker_sync") == "error"
+                else None, tracker_codes),
+            "tracker_sync_attempts": _tracker_sync_attempt_count(row),
+            "tracker_sync_pending_age_seconds": _tracker_sync_pending_age(row, now),
+        }
+        items.append(item)
+    items.sort(key=lambda value: value["pr_number"])
+    visible = items[:100]
+    summary = {
+        "schema_version": 1,
+        "command": "recover-submissions",
+        "submitted_rows": len(items),
+        "snapshot_complete": sum(x["snapshot_provenance"] == "complete" for x in items),
+        "snapshot_missing": sum(x["snapshot_error_code"] == "snapshot_missing_legacy"
+                                 for x in items),
+        "snapshot_incomplete": sum(x["snapshot_provenance"] in ("incomplete", "unknown")
+                                    for x in items),
+        "tracker_synced": sum(x["tracker_sync"] == "synced" for x in items),
+        "tracker_pending": sum(x["tracker_sync"] in ("pending", "syncing") for x in items),
+        "tracker_errors": sum(x["tracker_sync"] == "error" for x in items),
+        "tracker_conflicts": sum(x["tracker_error_code"] == "tracker_identity_conflict"
+                                  for x in items),
+        "items": visible,
+        "items_truncated": max(0, len(items) - len(visible)),
+    }
+    return summary
+
+
+def cmd_recover_submissions(args, log):
+    """Finalize recorded evidence, then retry the durable tracker outbox."""
+    try:
+        with queue_lock(args.queue):
+            rows = [dict(row) for row in load_queue(args.queue)
+                    if row.get("status") == "submitted"]
+    except (QueueStateError, OSError) as exc:
+        log("queue: submission recovery could not read the queue: " + str(exc))
+        return 2
+
+    failed = False
+    for row in rows:
+        pr_number = pr_number_of(row)
+        try:
+            fields = _submitted_fields(row)
+            application_id = _canonical_queue_identity(row)
+        except QueueStateError:
+            try:
+                legacy_attempt_id = _submitted_attempt_id(row)
+            except QueueStateError:
+                legacy_attempt_id = ""
+            fields = {"attempt_id": legacy_attempt_id}
+            application_id = None
+            failed = True
+
+        if (row.get("snapshot_provenance") == "complete" and row.get("snapshot_id")):
+            pass
+        elif (row.get("snapshot_finalized_at") and row.get("snapshot_id")
+              and row.get("snapshot_error_code") == "pre_submit_verification_missing"):
+            pass
+        elif (application_id and fields.get("attempt_id")
+              and (row.get("prepared_snapshot_id") or row.get("snapshot_id"))):
+            recovery_args = argparse.Namespace(
+                queue=args.queue, pr=pr_number, attempt_id=fields["attempt_id"],
+                repo=args.repo, runner_id=None, session_ref=None,
+                application_id=application_id, recovery=True)
+            _post_submission_snapshot(recovery_args, log)
+            with queue_lock(args.queue):
+                latest = load_queue(args.queue)
+                recovered = dict(latest[_unique_item_index(latest, pr_number)])
+            if recovered.get("snapshot_error_code") not in (
+                    "", "snapshot_missing_legacy", "pre_submit_verification_missing"):
+                failed = True
+        else:
+            _record_snapshot_failure(
+                args.queue, pr_number, fields.get("attempt_id", ""),
+                application_id=application_id, recovery=True)
+            with queue_lock(args.queue):
+                latest = load_queue(args.queue)
+                recovered = dict(latest[_unique_item_index(latest, pr_number)])
+            if recovered.get("snapshot_error_code") not in (
+                    "", "snapshot_missing_legacy", "pre_submit_verification_missing"):
+                failed = True
+
+        sync_rc = sync_tracker_attempt(args.queue, pr_number, args.repo, log)
+        if sync_rc:
+            failed = True
+
+    try:
+        with queue_lock(args.queue):
+            current_rows = [dict(row) for row in load_queue(args.queue)
+                            if row.get("status") == "submitted"]
+    except (QueueStateError, OSError) as exc:
+        log("queue: submission recovery summary could not read the queue: " + str(exc))
+        return 2
+    summary = _recovery_summary(args.queue, current_rows)
+    if args.json:
+        print(json.dumps(summary, sort_keys=True, indent=2, ensure_ascii=False))
+    else:
+        log("queue: recovered %s submitted row(s); %s tracker sync error(s)" %
+            (summary["submitted_rows"], summary["tracker_errors"]))
+    return 1 if failed else 0
 
 
 # ---------------------------------------------------------------- parser
@@ -3909,6 +4275,15 @@ def build_parser():
     sync.add_argument("--repo", default=REPO_DIR, help="resume clone for tracker write-back")
     sync.add_argument("--pr", type=int, required=True)
     sync.add_argument("--dry-run", action="store_true")
+
+    recover = sub.add_parser(
+        "recover-submissions",
+        help="finalize confirmed snapshots and retry tracker sync; never submits")
+    add_common(recover)
+    recover.add_argument("--repo", default=REPO_DIR,
+                          help="resume clone for the shared tracker writer")
+    recover.add_argument("--json", action="store_true",
+                         help="emit a bounded sanitized recovery summary")
     return ap
 
 
@@ -3951,6 +4326,8 @@ def main(argv=None):
             return cmd_reconcile(args, log)
         if args.cmd == "sync-tracker":
             return cmd_sync_tracker(args, log)
+        if args.cmd == "recover-submissions":
+            return cmd_recover_submissions(args, log)
         build_parser().print_help()
         return 2
     except (QueueStateError, OSError, UnicodeError, ValueError) as exc:

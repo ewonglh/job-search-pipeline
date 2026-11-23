@@ -139,7 +139,11 @@ python3 scripts/queue.py status --pr N --status submitted \
 This persists the submitted facts and `tracker_sync: pending` before tracker
 I/O. `sync-tracker --pr N` repairs only the tracker bookkeeping; it cannot
 reopen a submission. Sync state is `pending`, `syncing`, `synced`, or `error`,
-with the attempt and sync IDs kept on the queue item.
+with the attempt and sync IDs kept on the queue item. A scheduler can run
+`python3 scripts/queue.py recover-submissions --json` to finalize retained
+snapshots and retry every pending or failed submission through the same tracker
+writer. The bounded JSON summary reports stable reason codes, retry counts, and
+pending age; it does not include confirmation text or sent answers.
 
 Stale or interrupted attempts become `outcome_unknown`. `release-stale` does
 not make them retryable. `reconcile --result retry` requires a specific evidence
