@@ -33,9 +33,10 @@ _QUEUE_FIELDS = ("company", "role", "link", "pr", "pr_number", "source",
                 "browser_released_at", "browser_owner_released_at",
                 "tracker_sync_pending_at", "tracker_sync_started_at",
                 "tracker_sync_failed_at", "tracker_synced_at", "snapshot_prepared_at",
-                "snapshot_finalized_at", "runner_id", "session_ref", "attempt_id", "tracker_sync",
+                "snapshot_finalized_at", "attempt_id", "tracker_sync",
                 "snapshot_id", "prepared_snapshot_id", "snapshot_provenance",
-                "attempt_state", "blocker_code")
+                "attempt_state", "blocker_code", "browser_ownership_status",
+                "browser_ownership_legacy")
 
 
 def _iso_now(value=None):
@@ -99,10 +100,13 @@ def _allow_fields(row, fields):
         value = row.get(key)
         if key in ("company", "role", "source", "status", "stage", "tracker_sync",
                    "snapshot_provenance", "attempt_state", "blocker_code", "attempt_id",
-                   "runner_id", "session_ref"):
+                   "browser_ownership_status", "browser_ownership_legacy"):
             value = _safe_text(value, 120 if key in ("role", "company") else 80)
-            if (value and key in ("runner_id", "session_ref")
-                    and not re.fullmatch(r"[A-Za-z0-9._:-]{1,120}", value)):
+            if (value and key == "browser_ownership_status"
+                    and value not in {"active", "released", "unknown", "none"}):
+                value = None
+            if (value and key == "browser_ownership_legacy"
+                    and value not in {"true", "false"}):
                 value = None
         elif key in ("applied_date", "stage_since"):
             value = _day(value)
@@ -126,6 +130,31 @@ def _allow_fields(row, fields):
         if value is not None:
             result[key] = value
     return result
+
+
+def queue_owner_projection(row):
+    """Project the queue's owner decision without retaining private identifiers."""
+    import queue as queue_module
+    try:
+        owner = queue_module._owner_for_item(row)
+    except queue_module.QueueStateError:
+        return {"status": "unknown", "legacy": False}
+    if owner is not None:
+        return {"status": "active", "legacy": bool(owner.get("legacy"))}
+    released_attempt = row.get("browser_owner_released_attempt_id")
+    if released_attempt not in (None, "") and released_attempt in (
+            row.get("browser_owner_attempt_id"), row.get("attempt_id")):
+        return {"status": "released",
+                "legacy": str(row.get("legacy_browser_owner") or "").casefold() == "true"}
+    return {"status": "none", "legacy": False}
+
+
+_PRIVATE_QUEUE_OWNER_FIELDS = (
+    "runner_id", "session_ref", "lease_expires_at", "browser_owner_attempt_id",
+    "browser_owner_released_attempt_id", "legacy_browser_owner", "submit_gate",
+    "browser_owner_state", "browser_owner_verifier_command",
+    "browser_owner_verifier_sha256", "browser_owner_verifier_command_sha256",
+)
 
 
 def _source(name, status, now, *, observed_at=None, error_code=None, count=None):
@@ -224,6 +253,21 @@ def normalize_snapshot(tracker_rows, queue_rows, event_doc, ingestion_state,
     """Build the versioned allowlisted facts payload from already-read sources."""
     if not _day(as_of):
         raise ValueError("as_of must be an ISO calendar date")
+    projected_queue = []
+    for raw in queue_rows:
+        row = dict(raw)
+        has_private_owner_fields = any(key in row for key in _PRIVATE_QUEUE_OWNER_FIELDS)
+        status = row.get("browser_ownership_status")
+        legacy = row.get("browser_ownership_legacy")
+        if (has_private_owner_fields or status not in {"active", "released", "unknown", "none"}
+                or legacy not in {"true", "false"}):
+            ownership = queue_owner_projection(row)
+            row["browser_ownership_status"] = ownership["status"]
+            row["browser_ownership_legacy"] = "true" if ownership["legacy"] else "false"
+        for key in _PRIVATE_QUEUE_OWNER_FIELDS:
+            row.pop(key, None)
+        projected_queue.append(row)
+    queue_rows = projected_queue
     resolved = application_identity.resolve_applications(tracker_rows, queue_rows)
     import summary as summary_module
     applications = []

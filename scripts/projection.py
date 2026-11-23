@@ -43,6 +43,7 @@ TEXT_FIELDS = {
     "stage": 80, "tracker_sync": 80, "snapshot_provenance": 80,
     "attempt_state": 80, "blocker_code": 80, "attempt_id": 120,
     "runner_id": 100, "session_ref": 120,
+    "browser_ownership_status": 16, "browser_ownership_legacy": 5,
 }
 TRACKER_FIELDS = ("company", "role", "link", "pr", "pr_number", "source",
                   "status", "stage", "stage_since", "applied_date", "submitted_at")
@@ -52,9 +53,10 @@ QUEUE_FIELDS = ("company", "role", "link", "pr", "pr_number", "source",
                 "browser_released_at", "browser_owner_released_at",
                 "tracker_sync_pending_at", "tracker_sync_started_at",
                 "tracker_sync_failed_at", "tracker_synced_at", "snapshot_prepared_at",
-                "snapshot_finalized_at", "runner_id", "session_ref", "attempt_id",
-                "tracker_sync", "snapshot_id", "prepared_snapshot_id",
-                "snapshot_provenance", "attempt_state", "blocker_code")
+                "snapshot_finalized_at", "attempt_id", "tracker_sync", "snapshot_id",
+                "prepared_snapshot_id", "snapshot_provenance", "attempt_state",
+                "blocker_code", "browser_ownership_status",
+                "browser_ownership_legacy")
 TRACKER_STATUS_VALUES = {
     "found", "to_apply", "todo", "not_applied", "tailored", "tailor", "ready",
     "applied", "submitted", "callback", "recruiter", "info_requested", "rfi",
@@ -69,6 +71,8 @@ QUEUE_ENUMS = {
     "snapshot_provenance": {"pending", "prepared", "verified", "complete",
                              "incomplete", "unknown"},
     "attempt_state": {"authorized", "submitted", "outcome_unknown", "failed"},
+    "browser_ownership_status": {"active", "released", "unknown", "none"},
+    "browser_ownership_legacy": {"true", "false"},
 }
 SOURCE_FRESHNESS = dict(report_snapshot.SOURCE_FRESHNESS_SECONDS)
 SOURCE_FRESHNESS.update({"reviews": 86400, "preflight": 86400,
@@ -334,8 +338,22 @@ def _read_queue(path):
         with open(path, "r", encoding="utf-8") as source:
             queue_statuses = set(queue_module.STATUSES) | {"blocked"}
             parsed = queue_module.parse_queue(source.read(), status_values=queue_statuses)
+        projected = []
+        for row in parsed:
+            item = dict(row)
+            ownership = report_snapshot.queue_owner_projection(row)
+            item["browser_ownership_status"] = ownership["status"]
+            item["browser_ownership_legacy"] = "true" if ownership["legacy"] else "false"
+            for key in ("runner_id", "session_ref", "lease_expires_at",
+                        "browser_owner_attempt_id", "browser_owner_released_attempt_id",
+                        "legacy_browser_owner", "submit_gate",
+                        "browser_owner_state", "browser_owner_verifier_command",
+                        "browser_owner_verifier_sha256",
+                        "browser_owner_verifier_command_sha256"):
+                item.pop(key, None)
+            projected.append(item)
         records, quarantined, redacted = _compatible_rows(
-            parsed, QUEUE_FIELDS, queue_statuses=queue_statuses)
+            projected, QUEUE_FIELDS, queue_statuses=queue_statuses)
         partial = bool(quarantined or redacted)
         return {"records": records, "record_count": len(parsed),
                 "observed_at": None,

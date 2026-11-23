@@ -29,7 +29,10 @@ jobs:
           python test_queue.py
           python test_queue_eligibility.py
           python test_queue_recovery.py
+          python test_queue_intake.py
+          python test_attempt_lifecycle.py
           python test_submission_snapshot.py
+          python test_posting_admission.py
           python test_tailor.py
           python test_cv_checks.py
           python test_tailor_preflight.py
@@ -40,6 +43,7 @@ jobs:
           python test_dashboard_server.py
           python test_dashboard_charts.py
           python test_reports.py
+          python test_pipeline_health_ownership.py
           python test_activity_analytics.py
           python test_company_catalog.py
           python test_projection.py
@@ -52,9 +56,12 @@ jobs:
           python test_automerge.py
           python test_review_contract.py
           python test_discover.py
+          python test_intake_reporting.py
           python test_email_ingest.py
           python test_notify_delivery.py
           python test_quiet_routing.py
           python test_openclaw_traces.py
+          python test_openclaw_drain.py
+          python test_openclaw_ownership.py
           node test_run_email_ingest.mjs
           node ../plugins/test_jobs_command.mjs
