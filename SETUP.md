@@ -43,6 +43,37 @@ Use the same values in the scheduler environment. Cron does not inherit your
 interactive shell variables. Empty or malformed path overrides stop with a
 configuration error instead of resolving to the current directory.
 
+Create the queue store once, before the first enqueue:
+
+```bash
+python3 scripts/queue.py init
+```
+
+- A missing queue is an error, never an empty queue. Every queue command stops
+  and prints the `init` command ([`scripts/queue.py:537`](scripts/queue.py#L537)).
+- `init` never overwrites. On an existing store it validates and leaves it as is.
+  ([`scripts/queue.py:598`](scripts/queue.py#L598))
+- A valid `[]` queue and a valid older queue load unchanged. A malformed queue
+  stops writes and is not repaired automatically.
+- `enqueue` and `claim` refresh `origin/main` first and read
+  `applications.yaml` from the commit that fetch returned. If the refresh fails
+  they stop, even when a cached copy exists. Check network access and
+  `gh auth status`, then rerun ([`scripts/queue.py:929`](scripts/queue.py#L929)).
+- `automerge.py` applies the same rule to its tracker, master resume and profile
+  reads, and reports a missing queue with the `init` command
+  ([`scripts/automerge.py:288`](scripts/automerge.py#L288),
+  [`scripts/automerge.py:329`](scripts/automerge.py#L329),
+  [`scripts/automerge.py:437`](scripts/automerge.py#L437)).
+- `automerge.py` validates the posting-age limit at startup and uses one run
+  date for freshness checks, including when there are no open PRs
+  ([`scripts/automerge.py:552`](scripts/automerge.py#L552),
+  [`scripts/posting_admission.py:7`](scripts/posting_admission.py#L7)).
+- Before writing, `enqueue` and `claim` recheck the pinned tracker and the
+  current queue under the queue lock. A tracker that moved on `origin/main` in
+  between stops the write. Rerun to use the new revision
+  ([`scripts/queue.py:989`](scripts/queue.py#L989),
+  [`scripts/queue.py:1661`](scripts/queue.py#L1661)).
+
 ## Email ingestion
 
 The offline command imports normalized JSON and has no mailbox or OpenClaw
@@ -135,6 +166,8 @@ cd ~/job-search/scripts
 ./run-rank.sh --top 10         # score and print a shortlist
 ./run-queue.sh                 # append newly merged app/* PRs to the queue
 ```
+
+Run `python3 queue.py init` once first. `./run-queue.sh` stops on a missing queue.
 
 Each runner is a thin wrapper that cd's to its own directory and calls the
 script with your arguments. Read one, they are under 25 lines.
@@ -619,6 +652,7 @@ Then run these. Each is independent and cheap:
 
 ```bash
 cd scripts
+python3 queue.py init
 python3 test_queue.py
 python3 test_queue_eligibility.py
 python3 test_queue_recovery.py
@@ -638,7 +672,9 @@ python3 tailor.py --list --force
 The four required queue, tailor, stages, and dashboard suites print `all
 assertions passed`. `test_queue_eligibility.py` and `test_queue_recovery.py`
 cover the durable claim, recovery, and tracker-sync boundary. The listing
-commands read only the synthetic external repo or runtime paths.
+commands read only the synthetic external repo or runtime paths. The queue
+suites build local synthetic git remotes in a temporary directory, so they need
+`git` but no network and no `gh`.
 
 ### Live repository access
 

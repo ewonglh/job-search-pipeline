@@ -45,7 +45,7 @@ def review(head=HEAD, item=None, master_commit="2" * 40, master_blob="3" * 40,
         "master_commit": master_commit,
         "master_resume_blob": master_blob,
         "master_resume_path": "master/resume.tex",
-        "current_jd_sha256": contract.sha256_bytes(item["jd_text"].encode("utf-8")),
+        **contract.posting_evidence(item, item["jd_text"]),
         "profile_sha256": contract.canonical_sha256(item["profile"]),
         "artifacts": dict(artifacts),
     }
@@ -98,6 +98,35 @@ def test_main_reports_ready_without_merge():
         assert calls == [], calls
 
 
+def test_invalid_freshness_config_blocks_even_without_candidates():
+    error = io.StringIO()
+    with mock.patch.dict(os.environ, {"JOBSEARCH_MAX_AGE_DAYS": "invalid"}), \
+            mock.patch.object(am, "load_reviewed") as load_reviewed, \
+            mock.patch.object(am, "load_skips") as load_skips, \
+            mock.patch.object(am, "load_merged_pr_index") as load_merged, \
+            mock.patch.object(am, "open_app_prs") as open_prs, \
+            contextlib.redirect_stderr(error):
+        result = am.main([])
+    assert result == 2
+    assert "JOBSEARCH_MAX_AGE_DAYS must be an integer" in error.getvalue()
+    assert not any(call.called for call in (load_reviewed, load_skips,
+                                             load_merged, open_prs))
+
+
+def test_same_head_requisition_change_requires_revalidation():
+    item = dict(work_item(), requisition_id="REQ-41",
+                requisition_evidence="synthetic employer requisition record")
+    changed = dict(item, requisition_id="REQ-42")
+    entry = review(item=item)
+    allowed, reason = am.preflight_candidate(pr(), entry, changed)
+    assert not allowed and "requisition evidence" in reason, reason
+
+    changed_body = pr()
+    changed_body["body"] = "Posting: https://example.invalid/jobs/other-role"
+    allowed, reason = am.preflight_candidate(changed_body, review(), work_item())
+    assert not allowed and "PR body" in reason, reason
+
+
 def test_denials():
     base_item = work_item()
     base_pr = pr()
@@ -137,6 +166,33 @@ def test_denials():
                                         work_items=items)
         assert all(not row["ready"] for row in results), (name, results)
         assert any(expected in row["reason"] for row in results), (name, results)
+
+
+def test_duplicate_verified_requisition_across_routes():
+    item_one = dict(work_item(), requisition_id="REQ-41",
+                    requisition_evidence="synthetic ATS record")
+    item_two = dict(item_one, link="https://example.invalid/jobs/alternate-route")
+    prs = [pr(number=11, link=item_one["link"]),
+           pr(number=12, link=item_two["link"])]
+    reviews = {"11": review(item=item_one), "12": review(item=item_two)}
+    calls = []
+    results = am.evaluate_readiness(
+        prs, reviews, set(), set(), {},
+        preflight=lambda *args: (calls.append(args) or (True, "clear")),
+        work_items={11: item_one, 12: item_two})
+    assert all(not row["ready"] for row in results), results
+    assert all("same posting identity" in row["reason"] for row in results), results
+    assert calls == [], calls
+
+    conflicting = dict(item_one, requisition_id="REQ-99")
+    results = am.evaluate_readiness(
+        [pr(number=11, link=item_one["link"]),
+         pr(number=13, link=item_one["link"])],
+        {"11": review(item=item_one), "13": review(item=conflicting)},
+        set(), set(), {}, preflight=lambda *_args: (True, "clear"),
+        work_items={11: item_one, 13: conflicting})
+    assert all(not row["ready"] for row in results), results
+    assert all("same posting identity" in row["reason"] for row in results), results
 
 
 def test_strict_skip_input():
@@ -193,19 +249,25 @@ def test_provenance_preflight_and_cap():
         os.makedirs(os.path.join(repo, "data"))
         os.makedirs(os.path.join(repo, "variants", "synthetic-role"))
         origin = os.path.join(root, "origin.git")
-        subprocess.run(["git", "init", "--bare", "-q", origin], check=True)
+        subprocess.run(["git", "init", "--bare", "-q", "-b", "main", origin], check=True)
         with open(os.path.join(repo, "master", "resume.tex"), "w", encoding="utf-8") as fh:
             fh.write("Synthetic resume source.\n")
         with open(os.path.join(repo, "data", "profile.yaml"), "w", encoding="utf-8") as fh:
             fh.write("name: Synthetic Candidate\n")
+        requisition = {"requisition_id": "REQ-41",
+                       "requisition_evidence": "synthetic ATS record"}
+        with open(os.path.join(repo, "data", "postings.json"), "w", encoding="utf-8") as fh:
+            json.dump([dict({"company": "Synthetic Co", "role": "Software Intern",
+                             "link": LINK}, **requisition)], fh)
         with open(os.path.join(repo, "applications.yaml"), "w", encoding="utf-8") as fh:
             fh.write("[]\n")
         with open(os.path.join(repo, "variants", "synthetic-role", "resume.tex"), "w", encoding="utf-8") as fh:
             fh.write("Synthetic tailored resume.\n")
         with open(os.path.join(repo, "variants", "synthetic-role", "resume.pdf"), "wb") as fh:
             fh.write(b"synthetic pdf bytes")
-        subprocess.run(["git", "-C", repo, "init", "-q"], check=True)
+        subprocess.run(["git", "-C", repo, "init", "-q", "-b", "main"], check=True)
         subprocess.run(["git", "-C", repo, "add", "master/resume.tex", "data/profile.yaml",
+                        "data/postings.json",
                         "applications.yaml"], check=True)
         subprocess.run(["git", "-C", repo, "-c", "user.name=Synthetic", "-c",
                         "user.email=synthetic@example.invalid", "commit", "-qm", "base fixture"], check=True)
@@ -232,62 +294,123 @@ def test_provenance_preflight_and_cap():
             fh.write("[]\n")
         with open(gates_file, "w", encoding="utf-8") as fh:
             fh.write("[]\n")
-        item = work_item()
+        item = dict(work_item(), **requisition)
         entry = review(item=item, master_commit=commit, master_blob=blob,
                        head=head, artifacts=artifacts)
-        with mock.patch.object(queue_module, "read_main_tracker", return_value="[]\n"):
+        with mock.patch.object(tailor_module, "fetch_jd", return_value=item):
             allowed, reason = am.preflight_candidate(
                 pr(head=head), entry, item, queue_module=queue_module,
                 tailor_module=tailor_module, queue_file=queue_file,
                 gates_file=gates_file, repo_dir=repo)
             assert allowed, reason
 
-            with open(gates_file, "w", encoding="utf-8") as fh:
-                fh.write("- company_aliases: [Synthetic Co]\n  gate_until: 2099-01-01\n")
-            allowed, reason = am.preflight_candidate(
-                pr(head=head), entry, item, queue_module=queue_module,
-                tailor_module=tailor_module, queue_file=queue_file,
-                gates_file=gates_file, repo_dir=repo)
-            assert not allowed and "cap" in reason, reason
+        with open(gates_file, "w", encoding="utf-8") as fh:
+            fh.write("- company_aliases: [Synthetic Co]\n  gate_until: 2099-01-01\n")
+        allowed, reason = am.preflight_candidate(
+            pr(head=head), entry, item, queue_module=queue_module,
+            tailor_module=tailor_module, queue_file=queue_file,
+            gates_file=gates_file, repo_dir=repo)
+        assert not allowed and "cap" in reason, reason
 
+        # Another lane records the tracker through its own clone of the origin.
+        # The preflight's clone has never fetched it, so a pass here would mean
+        # the tracker was read from a stale ref or the working tree.
+        lane = os.path.join(root, "lane")
+        subprocess.run(["git", "clone", "-q", "--branch", "main", origin, lane], check=True,
+                       capture_output=True)
+        published = ["[]\n"]
+
+        def publish(text):
+            if published[-1] == text:
+                return
+            with open(os.path.join(lane, "applications.yaml"), "w", encoding="utf-8") as fh:
+                fh.write(text)
+            subprocess.run(["git", "-C", lane, "add", "applications.yaml"], check=True)
+            subprocess.run(["git", "-C", lane, "-c", "user.name=Synthetic", "-c",
+                            "user.email=synthetic@example.invalid", "commit", "-qm",
+                            "tracker %d" % len(published)], check=True)
+            subprocess.run(["git", "-C", lane, "push", "-q", "origin", "HEAD:main"],
+                           check=True, capture_output=True)
+            published.append(text)
+
+        redirected = dict(item, link="https://example.invalid/jobs/different",
+                          requisition_id="REQ-42")
+        altered = copy.deepcopy(entry)
+        altered["audit"]["posting_url"] = redirected["link"]
+        allowed, reason = am.preflight_candidate(
+            pr(head=head, link=redirected["link"]), altered, redirected,
+            queue_module=queue_module, tailor_module=tailor_module, repo_dir=repo)
+        assert not allowed and "requisition evidence" in reason, reason
+
+        alias_link = "https://example.invalid/jobs/alternate-route"
+        identity_fields = ("  requisition_id: REQ-41\n"
+                           "  requisition_evidence: synthetic ATS record\n")
         tracker_row = ("- company: Synthetic Co\n  role: Software Intern\n"
-                       "  link: " + LINK + "\n  status: Applied\n")
+                       "  link: " + alias_link + "\n" + identity_fields +
+                       "  status: Applied\n")
         active_queue = ("- company: Synthetic Co\n  role: Software Intern\n"
-                        "  link: " + LINK + "\n  status: queued\n  pr_number: 12\n")
+                        "  link: " + alias_link + "\n" + identity_fields +
+                        "  status: queued\n  pr_number: 12\n")
         # One shared Git fixture exercises the verification seams. Each case
         # changes one input while the review remains internally consistent.
         cases = [
             ("artifact", {}, {}, True, "[]\n", "[]\n", "[]\n", "artifact hash mismatch"),
-            ("master", {}, {("rev-parse", "origin/main:master/resume.tex"): "0" * 40},
+            ("master", {}, {("rev-parse", "master/resume.tex"): "0" * 40},
              False, "[]\n", "[]\n", "[]\n", "master"),
-            ("profile", {}, {("show", "origin/main:data/profile.yaml"): "name: Changed Candidate"},
+            ("profile", {}, {("show", "data/profile.yaml"): "name: Changed Candidate"},
              False, "[]\n", "[]\n", "[]\n", "profile"),
             ("JD", {"jd_text": "A revised job description."}, {}, False,
              "[]\n", "[]\n", "[]\n", "job description"),
+            ("aged posting", {}, {("show", commit + ":" + tailor_module.POSTINGS_PATH):
+                                  json.dumps([dict(item, added="2000-01-01")])}, False,
+             "[]\n", "[]\n", "[]\n", "older than"),
+            ("changed live JD", {}, {}, False, "[]\n", "[]\n", "[]\n", "reviewed evidence"),
             ("malformed queue", {}, {}, False, "not a list\n", "[]\n", "[]\n", "queue"),
             ("active queue", {}, {}, False, active_queue, "[]\n", "[]\n", "active queue"),
             ("malformed tracker", {}, {}, False, "[]\n", "[]\n", "not a list\n", "tracker"),
             ("submitted tracker", {}, {}, False, "[]\n", "[]\n", tracker_row, "already submitted"),
             ("missing cap", {}, {}, False, "[]\n", None, "[]\n", "unavailable"),
             ("malformed cap", {}, {}, False, "[]\n", "- unknown: value\n", "[]\n", "unknown field"),
+            ("missing queue", {}, {}, False, None, "[]\n", "[]\n", "queue.py init --queue"),
+            ("unreadable queue", {}, {}, False, "dir", "[]\n", "[]\n", "malformed or unreadable"),
         ]
         git_output = am._git_output
         blob_digest = am._git_blob_sha256
+        posting_read_revisions = []
         for name, updates, git_overrides, bad_artifact, qtext, gtext, tracker, expected in cases:
-            with open(queue_file, "w", encoding="utf-8") as fh:
-                fh.write(qtext)
+            if os.path.isdir(queue_file):
+                os.rmdir(queue_file)
+            elif os.path.exists(queue_file):
+                os.remove(queue_file)
+            if qtext == "dir":
+                os.mkdir(queue_file)
+            elif qtext is not None:
+                with open(queue_file, "w", encoding="utf-8") as fh:
+                    fh.write(qtext)
             if gtext is None:
-                os.remove(gates_file)
+                if os.path.exists(gates_file):
+                    os.remove(gates_file)
             else:
                 with open(gates_file, "w", encoding="utf-8") as fh:
                     fh.write(gtext)
+            publish(tracker)
             current_item = dict(item, **updates)
 
-            def observed_git(path, *args):
-                if args == ("show", "origin/main:applications.yaml"):
-                    return tracker
-                if args in git_overrides:
-                    return git_overrides[args]
+            def observed_git(path, *args, git_overrides=git_overrides):
+                # Match on command and path so overrides apply to whichever
+                # commit the preflight pinned its main reads to.
+                key = (args[0], args[1].split(":", 1)[-1]) if len(args) > 1 else None
+                exact_key = (args[0], args[1]) if len(args) > 1 else None
+                if (args and args[0] == "show" and len(args) > 1
+                        and args[1].split(":", 1)[-1] == tailor_module.POSTINGS_PATH):
+                    revision = args[1].split(":", 1)[0]
+                    assert len(revision) == 40 and all(ch in "0123456789abcdef"
+                                                       for ch in revision), args
+                    posting_read_revisions.append(revision)
+                if exact_key in git_overrides:
+                    return git_overrides[exact_key]
+                if key in git_overrides:
+                    return git_overrides[key]
                 return git_output(path, *args)
 
             def observed_digest(path, revision, artifact):
@@ -296,16 +419,52 @@ def test_provenance_preflight_and_cap():
                 return blob_digest(path, revision, artifact)
 
             with mock.patch.object(am, "_git_output", side_effect=observed_git), \
-                    mock.patch.object(am, "_git_blob_sha256", side_effect=observed_digest):
+                    mock.patch.object(am, "_git_blob_sha256", side_effect=observed_digest), \
+                    mock.patch.object(tailor_module, "fetch_jd",
+                                      return_value={"jd_text": "Revised live description."}):
                 allowed, reason = am.preflight_candidate(
                     pr(head=head), entry, current_item, queue_module=queue_module,
                     tailor_module=tailor_module, queue_file=queue_file,
                     gates_file=gates_file, repo_dir=repo)
             assert not allowed and expected in reason, (name, allowed, reason)
 
+        assert posting_read_revisions, "current postings were not read"
+
+        # Back to a clean, valid state: readiness passes.
+        if os.path.isdir(queue_file):
+            os.rmdir(queue_file)
+        for path in (queue_file, gates_file):
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("[]\n")
+        publish("[]\n")
+        args = (pr(head=head), entry, item)
+        kwargs = dict(queue_module=queue_module, tailor_module=tailor_module,
+                      queue_file=queue_file, gates_file=gates_file, repo_dir=repo)
+        with mock.patch.object(tailor_module, "fetch_jd",
+                               return_value={"jd_text": item["jd_text"]}):
+            allowed, reason = am.preflight_candidate(*args, **kwargs)
+        assert allowed, reason
+
+        # A failed refresh blocks readiness even though the clone still holds a
+        # readable cached tracker, master resume, and profile.
+        cached = subprocess.check_output(
+            ["git", "-C", repo, "show", "origin/main:applications.yaml"], text=True)
+        assert cached.strip() == "[]"
+        subprocess.run(["git", "-C", repo, "remote", "set-url", "origin",
+                        "file://" + os.path.join(root, "gone-remote.git")], check=True)
+        allowed, reason = am.preflight_candidate(*args, **kwargs)
+        assert not allowed, reason
+        assert "tracker refresh failed" in reason and "cached data was not used" in reason, reason
+        refs = subprocess.check_output(
+            ["git", "-C", repo, "for-each-ref", "refs/jobsearch"], text=True)
+        assert refs == "", refs
+
 
 test_main_reports_ready_without_merge()
+test_invalid_freshness_config_blocks_even_without_candidates()
+test_same_head_requisition_change_requires_revalidation()
 test_denials()
+test_duplicate_verified_requisition_across_routes()
 test_strict_skip_input()
 test_duplicate_review_json_is_rejected()
 test_provenance_preflight_and_cap()

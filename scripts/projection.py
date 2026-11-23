@@ -661,13 +661,23 @@ def _read_reviews(path):
                 continue
             provenance = entry.get("provenance")
             valid_provenance, _ = review_contract.valid_provenance(provenance, head)
+            legacy_provenance, _ = review_contract.valid_historical_provenance(
+                provenance, head)
+            legacy_evidence_missing = (
+                legacy_provenance and "posting_evidence_version" not in provenance
+                and "posting_identity" not in provenance)
             verdict = entry.get("verdict")
             accepted = False
             try:
                 accepted = review_contract.approval_valid(entry, head)
             except (TypeError, ValueError, KeyError, AttributeError):
                 accepted = False
-            if accepted:
+            historical_accepted = False
+            try:
+                historical_accepted = review_contract.historical_approval_valid(entry, head)
+            except (TypeError, ValueError, KeyError, AttributeError):
+                historical_accepted = False
+            if accepted or historical_accepted:
                 model_state = "accepted"
             elif verdict == "reject":
                 model_state = "not_accepted"
@@ -675,8 +685,9 @@ def _read_reviews(path):
                 model_state = "unknown"
             else:
                 model_state = "unknown"
-            provenance_state = "verified" if valid_provenance else (
-                "unknown" if not isinstance(provenance, dict) else "invalid")
+            provenance_state = ("verified" if valid_provenance else
+                                "unknown" if legacy_evidence_missing
+                                or not isinstance(provenance, dict) else "invalid")
             checked = None
             audit = entry.get("audit")
             if isinstance(audit, dict):
