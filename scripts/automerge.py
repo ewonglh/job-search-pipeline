@@ -29,7 +29,8 @@ import subprocess
 import sys
 import urllib.parse
 
-from application_identity import application_id, normalize_posting_url as normalize_url
+from application_identity import (application_id, normalize_posting_url as normalize_url,
+                                  posting_keys)
 from posting_admission import configured_max_age_days, freshness_exclusion
 from review_contract import approval_result, canonical_sha256, posting_evidence
 from config import (default_repo_dir, default_runtime_path, github_repo_setting,
@@ -411,12 +412,16 @@ def preflight_candidate(pr, review, work_item=None, queue_module=None,
         company, role = str(work_item.get("company") or "").strip(), str(work_item.get("role") or "").strip()
         if not company or not role:
             return False, "work item company or role is missing"
-        candidate = {"company": company, "role": role, "link": posting_link,
-                     "pr_number": int(pr["number"])}
-        active = q.active_key(candidate)
+        candidate = {key: work_item[key] for key in
+                     ("requisition_id", "requisition_evidence", "apply_url",
+                      "apply_url_evidence") if key in work_item}
+        candidate.update({"company": company, "role": role, "link": posting_link,
+                          "pr_number": int(pr["number"])})
+        candidate_keys = posting_keys(candidate)
         unfinished = set(getattr(q, "UNFINISHED", ("queued", "in_progress"))) | {"outcome_unknown"}
         for item in queue_items:
-            if item.get("status") in unfinished and q.active_key(item) == active:
+            if (item.get("status") in unfinished
+                    and candidate_keys & posting_keys(item)):
                 return False, "posting already has an active queue item"
 
         tracker = _strict_rows(main_revision.text, "current applications tracker", q)
@@ -430,7 +435,8 @@ def preflight_candidate(pr, review, work_item=None, queue_module=None,
             if link in tracker_links:
                 return False, "current applications tracker has duplicate posting identities"
             tracker_links.add(link)
-            if link == posting_link and q.canonical_submitted(item.get("status")):
+            if (q.canonical_submitted(item.get("status"))
+                    and candidate_keys & posting_keys(item)):
                 return False, "posting already submitted in applications tracker"
 
         try:
@@ -482,7 +488,7 @@ def evaluate_readiness(prs, reviewed, skip_prs, skip_links, merged_index,
                        preflight=None, work_items=None):
     """Produce auditable ready/blocked rows without performing any write."""
     preflight = preflight or preflight_candidate
-    prepared, numbers, links = [], {}, {}
+    prepared, numbers, identities = [], {}, {}
     for pr in prs:
         try:
             number = int(pr.get("number"))
@@ -497,9 +503,11 @@ def evaluate_readiness(prs, reviewed, skip_prs, skip_links, merged_index,
             item = (work_items[number] if work_items is not None
                     else load_work_item(pr))
             identity = candidate_links(pr, item)[0]
-            links.setdefault(identity, []).append(number)
+            keys = posting_keys(item)
+            for key in keys:
+                identities.setdefault(key, []).append(number)
             prepared.append({"pr": pr, "number": number, "item": item,
-                             "link": identity})
+                             "link": identity, "identity_keys": keys})
         except Exception as exc:
             prepared.append({"pr": pr, "number": number,
                              "reason": "posting identity unavailable: " + str(exc)})
@@ -530,7 +538,8 @@ def evaluate_readiness(prs, reviewed, skip_prs, skip_links, merged_index,
             reason = "posting link is in skipped.yaml (owner skip)"
         if not reason and link in merged_index:
             reason = "posting link already has a merged PR"
-        if not reason and len(links.get(link, [])) > 1:
+        if not reason and any(len(identities.get(key, [])) > 1
+                              for key in row.get("identity_keys", ())):
             reason = "another open PR has the same posting identity"
         if not reason and unavailable_identity:
             reason = "another open app PR has an unavailable posting identity"

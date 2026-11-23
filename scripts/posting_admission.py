@@ -26,7 +26,7 @@ def freshness_exclusion(posting, today=None, max_age_days=None):
     if not added:
         return None
     try:
-        added_day = date.fromisoformat(added[:10])
+        added_day = date.fromisoformat(added)
     except ValueError as exc:
         raise ValueError("posting discovery date is malformed") from exc
     if ((today or date.today()) - added_day).days > limit:

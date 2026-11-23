@@ -168,6 +168,33 @@ def test_denials():
         assert any(expected in row["reason"] for row in results), (name, results)
 
 
+def test_duplicate_verified_requisition_across_routes():
+    item_one = dict(work_item(), requisition_id="REQ-41",
+                    requisition_evidence="synthetic ATS record")
+    item_two = dict(item_one, link="https://example.invalid/jobs/alternate-route")
+    prs = [pr(number=11, link=item_one["link"]),
+           pr(number=12, link=item_two["link"])]
+    reviews = {"11": review(item=item_one), "12": review(item=item_two)}
+    calls = []
+    results = am.evaluate_readiness(
+        prs, reviews, set(), set(), {},
+        preflight=lambda *args: (calls.append(args) or (True, "clear")),
+        work_items={11: item_one, 12: item_two})
+    assert all(not row["ready"] for row in results), results
+    assert all("same posting identity" in row["reason"] for row in results), results
+    assert calls == [], calls
+
+    conflicting = dict(item_one, requisition_id="REQ-99")
+    results = am.evaluate_readiness(
+        [pr(number=11, link=item_one["link"]),
+         pr(number=13, link=item_one["link"])],
+        {"11": review(item=item_one), "13": review(item=conflicting)},
+        set(), set(), {}, preflight=lambda *_args: (True, "clear"),
+        work_items={11: item_one, 13: conflicting})
+    assert all(not row["ready"] for row in results), results
+    assert all("same posting identity" in row["reason"] for row in results), results
+
+
 def test_strict_skip_input():
     with tempfile.TemporaryDirectory() as root:
         path = os.path.join(root, "skipped.yaml")
@@ -227,8 +254,11 @@ def test_provenance_preflight_and_cap():
             fh.write("Synthetic resume source.\n")
         with open(os.path.join(repo, "data", "profile.yaml"), "w", encoding="utf-8") as fh:
             fh.write("name: Synthetic Candidate\n")
+        requisition = {"requisition_id": "REQ-41",
+                       "requisition_evidence": "synthetic ATS record"}
         with open(os.path.join(repo, "data", "postings.json"), "w", encoding="utf-8") as fh:
-            json.dump([{"company": "Synthetic Co", "role": "Software Intern", "link": LINK}], fh)
+            json.dump([dict({"company": "Synthetic Co", "role": "Software Intern",
+                             "link": LINK}, **requisition)], fh)
         with open(os.path.join(repo, "applications.yaml"), "w", encoding="utf-8") as fh:
             fh.write("[]\n")
         with open(os.path.join(repo, "variants", "synthetic-role", "resume.tex"), "w", encoding="utf-8") as fh:
@@ -264,7 +294,7 @@ def test_provenance_preflight_and_cap():
             fh.write("[]\n")
         with open(gates_file, "w", encoding="utf-8") as fh:
             fh.write("[]\n")
-        item = work_item()
+        item = dict(work_item(), **requisition)
         entry = review(item=item, master_commit=commit, master_blob=blob,
                        head=head, artifacts=artifacts)
         with mock.patch.object(tailor_module, "fetch_jd", return_value=item):
@@ -303,7 +333,8 @@ def test_provenance_preflight_and_cap():
                            check=True, capture_output=True)
             published.append(text)
 
-        redirected = dict(item, link="https://example.invalid/jobs/different")
+        redirected = dict(item, link="https://example.invalid/jobs/different",
+                          requisition_id="REQ-42")
         altered = copy.deepcopy(entry)
         altered["audit"]["posting_url"] = redirected["link"]
         allowed, reason = am.preflight_candidate(
@@ -311,10 +342,15 @@ def test_provenance_preflight_and_cap():
             queue_module=queue_module, tailor_module=tailor_module, repo_dir=repo)
         assert not allowed and "requisition evidence" in reason, reason
 
+        alias_link = "https://example.invalid/jobs/alternate-route"
+        identity_fields = ("  requisition_id: REQ-41\n"
+                           "  requisition_evidence: synthetic ATS record\n")
         tracker_row = ("- company: Synthetic Co\n  role: Software Intern\n"
-                       "  link: " + LINK + "\n  status: Applied\n")
+                       "  link: " + alias_link + "\n" + identity_fields +
+                       "  status: Applied\n")
         active_queue = ("- company: Synthetic Co\n  role: Software Intern\n"
-                        "  link: " + LINK + "\n  status: queued\n  pr_number: 12\n")
+                        "  link: " + alias_link + "\n" + identity_fields +
+                        "  status: queued\n  pr_number: 12\n")
         # One shared Git fixture exercises the verification seams. Each case
         # changes one input while the review remains internally consistent.
         cases = [
@@ -428,6 +464,7 @@ test_main_reports_ready_without_merge()
 test_invalid_freshness_config_blocks_even_without_candidates()
 test_same_head_requisition_change_requires_revalidation()
 test_denials()
+test_duplicate_verified_requisition_across_routes()
 test_strict_skip_input()
 test_duplicate_review_json_is_rejected()
 test_provenance_preflight_and_cap()

@@ -16,6 +16,12 @@ assert admission.freshness_exclusion(
     POSTING, today=RUN_DATE, max_age_days=8) is None
 assert admission.freshness_exclusion(
     POSTING, today=RUN_DATE, max_age_days=0) is None
+try:
+    admission.freshness_exclusion(
+        {"added": "2026-11-15garbage"}, today=RUN_DATE, max_age_days=7)
+    raise AssertionError("a malformed discovery date was accepted")
+except ValueError as exc:
+    assert "malformed" in str(exc), exc
 
 # Existing callers can omit the new limit and retain their old entry point.
 with mock.patch.object(admission, "int_setting", return_value=7):
