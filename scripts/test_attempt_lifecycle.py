@@ -164,16 +164,17 @@ with tempfile.TemporaryDirectory() as directory:
         results.append(q.main(["claim", "--queue", path, "--next", "--runner-id", runner,
                                "--session-ref", "session-" + runner, "--json"]))
 
-    with patches[0], patches[1]:
-        with mock.patch.dict(os.environ, {
-                "JOBSEARCH_BROWSER_OWNERSHIP_VERIFIER": shlex.quote(sys.executable)}):
-            threads = [threading.Thread(target=concurrent_claim, args=(runner,))
-                       for runner in ("runner-a", "runner-b")]
-            for thread in threads:
-                thread.start()
-            for thread in threads:
-                thread.join(timeout=10)
-            assert all(not thread.is_alive() for thread in threads)
+    with patches[0], patches[1], \
+            mock.patch.dict(os.environ, {
+                "JOBSEARCH_BROWSER_OWNERSHIP_VERIFIER": shlex.quote(sys.executable)}), \
+            mock.patch("builtins.print", lambda *args, **kwargs: None):
+        threads = [threading.Thread(target=concurrent_claim, args=(runner,))
+                   for runner in ("runner-a", "runner-b")]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+        assert all(not thread.is_alive() for thread in threads)
     assert sorted(results) == [0, 2], results
     owner_rc, owner_text = cli(["browser-owner", "--queue", path, "--json"])
     assert owner_rc == 0
