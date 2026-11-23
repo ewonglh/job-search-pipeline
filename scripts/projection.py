@@ -26,7 +26,7 @@ DEFAULT_BATCH_SIZE = 100
 MAX_BATCH_SIZE = 1000
 MAX_SOURCE_RECORDS = 200000
 SNAPSHOT_HISTORY = 8
-SOURCES = ("tracker", "queue", "events", "ingestion", "snapshots",
+SOURCES = ("tracker", "queue", "events", "ingestion", "intake", "snapshots",
            "reviews", "preflight", "activities", "companies", "traces")
 HASH40_RE = re.compile(r"^[0-9a-f]{40}$")
 HASH64_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -42,11 +42,17 @@ TEXT_FIELDS = {
     "company": 120, "role": 120, "source": 80, "status": 80,
     "stage": 80, "tracker_sync": 80, "snapshot_provenance": 80,
     "attempt_state": 80, "blocker_code": 80, "attempt_id": 120,
+    "runner_id": 100, "session_ref": 120,
 }
 TRACKER_FIELDS = ("company", "role", "link", "pr", "pr_number", "source",
                   "status", "stage", "stage_since", "applied_date", "submitted_at")
 QUEUE_FIELDS = ("company", "role", "link", "pr", "pr_number", "source",
-                "status", "submitted_at", "claimed_at", "attempt_id",
+                "status", "submitted_at", "claimed_at", "enqueued_at", "approved_at",
+                "failed_at", "blocked_at", "updated_at", "outcome_unknown_at",
+                "browser_released_at", "browser_owner_released_at",
+                "tracker_sync_pending_at", "tracker_sync_started_at",
+                "tracker_sync_failed_at", "tracker_synced_at", "snapshot_prepared_at",
+                "snapshot_finalized_at", "runner_id", "session_ref", "attempt_id",
                 "tracker_sync", "snapshot_id", "prepared_snapshot_id",
                 "snapshot_provenance", "attempt_state", "blocker_code")
 TRACKER_STATUS_VALUES = {
@@ -67,7 +73,7 @@ QUEUE_ENUMS = {
 SOURCE_FRESHNESS = dict(report_snapshot.SOURCE_FRESHNESS_SECONDS)
 SOURCE_FRESHNESS.update({"reviews": 86400, "preflight": 86400,
                          "activities": 14 * 86400, "companies": 30 * 86400,
-                         "traces": 3600})
+                         "intake": 45 * 86400, "traces": 3600})
 
 
 class ProjectionError(Exception):
@@ -192,6 +198,9 @@ def _compatible_rows(rows, fields, *, queue_statuses=None, tracker_statuses=None
                         raise _InvalidSource()
                     if value and key == "blocker_code" and not CODE_RE.fullmatch(value.lower()):
                         raise _InvalidSource()
+                    if value and key in ("runner_id", "session_ref") and not re.fullmatch(
+                            r"[A-Za-z0-9._:-]{1,120}", value):
+                        raise _InvalidSource()
                     if value and key in QUEUE_ENUMS and value not in QUEUE_ENUMS[key]:
                         raise _InvalidSource()
                     if value is not None and key in ("status", "stage"):
@@ -216,7 +225,12 @@ def _compatible_rows(rows, fields, *, queue_statuses=None, tracker_statuses=None
                     value = _day(value) if isinstance(value, str) else None
                     if value is None:
                         raise _InvalidSource()
-                elif key in ("submitted_at", "claimed_at"):
+                elif key in ("submitted_at", "claimed_at", "enqueued_at", "approved_at",
+                             "failed_at", "blocked_at", "updated_at", "outcome_unknown_at",
+                             "browser_released_at", "browser_owner_released_at",
+                             "tracker_sync_pending_at", "tracker_sync_started_at",
+                             "tracker_sync_failed_at", "tracker_synced_at",
+                             "snapshot_prepared_at", "snapshot_finalized_at"):
                     value = (_timestamp(value) or _day(value)) if isinstance(value, str) else None
                     if value is None:
                         raise _InvalidSource()
@@ -318,9 +332,10 @@ def _read_queue(path):
     try:
         import queue as queue_module
         with open(path, "r", encoding="utf-8") as source:
-            parsed = queue_module.parse_queue(source.read())
+            queue_statuses = set(queue_module.STATUSES) | {"blocked"}
+            parsed = queue_module.parse_queue(source.read(), status_values=queue_statuses)
         records, quarantined, redacted = _compatible_rows(
-            parsed, QUEUE_FIELDS, queue_statuses=set(queue_module.STATUSES))
+            parsed, QUEUE_FIELDS, queue_statuses=queue_statuses)
         partial = bool(quarantined or redacted)
         return {"records": records, "record_count": len(parsed),
                 "observed_at": None,
@@ -648,13 +663,23 @@ def _read_reviews(path):
                 continue
             provenance = entry.get("provenance")
             valid_provenance, _ = review_contract.valid_provenance(provenance, head)
+            legacy_provenance, _ = review_contract.valid_historical_provenance(
+                provenance, head)
+            legacy_evidence_missing = (
+                legacy_provenance and "posting_evidence_version" not in provenance
+                and "posting_identity" not in provenance)
             verdict = entry.get("verdict")
             accepted = False
             try:
                 accepted = review_contract.approval_valid(entry, head)
             except (TypeError, ValueError, KeyError, AttributeError):
                 accepted = False
-            if accepted:
+            historical_accepted = False
+            try:
+                historical_accepted = review_contract.historical_approval_valid(entry, head)
+            except (TypeError, ValueError, KeyError, AttributeError):
+                historical_accepted = False
+            if accepted or historical_accepted:
                 model_state = "accepted"
             elif verdict == "reject":
                 model_state = "not_accepted"
@@ -662,8 +687,9 @@ def _read_reviews(path):
                 model_state = "unknown"
             else:
                 model_state = "unknown"
-            provenance_state = "verified" if valid_provenance else (
-                "unknown" if not isinstance(provenance, dict) else "invalid")
+            provenance_state = ("verified" if valid_provenance else
+                                "unknown" if legacy_evidence_missing
+                                or not isinstance(provenance, dict) else "invalid")
             checked = None
             audit = entry.get("audit")
             if isinstance(audit, dict):
@@ -825,6 +851,49 @@ def _read_preflight(path):
                 "error_code": None, "quarantined_count": 0}
     except (OSError, UnicodeError, ValueError, TypeError, _InvalidSource) as exc:
         return _source_error(path, exc)
+
+
+def _read_intake(directory):
+    """Read bounded, sanitized discovery and enqueue run history."""
+    import intake_reporting
+
+    records, missing, invalid = [], [], []
+    for lane in sorted(intake_reporting.LANES):
+        try:
+            runs = intake_reporting.read_history(lane, directory=directory)
+        except FileNotFoundError:
+            missing.append(lane)
+            continue
+        except (OSError, UnicodeError, ValueError, TypeError):
+            invalid.append(lane)
+            continue
+        for run in runs:
+            counts = run.get("counts", {})
+            reasons = run.get("reasons", {})
+            admissions = counts.get("admitted", counts.get("added", counts.get("accepted", 0)))
+            if lane == "enqueue" and admissions == 0 and not reasons:
+                reasons = {"unknown": 1}
+            records.append({"kind": "run", "lane": lane,
+                            "recorded_at": run["recorded_at"],
+                            "outcome": run["outcome"], "counts": counts,
+                            "reasons": reasons,
+                            "sources": run.get("sources", [])})
+
+    if not records and len(missing) == len(intake_reporting.LANES) and not invalid:
+        return _source_error(directory, FileNotFoundError())
+    observed = max((row["recorded_at"] for row in records), default=None)
+    partial = bool(missing or invalid)
+    reasons = []
+    if missing:
+        reasons.append("intake_lane_missing")
+    if invalid:
+        reasons.append("intake_lane_invalid")
+    return {"records": records, "record_count": len(records),
+            "observed_at": observed,
+            "error_code": "partial_coverage" if partial else None,
+            "quarantined_count": len(invalid),
+            "coverage_status": "partial" if partial else "complete",
+            "coverage_reasons": reasons}
 
 
 def _source_payload(name, value):
@@ -1167,6 +1236,29 @@ def _review_facts(review_records, preflight_records, review_unknown=0, preflight
             "interpretation": "Model acceptance and explicit owner acceptance are separate. Missing provenance or ordering remains unknown."}
 
 
+def _intake_facts(records):
+    lanes = {"discovery": [], "enqueue": []}
+    for row in records:
+        lane = row.get("lane")
+        if lane in lanes:
+            lanes[lane].append(row)
+    result = {}
+    for lane, runs in lanes.items():
+        runs.sort(key=lambda item: item.get("recorded_at", ""))
+        def summary(row, include_sources=False):
+            value = {"recorded_at": row["recorded_at"], "outcome": row["outcome"],
+                     "counts": row.get("counts", {}), "reasons": row.get("reasons", {})}
+            if include_sources:
+                value["sources"] = row.get("sources", [])
+            return value
+        result[lane] = {
+            "run_count": len(runs),
+            "latest": summary(runs[-1], include_sources=True) if runs else None,
+            "recent": [summary(row) for row in runs[-5:]],
+        }
+    return result
+
+
 def _make_snapshot(connection, *, as_of, generated_at, snapshot_root):
     tracker = _read_active_records(connection, "tracker")
     queue = _read_active_records(connection, "queue")
@@ -1197,6 +1289,8 @@ def _make_snapshot(connection, *, as_of, generated_at, snapshot_root):
     snapshot["facts"]["quarantined_event_count"] = quarantined_count
     snapshot["facts"]["company_catalog"] = {
         "schema_version": 1, "records": _read_active_records(connection, "companies")}
+    snapshot["facts"]["intake"] = _intake_facts(
+        _read_active_records(connection, "intake"))
     activity_source = sources.get("activities", {})
     activities, activity_unmatched = [], 0
     app_aliases = snapshot["facts"].get("application_aliases", {})
@@ -1269,13 +1363,15 @@ def _publish(connection, snapshot, progress):
 
 
 def _input_paths(repo=None, tracker=None, queue=None, ledger=None, ingestion=None,
-                 snapshot_root=None, review_state=None, preflight_state=None):
+                 snapshot_root=None, review_state=None, preflight_state=None,
+                 intake_dir=None):
     repo = repo or path_setting("JOBSEARCH_REPO", default_repo_dir())
     paths = {
         "tracker": tracker or path_setting("JOBSEARCH_TRACKER", os.path.join(repo, "applications.yaml")),
         "queue": queue or path_setting("JOBSEARCH_QUEUE", default_runtime_path("queue.yaml")),
         "events": ledger or path_setting("JOBSEARCH_RECRUITMENT_LEDGER", default_runtime_path("recruitment_events.json")),
         "ingestion": ingestion or path_setting("JOBSEARCH_INGEST_STATE", default_runtime_path("email_ingest_state.json")),
+        "intake": intake_dir or path_setting("JOBSEARCH_INTAKE_DIR", default_runtime_path("intake")),
         "snapshots": snapshot_root or path_setting("JOBSEARCH_SNAPSHOT_ROOT", default_runtime_path("submission-snapshots")),
         "reviews": review_state or path_setting("JOBSEARCH_REVIEW_STATE", default_runtime_path("review_state.json")),
         "preflight": preflight_state or path_setting("JOBSEARCH_PREFLIGHT_STATE", default_runtime_path("preflight_records.json")),
@@ -1291,6 +1387,7 @@ def _collect_inputs(paths, trace_data=None):
         "queue": _read_queue(paths["queue"]),
         "events": _read_events(paths["events"]),
         "ingestion": _read_ingestion(paths["ingestion"]),
+        "intake": _read_intake(paths["intake"]),
         "snapshots": _read_snapshots(paths["snapshots"]),
         "reviews": _read_reviews(paths["reviews"]),
         "preflight": _read_preflight(paths["preflight"]),
@@ -1305,7 +1402,7 @@ def _collect_inputs(paths, trace_data=None):
 
 def collect_projection(*, db_path=None, repo=None, tracker=None, queue=None, ledger=None,
                        ingestion=None, snapshot_root=None, review_state=None,
-                       preflight_state=None, as_of=None, now=None,
+                       preflight_state=None, intake_dir=None, as_of=None, now=None,
                        batch_size=DEFAULT_BATCH_SIZE, interrupt_after_batches=None,
                        trace_data=None):
     """Collect local sources and atomically publish the newly assembled view.
@@ -1321,7 +1418,7 @@ def collect_projection(*, db_path=None, repo=None, tracker=None, queue=None, led
         raise ValueError("as_of must be an ISO calendar date")
     generated_at = _now(now)
     paths = _input_paths(repo, tracker, queue, ledger, ingestion, snapshot_root,
-                         review_state, preflight_state)
+                         review_state, preflight_state, intake_dir)
     inputs = _collect_inputs(paths, trace_data=trace_data)
     connection = _connect_writer(db_path or _db_default())
     try:
@@ -1448,12 +1545,24 @@ def format_compact(snapshot):
     def count(value):
         return "unavailable" if value is None else str(value)
 
+    intake = daily["intake"]
+    discovery = intake["discovery"]
+    enqueue = intake["enqueue"]
+    discovery_counts = (discovery.get("latest") or {}).get("counts", {})
+    enqueue_counts = (enqueue.get("latest") or {}).get("counts", {})
+    enqueue_admitted = enqueue_counts.get(
+        "admitted", enqueue_counts.get("added", enqueue_counts.get("accepted", 0)))
+    enqueue_excluded = enqueue_counts.get("excluded", enqueue_counts.get("rejected", 0))
+    enqueue_pending_metadata = enqueue_counts.get("pending_metadata", 0)
+    enqueue_reasons = (enqueue.get("latest") or {}).get("reasons", {})
+    reason_text = ",".join(sorted(enqueue_reasons)) or "unknown"
     goal = daily["submission_goal"]
     submissions = goal["submissions"]
     attempts = daily["attempts"]
     sync = daily["tracker_sync"]
     gaps = daily["snapshot_gaps"]
     buffer = daily["ready_buffer"]
+    browser = daily["browser_ownership"]
     queue_source = sources.get("queue", {})
     queue_summary = (
         (", ".join("{} {}".format(key, value)
@@ -1470,9 +1579,19 @@ def format_compact(snapshot):
             daily["timezone"], count(goal["confirmed"]), goal["target"], submissions["coverage"],
             count(buffer["queued"]), buffer["target"]),
         "Queue: " + queue_summary,
-        "Attention: stale in progress {} · outcome unknown {} · sync pending/error {} · snapshot gaps {}".format(
+        "Queue age: ready {}s · blocked {} age {}s · unknown {} age {}s · browser active {}/unknown {}".format(
+            count(buffer["oldest_age_seconds"]), count(attempts["blocked"]),
+            count(attempts["oldest_blocked_age_seconds"]),
+            count(attempts["outcome_unknown"]), count(attempts["oldest_unknown_age_seconds"]),
+            count(browser["active"]), count(browser["unknown"])),
+        "Attention: stale in progress {} · outcome unknown {} · sync pending/error {} (age {}) · snapshot gaps {} (age {})".format(
             count(attempts["stale_in_progress"]), count(attempts["outcome_unknown"]),
-            count(sync["pending_or_error"]), count(gaps["total"])),
+            count(sync["pending_or_error"]), count(sync["oldest_age_seconds"]),
+            count(gaps["total"]), count(gaps["oldest_age_seconds"])),
+        "Intake: discovery {} ({}/{} processed/accepted) · enqueue {} ({} admitted, {} excluded, {} pending metadata; reasons {})".format(
+            discovery["status"], discovery_counts.get("processed", 0),
+            discovery_counts.get("accepted", 0), enqueue["status"], enqueue_admitted,
+            enqueue_excluded, enqueue_pending_metadata, reason_text),
         "Review heads: {} · model {}/{}/{} accepted/not/unknown · owner {}/{}/{}".format(
             review.get("unique_artifact_heads", 0), model.get("accepted", 0),
             model.get("not_accepted", 0), model.get("unknown", 0),
@@ -1539,6 +1658,7 @@ def _parser():
     collect.add_argument("--queue", default=None)
     collect.add_argument("--ledger", default=None)
     collect.add_argument("--ingest-state", default=None)
+    collect.add_argument("--intake-dir", default=None)
     collect.add_argument("--snapshot-root", default=None)
     collect.add_argument("--review-state", default=None)
     collect.add_argument("--preflight-state", default=None)
@@ -1573,6 +1693,7 @@ def main(argv=None):
             result = collect_projection(
                 db_path=args.db, repo=args.repo, tracker=args.tracker, queue=args.queue,
                 ledger=args.ledger, ingestion=args.ingest_state,
+                intake_dir=args.intake_dir,
                 snapshot_root=args.snapshot_root, review_state=args.review_state,
                 preflight_state=args.preflight_state, as_of=as_of,
                 batch_size=args.batch_size)

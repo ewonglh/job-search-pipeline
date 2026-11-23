@@ -4,7 +4,9 @@ import contextlib
 import io
 import json
 import os
+import shlex
 import subprocess
+import sys
 import tempfile
 from unittest import mock
 
@@ -96,10 +98,13 @@ def make_case(root, *, posting_rows=None, item=None, profile=PROFILE,
 
 def run_claim(case):
     args = ["claim", "--queue", case["queue"], "--repo", case["repo"],
-            "--profile", case["profile"], "--pr", "12"]
+            "--profile", case["profile"], "--pr", "12",
+            "--runner-id", "eligibility-runner", "--session-ref", "eligibility-session"]
     with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
         with mock.patch.object(tailor, "SKIPPED_FILE", case["skipped"]), \
-                mock.patch.object(tailor, "GATE_FILE", case["gates"]):
+                mock.patch.object(tailor, "GATE_FILE", case["gates"]), \
+                mock.patch.dict(os.environ, {
+                    "JOBSEARCH_BROWSER_OWNERSHIP_VERIFIER": shlex.quote(sys.executable)}):
             return q.main(args)
 
 
@@ -227,13 +232,30 @@ with tempfile.TemporaryDirectory() as directory:
                     "title": "app(fixture-co): tailored resume - Software Engineering Intern",
                     "body": "Posting: https://fixture.invalid/jobs/13",
                     "url": "https://github.com/example/resume/pull/13",
+                    "headRefOid": "fixture-head-13",
                     "mergedAt": "2026-01-01T00:00:00Z",
+                    "mergeCommit": {"oid": "fixture-merge-13"},
                     "mergedBy": {"login": "example"},
                     "files": [{"path": "variants/fixture-co-swe/resume.tex"}]}]
+    inside_enqueue = {"active": False}
     def fetch_then_enqueue(_posting):
-        with mock.patch.object(q, "gh_merged_prs", return_value=prs), \
-                mock.patch.object(q, "GH_REPO", "example/resume"):
+
+        if inside_enqueue["active"]:
+            return {"jd_text": JD_FIT}
+        inside_enqueue["active"] = True
+        with open(os.path.join(case["repo"], "applications.yaml"), encoding="utf-8") as fh:
+            tracker = fh.read()
+        def observed(_log, on_page=None):
+            if on_page:
+                on_page(prs)
+            return prs
+        with mock.patch.object(q, "gh_merged_prs", side_effect=observed), \
+                mock.patch.object(q, "gh_pr_files", return_value=prs[0]["files"]), \
+                mock.patch.object(q, "GH_REPO", "example/resume"), \
+                mock.patch.object(tailor, "fetch_jd", return_value={"jd_text": JD_FIT}):
+
             assert q.main(["enqueue", "--queue", case["queue"], "--repo", case["repo"]]) == 0
+        inside_enqueue["active"] = False
         return {"jd_text": JD_FIT}
     with mock.patch.object(tailor, "fetch_jd", side_effect=fetch_then_enqueue):
         assert run_claim(case) == 2
@@ -326,10 +348,13 @@ with tempfile.TemporaryDirectory() as directory:
         return {"jd_text": JD_FIT}
     err = io.StringIO()
     args = ["claim", "--queue", case["queue"], "--repo", case["repo"],
-            "--profile", case["profile"], "--pr", "12"]
+            "--profile", case["profile"], "--pr", "12",
+            "--runner-id", "eligibility-runner", "--session-ref", "eligibility-session"]
     with mock.patch.object(tailor, "fetch_jd", side_effect=fetch_then_tracker_moves), \
             mock.patch.object(tailor, "SKIPPED_FILE", case["skipped"]), \
             mock.patch.object(tailor, "GATE_FILE", case["gates"]), \
+            mock.patch.dict(os.environ, {
+                "JOBSEARCH_BROWSER_OWNERSHIP_VERIFIER": shlex.quote(sys.executable)}), \
             contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
         assert q.main(args) == 2
     assert "tracker changed on origin/main after it was refreshed" in err.getvalue(), err.getvalue()

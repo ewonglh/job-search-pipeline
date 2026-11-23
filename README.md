@@ -100,7 +100,11 @@ merge or enqueue. See `skills/job-tailor/SKILL.md` for the exact commands.
 
 ## Queue claim and recovery
 
-`queue.py claim --pr N` is the required gate before an external form action. It
+`queue.py claim --next --runner-id ID --session-ref REF` is the required gate
+before an external form action. `--pr N` is also available for callers that
+already selected an item, but it must match the shared oldest-first FIFO
+selector. Every new claim requires a nonempty runner ID and exact session
+reference. It
 matches one queue item to exactly one current posting in
 `$JOBSEARCH_REPO/data/postings.json`, fetches and guards a fresh JD from that
 posting URL, and evaluates it against the selected profile. The default profile
@@ -113,8 +117,22 @@ Missing, conflicting, or unknown eligibility cannot be overridden with
 `--force` or a generic review note.
 
 A successful claim durably records `attempt_id`, `attempt_state: authorized`,
-`submit_gate: durable`, claim time, and eligibility/profile/JD hashes before the
-command returns. Use the returned ID when recording confirmation:
+`submit_gate: durable`, the owner tuple, the absolute verifier command and its
+SHA-256 command and executable digests, claim time, and eligibility/profile/JD
+hashes before the command returns. The command digest binds its arguments;
+the executable digest detects changed executable bytes. Configure
+`JOBSEARCH_BROWSER_OWNERSHIP_VERIFIER` in the
+runner host environment before claiming; a missing or invalid verifier blocks
+the claim. `finish-attempt` verifies that executable digest and runs
+the stored command regardless of its caller's verifier environment. Existing
+owners without a verifier pin require an explicitly configured
+`JOBSEARCH_BROWSER_OWNERSHIP_VERIFIER` for recovery; if it is missing or
+uncertain, the browser slot remains reserved. The verifier's ability to observe
+or fence the real browser is an operator/deployment property covered by #55.
+This pin detects command-path and executable-content changes; it does not
+defend against a host user who can write the queue or verifier files.
+
+Use the returned attempt ID when recording confirmation:
 
 ```bash
 python3 scripts/queue.py status --pr N --status submitted \
@@ -125,7 +143,11 @@ python3 scripts/queue.py status --pr N --status submitted \
 This persists the submitted facts and `tracker_sync: pending` before tracker
 I/O. `sync-tracker --pr N` repairs only the tracker bookkeeping; it cannot
 reopen a submission. Sync state is `pending`, `syncing`, `synced`, or `error`,
-with the attempt and sync IDs kept on the queue item.
+with the attempt and sync IDs kept on the queue item. A scheduler can run
+`python3 scripts/queue.py recover-submissions --json` to finalize retained
+snapshots and retry every pending or failed submission through the same tracker
+writer. The bounded JSON summary reports stable reason codes, retry counts, and
+pending age; it does not include confirmation text or sent answers.
 
 Stale or interrupted attempts become `outcome_unknown`. `release-stale` does
 not make them retryable. `reconcile --result retry` requires a specific evidence
@@ -292,6 +314,14 @@ actor and time. Narrative approval remains an owner decision during the drain.
 The merger must match the configured resume repository owner. Offline `--prs`
 and `--tracker` inputs require `--dry-run` and cannot persist queue approval.
 
+Review writers generate the requisition and guarded description fields with
+`review_contract.posting_evidence(work_item, current_jd_text)` and include them
+in the provenance covered by the audit digest. Readiness refetches the current
+posting identified in the resume repository and checks the same evidence.
+Older reviews without these fields require revalidation. Set
+`JOBSEARCH_MAX_AGE_DAYS` to configure the discovery age limit (default seven
+days, zero disables it).
+
 ## What this does not do
 
 - Does not auto-submit. A merged PR puts an item in a queue that a human or an
@@ -370,6 +400,7 @@ or a repository inside this checkout. Empty path overrides fail immediately.
 | `JOBSEARCH_RANKINGS` | Ranking output used by reports | `~/.local/state/job-search-pipeline/rankings.json` |
 | `JOBSEARCH_DASHBOARD_OUT` | Dashboard output | `~/.local/state/job-search-pipeline/dashboard/index.html` |
 | `JOBSEARCH_INGEST_STATE` | Private email-ingestion cursors | `~/.local/state/job-search-pipeline/email_ingest_state.json` |
+| `JOBSEARCH_INTAKE_DIR` | Private discovery and enqueue run history | `~/.local/state/job-search-pipeline/intake` |
 | `JOBSEARCH_PROJECTION_DB` | Private cached report projection | `~/.local/state/job-search-pipeline/projection/index.sqlite3` |
 | `JOBSEARCH_ACTIVITY_STATE` | Private explicit tailoring completion ledger | `~/.local/state/job-search-pipeline/tailoring_activities.json` |
 | `JOBSEARCH_COMPANY_CATALOG` | Private offline company classifications | `~/.local/state/job-search-pipeline/company_catalog.json` |

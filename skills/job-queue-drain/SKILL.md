@@ -36,7 +36,14 @@ python3 scripts/queue.py claim --next --runner-id RUNNER_ID \
   --session-ref SESSION_REF --repo "$JOBSEARCH_REPO" --json
 ```
 
-Claim reads the unique matching posting from `data/postings.json`, the selected
+Every new claim requires both owner values and pins the configured verifier's
+absolute command, command digest, and executable digest in the queue row.
+`claim --pr N`
+is permitted only when PR N is also the shared oldest-first FIFO selection.
+The scheduler and direct callers therefore cannot skip ahead by selecting a
+different PR. Configure `JOBSEARCH_BROWSER_OWNERSHIP_VERIFIER` in the runner
+host environment before claiming; a missing or invalid verifier blocks the
+claim. Claim reads the unique matching posting from `data/postings.json`, the selected
 profile from `data/profile.yaml` (or the exact path passed with `--profile`),
 the current `applications.yaml`, and owner skip/cap files. It fetches a fresh JD
 from that posting URL, guards it, and runs the shared eligibility evaluator.
@@ -47,11 +54,13 @@ The tracker, owner skip list, and cap file must be readable; an explicit `[]`
 records a verified empty list. Missing or empty-unmarked owner state blocks claim.
 
 Success writes `status: in_progress`, `attempt_id`, `attempt_state: authorized`,
-`submit_gate: durable`, runner ID, session reference, and lease expiry in one
-locked queue write. The expiry starts recovery; it never releases the browser
-slot. A failed claim has no form attempt and must not proceed to an external
-form. `claim --pr N` remains for legacy operation; it records a `legacy-unbound`
-owner that still occupies the browser slot.
+`submit_gate: durable`, runner ID, session reference, verifier command and both
+digests, and lease expiry in one locked queue write. The command digest binds
+its arguments; the executable digest detects changed executable bytes. The expiry starts recovery;
+it never releases the browser slot. A failed claim has no form attempt and must
+not proceed to an external form. Pre-existing rows without a verifier pin use
+the explicitly configured verifier at recovery time; if it is missing or
+uncertain, the slot stays reserved with a clear error.
 
 ## Drain and record
 
@@ -164,14 +173,22 @@ fences new and in-flight browser actions, then calls `finish-attempt` with the
 exact PR, attempt, runner, and session tuple. Without a configured independent
 verifier, finish fails closed and another browser claim remains blocked. Agent
 prose, client exit, stop request, and lease expiry are not termination evidence.
-The configured `JOBSEARCH_BROWSER_OWNERSHIP_VERIFIER` command receives one JSON
-request on stdin with schema `job-search-browser-termination-request/v1`, a
-fresh challenge, the exact owner tuple, and the submitted evidence. It must
-return JSON with schema `job-search-browser-termination-verdict/v1`,
+At claim time, `JOBSEARCH_BROWSER_OWNERSHIP_VERIFIER` is resolved to an absolute
+command and its executable SHA-256 digest is pinned. At finish, the stored
+command is executed after checking the digest; a caller cannot replace it by
+changing its environment. For older owner rows with no pin, configure the same
+environment variable explicitly for the recovery command. The verifier
+receives one JSON request on stdin with schema
+`job-search-browser-termination-request/v1`, a fresh challenge, the exact owner
+tuple, and the submitted evidence. It must return JSON with schema
+`job-search-browser-termination-verdict/v1`,
 `verified: true`, the same challenge and owner tuple, a `verifier_id`, and state
 `terminated` or `fenced`. A fenced result also requires
 `in_flight_rejected: true`. The command must observe or enforce the real browser
-boundary; echoing agent data is not verification.
+boundary; echoing agent data is not verification. Pinning identifies the
+configured executable, but its semantics are an operator/deployment property;
+it does not defend against host users who can modify the queue or verifier
+files. The real browser adapter remains the #55 requirement.
 
 ## Interrupted attempts and reconciliation
 

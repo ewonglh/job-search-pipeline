@@ -8,6 +8,7 @@ import datetime as dt
 import json
 import os
 import shutil
+import sys
 import tempfile
 
 import dashboard as d
@@ -152,14 +153,16 @@ def test_sankey():
 # ---------------------------------------------------------------- degradation
 def test_load_queue_failures():
     log = []
-    assert d.load_queue(["python3", os.path.join(HERE, "no-such-queue.py")],
+    assert d.load_queue([sys.executable, os.path.join(HERE, "no-such-queue.py")],
                         log=log.append) == []
     assert any("queue check failed" in m for m in log), log
     log2 = []
-    assert d.load_queue(["false"], log=log2.append) == []
+    assert d.load_queue([sys.executable, "-c", "raise SystemExit(1)"],
+                        log=log2.append) == []
     assert log2
     log3 = []
-    assert d.load_queue(["echo", "not json"], log=log3.append) == []
+    assert d.load_queue([sys.executable, "-c", "print('not json')"],
+                        log=log3.append) == []
     assert any("invalid JSON" in m for m in log3), log3
 
 

@@ -38,6 +38,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+import intake_reporting
+
 UA = ("Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
 TIMEOUT = 25
@@ -79,18 +81,29 @@ def _request(url, data=None):
 
 
 def _json_or_raise(status, body, what):
+    if intake_reporting.is_challenge_response(body):
+        raise BoardError("CHALLENGE", "challenge response")
     if status != 200:
         raise BoardError("UNPROBED", f"HTTP {status} from {what}")
     try:
         return json.loads(body)
     except ValueError as exc:
-        raise BoardError("UNPROBED", f"JSON decode error from {what}: {exc}") from exc
+        raise BoardError("PARSE-FAILED", "response was not valid JSON") from exc
 
 
 def _get(url):
     req = urllib.request.Request(url, headers={"User-Agent": UA})
-    with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
-        return resp.read().decode("utf-8", "ignore")
+    try:
+        with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+            return resp.read().decode("utf-8", "ignore")
+    except urllib.error.HTTPError as exc:
+        try:
+            body = exc.read()
+        except Exception:
+            body = b""
+        if intake_reporting.is_challenge_response(body):
+            raise BoardError("CHALLENGE", "challenge response") from exc
+        raise
 
 
 def _iso_date(value):

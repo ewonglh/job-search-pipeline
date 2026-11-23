@@ -8,12 +8,18 @@ import io
 import json
 import os
 import shutil
+import shlex
 import subprocess
+import sys
 import tempfile
+
+from datetime import date
 import threading
+
 from unittest import mock
 
 import queue as q
+import tailor
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FIX = os.path.join(HERE, "fixtures", "queue")
@@ -25,6 +31,7 @@ with open(os.path.join(FIX, "applications_merged.yaml"), encoding="utf-8") as fh
 
 GIT = ["git", "-c", "user.name=Synthetic", "-c", "user.email=synthetic@example.invalid",
        "-c", "commit.gpgsign=false"]
+
 
 
 def git(repo, *args):
@@ -73,8 +80,45 @@ def live_enqueue(queue_path, repo, prs=PRS, extra=()):
     # Inject the authenticated GitHub boundary, never a writable fixture CLI
     # flag. The tracker is read through the real refresh from a local origin.
     # Real calls still require the observed owner's merge.
-    with mock.patch.object(q, "gh_merged_prs", return_value=prs), \
-            mock.patch.object(q, "GH_REPO", "demo-user/resume"):
+    root = os.path.dirname(queue_path)
+    prs = [dict(row) for row in prs]
+    for row in prs:
+        entry = q.extract_entry(row, TRACKER)
+        link = (entry or {}).get("link") or q._posting_url_from_body(row.get("body"))
+        if not link:
+            link = "https://fixture.invalid/jobs/%s" % row.get("number")
+        row["body"] = "Posting: " + link
+    os.makedirs(os.path.join(repo, "data"), exist_ok=True)
+    postings = []
+    for pr in prs:
+        entry = q.extract_entry(pr, TRACKER)
+        link = (entry or {}).get("link") or q._posting_url_from_body(pr.get("body"))
+        if link and not any(row["link"] == link for row in postings):
+            company, role = q.title_parts(pr)
+            postings.append({"company": company, "role": role, "title": role,
+                             "link": link, "added": date.today().isoformat()})
+    with open(os.path.join(repo, "data", "postings.json"), "w", encoding="utf-8") as fh:
+        json.dump(postings, fh)
+    skipped = os.path.join(root, "skipped.yaml")
+    gates = os.path.join(root, "gates.yaml")
+    for path in (skipped, gates):
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("[]\n")
+
+    def observed(_log, on_page=None):
+        if on_page:
+            on_page(prs)
+        return prs
+
+    files_by_pr = {int(row.get("number") or 0): row.get("files") for row in prs}
+    with mock.patch.object(q, "gh_merged_prs", side_effect=observed), \
+            mock.patch.object(q, "gh_pr_files",
+                              side_effect=lambda number, _log: files_by_pr.get(int(number))), \
+            mock.patch.object(q, "GH_REPO", "demo-user/resume"), \
+            mock.patch.object(tailor, "SKIPPED_FILE", skipped), \
+            mock.patch.object(tailor, "GATE_FILE", gates), \
+            mock.patch.object(tailor, "fetch_jd", return_value={
+                "jd_text": "Current role description. " * 20}):
         return q.main(["enqueue", "--queue", queue_path, "--repo", repo, *extra])
 
 
@@ -86,6 +130,7 @@ def quiet(func, *args, **kwargs):
 def read_bytes(path):
     with open(path, "rb") as fh:
         return fh.read()
+
 
 # ---------------------------------------------------------------- yaml subset
 obj = [{"company": "Acme: Inc", "role": "SWE #1", "notes": "x | y",
@@ -263,11 +308,14 @@ try:
     # nothing.
     for argv in (["list"], ["next"], ["release-stale"],
                  ["status", "--pr", "12", "--status", "failed", "--notes", "x"],
-                 ["claim", "--pr", "12", "--repo", repo],
+                 ["claim", "--pr", "12", "--repo", repo,
+                  "--runner-id", "queue-test-runner", "--session-ref", "queue-test-session"],
                  ["enqueue", "--repo", repo],
                  ["enqueue", "--dry-run", "--repo", repo]):
         err = io.StringIO()
-        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err), \
+                mock.patch.dict(os.environ, {
+                    "JOBSEARCH_BROWSER_OWNERSHIP_VERIFIER": shlex.quote(sys.executable)}):
             with mock.patch.object(q, "gh_merged_prs", return_value=PRS) as gh:
                 rc = q.main([argv[0], "--queue", qfile] + argv[1:])
         assert rc in (1, 2), (argv, rc)
@@ -293,7 +341,7 @@ try:
     assert quiet(q.main, ["init", "--queue", qfile]) == 0
     assert read_bytes(qfile) == created
 
-    # dry-run: adds to stdout, writes nothing
+    # Fixture dry-run is a structural preview, not proof of live admission.
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         rc = q.main(["enqueue", "--prs", os.path.join(FIX, "merged_prs.json"),
@@ -302,14 +350,26 @@ try:
     assert rc == 0
     assert read_bytes(qfile) == created, "--dry-run must not write the store"
     out = buf.getvalue()
-    assert out.count("queued:") == 2, repr(out)
+    assert "queued:" not in out, repr(out)
+    assert out.count("preview candidate:") == 2, repr(out)
+    assert '"mode": "structural_preview"' in out, repr(out)
+    assert '"admitted": 0' in out and '"owner_merged": 0' in out, repr(out)
     assert "Quantum Co" in out and "Ghost Co" in out, out
 
     # A non-owner merge and missing merge time are not enqueue authorization.
-    for bad in ([dict(pr, mergedBy={"login": "untrusted-fixture"}) for pr in PRS],
-                [dict(pr, mergedAt=None) for pr in PRS]):
-        assert live_enqueue(qfile, repo, bad) == 0
+
+    for non_owner in (
+            [dict(pr, mergedBy={"login": "untrusted-fixture"}) for pr in PRS],
+            [dict(pr, mergedBy={"name": "demo-user"}) for pr in PRS]):
+        assert live_enqueue(qfile, repo, non_owner) == 0
+
         assert q.load_queue(qfile) == []
+    missing_time = [dict(pr, mergedAt=None) for pr in PRS]
+    assert live_enqueue(qfile, repo, missing_time) == 1
+    assert q.load_queue(qfile) == []
+    pending = q.load_merge_intake(qfile)["records"]["12"]
+    assert pending["state"] == "pending"
+    assert pending["reason_code"] == "metadata_unavailable"
 
     # real run writes the store
     buf = io.StringIO()
@@ -321,11 +381,14 @@ try:
     # the temporary fetch ref never outlives the call
     assert git(repo, "for-each-ref", "refs/jobsearch") == ""
 
-    # re-run: silent (nothing new) but exit 0
+    # Re-run: no addition, with a structured healthy-empty summary.
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
+
         rc = live_enqueue(qfile, repo)
-    assert rc == 0 and buf.getvalue() == "", repr(buf.getvalue())
+    assert rc == 0 and "queued:" not in buf.getvalue(), repr(buf.getvalue())
+    assert '"outcome": "healthy_empty"' in buf.getvalue(), repr(buf.getvalue())
+
 
     # next -> oldest queued (PR 12)
     buf = io.StringIO()
@@ -494,7 +557,11 @@ with tempfile.TemporaryDirectory() as root:
         with mock.patch.object(q, "gh_merged_prs", return_value=PRS):
             assert quiet(q.main, ["enqueue", "--queue", path, "--repo", repo]) == 1, label
         assert quiet(q.main, ["init", "--queue", path]) == 2, label
-        assert quiet(q.main, ["claim", "--queue", path, "--repo", repo, "--pr", "3"]) == 2, label
+        with mock.patch.dict(os.environ, {
+                "JOBSEARCH_BROWSER_OWNERSHIP_VERIFIER": shlex.quote(sys.executable)}):
+            assert quiet(q.main, ["claim", "--queue", path, "--repo", repo, "--pr", "3",
+                                  "--runner-id", "queue-test-runner",
+                                  "--session-ref", "queue-test-session"]) == 2, label
         assert read_bytes(path) == before, label
 
 
@@ -543,16 +610,15 @@ with tempfile.TemporaryDirectory() as root:
     assert "secret" not in q._redact(
         "fatal: unable to access 'https://user:secret@host.example/x.git/': no route")
     prs = [dict(pr, files=None) for pr in PRS]
-    for dry in ((), ("--dry-run",)):
-        err = io.StringIO()
-        with mock.patch.object(q, "gh_pr_files") as files, \
-                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
-            assert live_enqueue(path, repo, prs, extra=dry) == 1
-        files.assert_not_called()
-        assert "tracker refresh failed" in err.getvalue(), err.getvalue()
-        assert "cached data was not used" in err.getvalue()
-        assert "secret" not in err.getvalue(), "credentials must not reach logs"
-        assert read_bytes(path) == before
+    err = io.StringIO()
+    with mock.patch.object(q, "gh_pr_files") as files, \
+            contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+        assert live_enqueue(path, repo, prs) == 1
+    files.assert_not_called()
+    assert "tracker refresh failed" in err.getvalue(), err.getvalue()
+    assert "cached data was not used" in err.getvalue()
+    assert "secret" not in err.getvalue(), "credentials must not reach logs"
+    assert read_bytes(path) == before
     try:
         q.refresh_main_tracker(repo)
         raise AssertionError("refresh succeeded against an unreachable remote")
@@ -594,10 +660,13 @@ with tempfile.TemporaryDirectory() as root:
         assert live_enqueue(path, repo) == 1
     assert "tracker changed on origin/main after it was refreshed" in err.getvalue(), err.getvalue()
     assert read_bytes(path) == before
-    # A dry run writes nothing, so it does not need the recheck.
-    with mock.patch.object(q, "refresh_main_tracker", side_effect=refresh_then_race), \
+    # Fixture preview is offline, writes nothing, and does not refresh origin.
+    with mock.patch.object(q, "refresh_main_tracker", side_effect=refresh_then_race) as refresh, \
             contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-        assert live_enqueue(path, repo, extra=("--dry-run",)) == 0
+        assert live_enqueue(path, repo, extra=(
+            "--dry-run", "--prs", os.path.join(FIX, "merged_prs.json"),
+            "--tracker", os.path.join(FIX, "applications_merged.yaml"))) == 0
+        refresh.assert_not_called()
     # The next run, with a fresh refresh, succeeds.
     assert live_enqueue(path, repo) == 0
     assert [row["pr_number"] for row in q.load_queue(path)] == [12, 14]
@@ -610,28 +679,54 @@ with tempfile.TemporaryDirectory() as root:
     repo = make_remote(root, "[]\n")
     path = os.path.join(root, "queue.yaml")
     assert quiet(q.main, ["init", "--queue", path]) == 0
-    lists = {"first": [prA], "second": [prB]}
+    duplicate_link = "https://fixture.invalid/jobs/dup"
+    first = dict(prA, headRefOid="head20", body="Posting: " + duplicate_link)
+    second = dict(prB, headRefOid="head21", body="Posting: " + duplicate_link)
+    lists = {"first": [first], "second": [second]}
+    os.makedirs(os.path.join(repo, "data"), exist_ok=True)
+    with open(os.path.join(repo, "data", "postings.json"), "w", encoding="utf-8") as fh:
+        json.dump([{"company": "Dup Co", "role": "Swe", "title": "Swe",
+                    "link": duplicate_link, "added": date.today().isoformat()}], fh)
+    skipped_path = os.path.join(root, "skipped.yaml")
+    gates_path = os.path.join(root, "gates.yaml")
+    for fixture_path in (skipped_path, gates_path):
+        with open(fixture_path, "w", encoding="utf-8") as fh:
+            fh.write("[]\n")
     gate = threading.Barrier(2)
 
-    def per_thread_prs(log):
+    def per_thread_prs(log, on_page=None):
         gate.wait(timeout=20)
-        return lists[threading.current_thread().name]
+        page = lists[threading.current_thread().name]
+        if on_page:
+            on_page(page)
+        return page
+
+    files_by_pr = {20: first["files"], 21: second["files"]}
 
     results = {}
+    concurrent_out = io.StringIO()
+    concurrent_err = io.StringIO()
 
     def worker():
         results[threading.current_thread().name] = q.main(
             ["enqueue", "--queue", path, "--repo", repo])
 
     with mock.patch.object(q, "gh_merged_prs", side_effect=per_thread_prs), \
+            mock.patch.object(q, "gh_pr_files",
+                              side_effect=lambda number, _log: files_by_pr[int(number)]), \
             mock.patch.object(q, "GH_REPO", "demo-user/resume"), \
-            contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            mock.patch.object(tailor, "SKIPPED_FILE", skipped_path), \
+            mock.patch.object(tailor, "GATE_FILE", gates_path), \
+            mock.patch.object(tailor, "fetch_jd", return_value={
+                "jd_text": "Current role description. " * 20}), \
+            contextlib.redirect_stdout(concurrent_out), contextlib.redirect_stderr(concurrent_err):
         threads = [threading.Thread(target=worker, name=name) for name in lists]
         for thread in threads:
             thread.start()
         for thread in threads:
             thread.join(timeout=60)
-    assert results == {"first": 0, "second": 0}, results
+    assert results == {"first": 0, "second": 0}, (
+        results, concurrent_out.getvalue(), concurrent_err.getvalue())
     rows = q.load_queue(path)
     assert len(rows) == 1 and rows[0]["status"] == "queued", rows
 
