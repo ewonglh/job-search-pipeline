@@ -32,6 +32,7 @@ jobs:
           python test_queue_intake.py
           python test_attempt_lifecycle.py
           python test_submission_snapshot.py
+          python test_tracker_compat.py
           python test_posting_admission.py
           python test_tailor.py
           python test_cv_checks.py

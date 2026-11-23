@@ -39,6 +39,15 @@ MANIFEST_KEYS = {
     "schema_version", "captured_at", "canonical_application_id", "attempt_id",
     "source_commits", "operator_material_verification", "confirmation", "artifacts",
 }
+LEGACY_MANIFEST_KEYS = {
+    "schema_version", "captured_at", "posting", "pr_number", "variant",
+    "artifacts", "submitted_date", "submission_recorded_at",
+    "confirmation_evidence", "provenance",
+}
+HASH_ONLY_LEGACY_MANIFEST_KEYS = {
+    "schema_version", "captured_at", "canonical_application_id", "attempt_id",
+    "confirmation", "artifacts",
+}
 
 
 def sha256(data):
@@ -300,6 +309,208 @@ def _valid_application_id(value):
             and len(value) <= 2048 and not any(ord(ch) < 32 for ch in value))
 
 
+def _manifest_kind(manifest):
+    if not isinstance(manifest, dict):
+        raise SnapshotError("snapshot manifest shape is invalid")
+    keys = set(manifest)
+    if keys == MANIFEST_KEYS:
+        return "current"
+    if keys == LEGACY_MANIFEST_KEYS:
+        return "legacy"
+    if keys == HASH_ONLY_LEGACY_MANIFEST_KEYS:
+        return "legacy_hash_only"
+    raise SnapshotError("snapshot manifest shape is invalid")
+
+
+def _valid_legacy_application_id(value):
+    if _valid_application_id(value):
+        return True
+    if not isinstance(value, str) or len(value) > 2048 or any(ord(ch) < 32 for ch in value):
+        return False
+    if re.fullmatch(r"pr:[1-9][0-9]*", value):
+        return True
+    if value.startswith("identity:"):
+        parts = value[len("identity:"):].split("|")
+        return (len(parts) == 2 and all(part.strip() for part in parts)
+                and all(len(part) <= 120 for part in parts))
+    return False
+
+
+def _legacy_application_id(posting):
+    candidate = posting.get("id")
+    if isinstance(candidate, str):
+        if _valid_legacy_application_id(candidate):
+            return candidate
+        import application_identity
+        normalized = application_identity.normalize_posting_url(candidate)
+        if normalized:
+            return "link:" + normalized
+    url = posting.get("url")
+    if isinstance(url, str):
+        import application_identity
+        normalized = application_identity.normalize_posting_url(url)
+        if normalized:
+            return "link:" + normalized
+    return None
+
+
+def _legacy_timestamp(value):
+    if not isinstance(value, str) or not value:
+        return False
+    try:
+        datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return True
+
+
+def _validate_legacy_manifest(root, manifest):
+    if type(manifest.get("schema_version")) is not int or manifest["schema_version"] != 1:
+        raise SnapshotError("snapshot manifest schema is unsupported")
+    if not _legacy_timestamp(manifest.get("captured_at")):
+        raise SnapshotError("legacy snapshot capture time is invalid")
+    posting = manifest.get("posting")
+    if not isinstance(posting, dict):
+        raise SnapshotError("legacy snapshot posting identity is invalid")
+    for key in ("id", "url"):
+        value = posting.get(key)
+        if value is not None and not isinstance(value, str):
+            raise SnapshotError("legacy snapshot posting identity is invalid")
+    pr_number = manifest.get("pr_number")
+    if pr_number is not None and (type(pr_number) is not int or pr_number <= 0):
+        raise SnapshotError("legacy snapshot PR identity is invalid")
+    if manifest.get("variant") is not None and not isinstance(manifest["variant"], str):
+        raise SnapshotError("legacy snapshot variant is invalid")
+
+    submitted_date = manifest.get("submitted_date")
+    if submitted_date is not None:
+        try:
+            datetime.strptime(submitted_date, "%Y-%m-%d")
+        except (TypeError, ValueError):
+            raise SnapshotError("legacy snapshot submission date is invalid")
+    recorded_at = manifest.get("submission_recorded_at")
+    if recorded_at is not None and not _legacy_timestamp(recorded_at):
+        raise SnapshotError("legacy snapshot record time is invalid")
+    evidence = manifest.get("confirmation_evidence")
+    if evidence is not None and not isinstance(evidence, str):
+        raise SnapshotError("legacy snapshot confirmation evidence is invalid")
+    if not isinstance(manifest.get("provenance"), dict):
+        raise SnapshotError("legacy snapshot provenance is invalid")
+
+    artifacts = manifest.get("artifacts")
+    if not isinstance(artifacts, dict) or set(artifacts) != {"resume_pdf", "answers_json"}:
+        raise SnapshotError("legacy snapshot artifact shape is invalid")
+    for key, folder, suffix in (("resume_pdf", "pdf", ".pdf"),
+                                ("answers_json", "answers", ".json")):
+        artifact = artifacts[key]
+        digest = artifact.get("sha256") if isinstance(artifact, dict) else None
+        if not isinstance(digest, str) or not SHA256_RE.fullmatch(digest):
+            raise SnapshotError("legacy snapshot artifact hash is invalid")
+        blob = _read_regular_file(os.path.join(root, folder, digest + suffix),
+                                  "retained legacy " + key)
+        if sha256(blob) != digest:
+            raise SnapshotError("retained legacy snapshot bytes do not match the manifest")
+        if key == "resume_pdf" and not blob.startswith(b"%PDF-"):
+            raise SnapshotError("retained legacy resume bytes are not a PDF")
+
+
+def _validate_hash_only_legacy_manifest(manifest):
+    if type(manifest.get("schema_version")) is not int or manifest["schema_version"] != 1:
+        raise SnapshotError("snapshot manifest schema is unsupported")
+    if not _legacy_timestamp(manifest.get("captured_at")):
+        raise SnapshotError("legacy snapshot capture time is invalid")
+    if not _valid_legacy_application_id(manifest.get("canonical_application_id")):
+        raise SnapshotError("legacy snapshot application identity is invalid")
+    if not ATTEMPT_RE.fullmatch(str(manifest.get("attempt_id") or "")):
+        raise SnapshotError("legacy snapshot attempt binding is invalid")
+    confirmation = manifest.get("confirmation")
+    if (not isinstance(confirmation, dict)
+            or set(confirmation) != {"submitted_at", "evidence"}):
+        raise SnapshotError("legacy snapshot confirmation shape is invalid")
+    if confirmation["submitted_at"] is not None:
+        try:
+            datetime.strptime(confirmation["submitted_at"], "%Y-%m-%d")
+        except (TypeError, ValueError):
+            raise SnapshotError("legacy snapshot submission date is invalid")
+    if confirmation["evidence"] is not None and not isinstance(confirmation["evidence"], str):
+        raise SnapshotError("legacy snapshot confirmation evidence is invalid")
+    artifacts = manifest.get("artifacts")
+    if not isinstance(artifacts, dict) or "resume_pdf" not in artifacts:
+        raise SnapshotError("legacy snapshot artifact shape is invalid")
+    for key in ("resume_pdf", "answers_json"):
+        artifact = artifacts.get(key)
+        if artifact is None:
+            continue
+        digest = artifact.get("sha256") if isinstance(artifact, dict) else None
+        if not isinstance(digest, str) or not SHA256_RE.fullmatch(digest):
+            raise SnapshotError("legacy snapshot artifact hash is invalid")
+
+
+def read_snapshot_manifest(snapshot_root, manifest_id):
+    """Read a recognized current or legacy manifest as safe historical facts."""
+    root = os.path.abspath(os.fspath(snapshot_root))
+    manifest = _read_manifest(root, manifest_id)
+    kind = _manifest_kind(manifest)
+    if kind == "current":
+        confirmation = manifest["confirmation"]
+        return {
+            "snapshot_id": manifest_id,
+            "snapshot_kind": "current",
+            "application_id": manifest["canonical_application_id"],
+            "attempt_id": manifest["attempt_id"],
+            "attempt_provenance": "verified",
+            "captured_at": manifest["captured_at"],
+            "recorded_at": manifest["captured_at"],
+            "submitted_at": confirmation["submitted_at"],
+            "confirmation_status": "confirmed" if confirmation["submitted_at"] else "prepared",
+            "resume_hash": manifest["artifacts"]["resume_pdf"]["sha256"],
+            "answers_hash": manifest["artifacts"]["answers_json"]["sha256"],
+            "pr_number": None,
+        }
+
+    if kind == "legacy_hash_only":
+        confirmation = manifest["confirmation"]
+        artifacts = manifest["artifacts"]
+        application_id = manifest["canonical_application_id"]
+        return {
+            "snapshot_id": manifest_id,
+            "snapshot_kind": "legacy_hash_only",
+            "application_id": application_id,
+            "attempt_id": None,
+            "attempt_provenance": "unknown",
+            "artifact_provenance": "manifest_only",
+            "captured_at": manifest["captured_at"],
+            "recorded_at": manifest["captured_at"],
+            "submitted_at": confirmation["submitted_at"],
+            "confirmation_status": "confirmed" if confirmation["submitted_at"] else "prepared",
+            "resume_hash": artifacts["resume_pdf"]["sha256"],
+            "answers_hash": (artifacts.get("answers_json") or {}).get("sha256"),
+            "pr_number": (int(application_id[3:])
+                          if re.fullmatch(r"pr:[1-9][0-9]*", application_id) else None),
+        }
+
+    artifacts = manifest["artifacts"]
+    posting = manifest["posting"]
+    submitted_at = manifest["submitted_date"]
+    confirmed = bool(submitted_at or manifest["submission_recorded_at"]
+                     or manifest["confirmation_evidence"])
+    return {
+        "snapshot_id": manifest_id,
+        "snapshot_kind": "legacy",
+        "application_id": _legacy_application_id(posting),
+        "attempt_id": None,
+        "attempt_provenance": "unknown",
+        "artifact_provenance": "hash_verified",
+        "captured_at": manifest["captured_at"],
+        "recorded_at": manifest["submission_recorded_at"],
+        "submitted_at": submitted_at,
+        "confirmation_status": "confirmed" if confirmed else "prepared",
+        "resume_hash": artifacts["resume_pdf"]["sha256"],
+        "answers_hash": artifacts["answers_json"]["sha256"],
+        "pr_number": manifest["pr_number"],
+    }
+
+
 def prepare_snapshot(pdf_file, answers_file, snapshot_root, canonical_application_id,
                      attempt_id, operator_verification, commits):
     """Capture explicitly selected materials in an immutable prepared manifest."""
@@ -352,11 +563,18 @@ def _read_manifest(root, manifest_id):
     path = os.path.join(root, "manifests", manifest_id + ".json")
     data = _read_regular_file(path, "snapshot manifest")
     manifest = _load_json(data, "snapshot manifest")
-    if not isinstance(manifest, dict) or set(manifest) != MANIFEST_KEYS:
-        raise SnapshotError("snapshot manifest shape is invalid")
+    kind = _manifest_kind(manifest)
     canonical = _manifest_bytes(manifest)
-    if data != canonical or sha256(canonical) != manifest_id:
-        raise SnapshotError("snapshot manifest hash or canonical encoding is invalid")
+    if sha256(canonical) != manifest_id:
+        raise SnapshotError("snapshot manifest hash is invalid")
+    if kind == "current" and data != canonical:
+        raise SnapshotError("current snapshot manifest encoding is invalid")
+    if kind == "legacy":
+        _validate_legacy_manifest(root, manifest)
+        return manifest
+    if kind == "legacy_hash_only":
+        _validate_hash_only_legacy_manifest(manifest)
+        return manifest
     if type(manifest.get("schema_version")) is not int or manifest["schema_version"] != 1:
         raise SnapshotError("snapshot manifest schema is unsupported")
     if not _valid_application_id(manifest.get("canonical_application_id")):
@@ -428,6 +646,9 @@ def verify_snapshot(snapshot_root, manifest_id, canonical_application_id, attemp
     """Verify manifest, retained bytes, identity binding, and selected bytes."""
     root = _private_dir(snapshot_root)
     manifest = _read_manifest(root, manifest_id)
+    if _manifest_kind(manifest) != "current":
+        raise SnapshotError(
+            "legacy snapshot attempt provenance is unknown; prepare a current snapshot before Submit")
     if (manifest["canonical_application_id"] != canonical_application_id
             or manifest["attempt_id"] != attempt_id):
         raise SnapshotError("prepared snapshot belongs to another application or attempt")

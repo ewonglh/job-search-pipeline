@@ -251,17 +251,6 @@ QUEUE_HEADER = (
 # ---------------------------------------------------------------- yaml subset
 # Minimal, queue-only YAML reader/writer. Deliberately the same subset accepted
 # by the other lanes: a top-level list of flat scalar mappings, plus ``[]``.
-def _strip_comment(line):
-    out, quote = [], None
-    for ch in line:
-        if ch in "\"'":
-            quote = None if quote == ch else (ch if quote is None else quote)
-        if ch == "#" and quote is None:
-            break
-        out.append(ch)
-    return "".join(out)
-
-
 def _unq(v):
     if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
         inner = v[1:-1]
@@ -285,23 +274,19 @@ def _scalar(v):
 
 
 def parse_yaml_list(text):
-    """Minimal YAML subset: a top-level list of flat mappings."""
-    items, cur = [], None
-    for raw in text.splitlines():
-        s = _strip_comment(raw).strip()
-        if not s or s in ("---", "...", "[]"):
-            continue
-        if s.startswith("- "):
-            cur = {}
-            items.append(cur)
-            s = s[2:].strip()
-            if s and ":" in s:
-                k, _, v = s.partition(":")
-                cur[k.strip()] = _scalar(v)
-        elif cur is not None and ":" in s:
-            k, _, v = s.partition(":")
-            cur[k.strip()] = _scalar(v)
-    return items
+    """Compatibility wrapper for the queue's scalar-list reader."""
+    return parse_queue(text, status_values=None)
+
+
+def parse_application_tracker(text, label="application tracker", *,
+                              allow_comment_only=False):
+    """Parse tracker text and report malformed input through queue errors."""
+    import tracker_compat
+    try:
+        return tracker_compat.parse_application_tracker(
+            text, allow_comment_only=allow_comment_only)
+    except ValueError as exc:
+        raise QueueStateError("cannot safely read %s: %s" % (label, exc)) from exc
 
 
 def parse_queue(text, status_values=STATUSES):
@@ -1088,7 +1073,8 @@ def write_tracker_row(repo, item, date, sent, route, dry_run=False,
             tracker_text = fh.read()
         import application_identity as identity
         try:
-            tracker_rows = parse_queue(tracker_text, status_values=None)
+            tracker_rows = parse_application_tracker(
+                tracker_text, allow_comment_only=True)
             _canonical_queue_identity(item)
             target_pr = identity.pr_number(item)
             resolution = identity.resolve_applications(tracker_rows, [item])
@@ -1153,7 +1139,8 @@ def write_tracker_row(repo, item, date, sent, route, dry_run=False,
         verify = _git(repo, "show", f"origin/main:{TRACKER_PATH}")
         ok = False
         if verify.returncode == 0:
-            entries = [e for e in parse_yaml_list(verify.stdout)
+            entries = [e for e in parse_application_tracker(
+                verify.stdout, "current application tracker")
                        if isinstance(e, dict)]
             ok = any(pr_number_of(e) == pr_number_of(item) for e in entries)
         if not ok:
@@ -1562,11 +1549,9 @@ def refresh_main_tracker(repo, log=lambda *a: None, timeout=60):
     except UnicodeError:
         raise TrackerRefreshError("tracker at %s is not valid UTF-8" % commit[:12])
     try:
-        rows = parse_queue(text, status_values=None)
+        rows = parse_application_tracker(text, "current application tracker")
     except QueueStateError as exc:
         raise TrackerRefreshError("tracker is malformed: " + str(exc)) from exc
-    if not rows and not any(line.strip() == "[]" for line in text.splitlines()):
-        raise TrackerRefreshError("tracker needs entries or an explicit empty-list marker")
     return TrackerRevision(commit, text, hashlib.sha256(blob).hexdigest())
 
 
@@ -1654,7 +1639,8 @@ def extract_entry(pr, tracker_text):
     """The tracker entry for a PR: by PR URL, then variant path, then company slug."""
     if not tracker_text:
         return None
-    entries = [e for e in parse_yaml_list(tracker_text) if isinstance(e, dict)]
+    entries = [e for e in parse_application_tracker(
+        tracker_text, "application tracker") if isinstance(e, dict)]
     url = normalize_url(pr.get("url", "")).lower()
     if url:
         for e in entries:
@@ -1954,8 +1940,8 @@ def _read_claim_inputs(args, item, queue_items, max_age_days, run_date,
     # Refresh first: a failed refresh blocks the claim before any other read
     # or network call, whether or not a cached tracker exists.
     revision = refresh_main_tracker(args.repo, log)
-    tracker_rows = _parse_flat_entries(revision.text, "current application tracker",
-                                       required=True)
+    tracker_rows = parse_application_tracker(
+        revision.text, "current application tracker")
 
     _postings_bytes, postings, postings_sha256 = _read_postings_revision(
         args.repo, revision)
@@ -2220,8 +2206,8 @@ def _read_claim_validation_inputs(args, item, queue_items, posting, revision,
     verify_tracker_revision(args.repo, revision, postings_sha256)
     if _canonical_queue_identity(item) != identity.application_id(item):
         raise QueueStateError("application identity changed")
-    tracker_rows = _parse_flat_entries(revision.text, "current application tracker",
-                                       required=True)
+    tracker_rows = parse_application_tracker(
+        revision.text, "current application tracker")
     _check_claim_identities(item, queue_items, tracker_rows, posting)
     skipped = _read_flat_entries(args.skipped, "owner skip list", required=True)
     gates = _read_gate_entries(args.gates, required=True)
@@ -2424,7 +2410,7 @@ def _read_fixture_inputs(args, log):
         return None, None
 
     try:
-        tracker_rows = parse_queue(tracker_text, status_values=None)
+        tracker_rows = parse_application_tracker(tracker_text, "fixture tracker")
         if not tracker_rows and not any(line.strip() == "[]" for line in tracker_text.splitlines()):
             raise QueueStateError("tracker needs entries or an explicit empty-list marker")
     except QueueStateError as exc:
@@ -2773,11 +2759,8 @@ def cmd_enqueue(args, log):
 
     try:
         revision = refresh_main_tracker(args.repo, log)
-        tracker_rows = parse_queue(revision.text, status_values=None)
-        if not tracker_rows and not any(
-                line.strip() == "[]" for line in revision.text.splitlines()):
-            raise QueueStateError(
-                "current application tracker needs entries or an explicit empty-list marker")
+        tracker_rows = parse_application_tracker(
+            revision.text, "current application tracker")
         log("queue: tracker pinned to origin/main %s" % revision.commit[:12])
     except QueueStateError as exc:
         log("queue: enqueue stopped: " + str(exc))
@@ -2860,9 +2843,12 @@ def enqueue(existing, prs_with_trackers, include_submitted=False, limit=0):
                for row in active):
             skipped.append((number, "already active for this application"))
             continue
+        tracker_text = pr.get("_tracker")
+        tracker_rows = (parse_application_tracker(
+            tracker_text, "application tracker") if tracker_text else [])
         if not include_submitted and any(
                 canonical_submitted(row.get("status")) and same_posting(item, row)
-                for row in parse_yaml_list(pr.get("_tracker") or "")):
+                for row in tracker_rows):
             skipped.append((number, "already submitted in tracker"))
             continue
         if limit and len(added) >= limit:

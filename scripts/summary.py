@@ -120,53 +120,11 @@ except Exception:  # pragma: no cover - tz database unavailable
     _SGT = timezone(timedelta(hours=8))
 
 
-# ---------------------------------------------------------------- yaml subset
-# Minimal, tracker-only YAML reader. Deliberately the same subset accepted by
-# tailor.py/discover.py: a top-level list of scalar mappings, plus ``[]``.
-def _strip_comment(line):
-    out, quote = [], None
-    for ch in line:
-        if ch in "\"'":
-            quote = None if quote == ch else (ch if quote is None else quote)
-        if ch == "#" and quote is None:
-            break
-        out.append(ch)
-    return "".join(out)
-
-
-def _unq(v):
-    if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
-        return v[1:-1]
-    return v
-
-
-def _scalar(v):
-    v = v.strip()
-    if v.lower() in ("true", "false"):
-        return v.lower() == "true"
-    if v.lower() in ("null", "~", ""):
-        return None
-    return _unq(v)
-
-
+# ---------------------------------------------------------------- tracker yaml
 def parse_yaml_list(text):
-    """Minimal YAML subset: a top-level list of mappings (applications.yaml)."""
-    items, cur = [], None
-    for raw in text.splitlines():
-        s = _strip_comment(raw).strip()
-        if not s or s in ("---", "...", "[]"):
-            continue
-        if s.startswith("- "):
-            cur = {}
-            items.append(cur)
-            s = s[2:].strip()
-            if s and ":" in s:
-                k, _, v = s.partition(":")
-                cur[k.strip()] = _scalar(v)
-        elif cur is not None and ":" in s:
-            k, _, v = s.partition(":")
-            cur[k.strip()] = _scalar(v)
-    return items
+    """Read application rows using the shared strict tracker parser."""
+    import tracker_compat
+    return tracker_compat.parse_application_tracker(text, allow_comment_only=True)
 
 
 # ---------------------------------------------------------------- helpers
@@ -1255,7 +1213,7 @@ def load_skipped(skipped_path):
     try:
         with open(skipped_path, encoding="utf-8") as fh:
             items = parse_yaml_list(fh.read())
-    except OSError:
+    except (OSError, ValueError):
         return []
     return [i for i in items if isinstance(i, dict)]
 

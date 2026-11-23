@@ -309,13 +309,10 @@ def _source_error(path, error):
 def _read_tracker(path):
     try:
         import summary
+        import tracker_compat
         with open(path, "r", encoding="utf-8") as source:
             text = source.read()
-        parsed = summary.parse_yaml_list(text)
-        meaningful = [line.strip() for line in text.splitlines()
-                      if line.strip() and not line.lstrip().startswith("#")]
-        if not parsed and "[]" not in meaningful:
-            raise _InvalidSource()
+        parsed = tracker_compat.parse_application_tracker(text)
         statuses = set(summary.STATUS_ALIASES) | {str(value).lower()
                                                  for value in summary.STATUS_ALIASES.values()}
         records, quarantined, redacted = _compatible_rows(
@@ -622,6 +619,7 @@ def _read_snapshots(root):
         return {"records": None, "observed_at": None, "error_code": "source_missing",
                 "quarantined_count": 0}
     try:
+        import submission_snapshot
         directory = os.path.join(root, "manifests")
         try:
             names = sorted(os.listdir(directory))
@@ -633,28 +631,39 @@ def _read_snapshots(root):
         for name in names:
             if not name.endswith(".json") or not HASH64_RE.fullmatch(name[:-5]):
                 raise _InvalidSource()
-            document = _read_json(os.path.join(directory, name))
-            if (not isinstance(document, dict) or document.get("schema_version") != 1
-                    or hashlib.sha256(json.dumps(document, sort_keys=True, ensure_ascii=False,
-                        separators=(",", ":")).encode("utf-8")).hexdigest() != name[:-5]):
-                raise _InvalidSource()
-            confirmation = document.get("confirmation")
-            if not confirmation:
+            manifest = submission_snapshot.read_snapshot_manifest(root, name[:-5])
+            if manifest["confirmation_status"] != "confirmed":
                 continue
-            if not isinstance(confirmation, dict):
+            submitted = (_timestamp(manifest.get("submitted_at"))
+                         or _day(manifest.get("submitted_at")))
+            resume_hash = manifest.get("resume_hash")
+            answers_hash = manifest.get("answers_hash")
+            attempt_id = manifest.get("attempt_id")
+            attempt_provenance = manifest.get("attempt_provenance")
+            if (not isinstance(resume_hash, str) or not HASH64_RE.fullmatch(resume_hash)
+                    or (answers_hash is not None and (not isinstance(answers_hash, str)
+                        or not HASH64_RE.fullmatch(answers_hash)))
+                    or (attempt_id is not None and (not isinstance(attempt_id, str)
+                        or not re.fullmatch(r"[A-Za-z0-9._:-]{1,120}", attempt_id)))):
                 raise _InvalidSource()
-            submitted = _timestamp(confirmation.get("submitted_at")) or _day(confirmation.get("submitted_at"))
-            artifacts = document.get("artifacts", {})
-            resume = artifacts.get("resume_pdf", {}) if isinstance(artifacts, dict) else {}
-            resume_hash = resume.get("sha256") if isinstance(resume, dict) else None
-            attempt_id = document.get("attempt_id")
-            if (not submitted or not isinstance(resume_hash, str) or not HASH64_RE.fullmatch(resume_hash)
-                    or not isinstance(attempt_id, str) or not re.fullmatch(r"[A-Za-z0-9._:-]{1,120}", attempt_id)):
+            application_id = manifest.get("application_id")
+            if application_id:
+                application_id = _safe_application_id(application_id)
+            if attempt_provenance not in ("verified", "unknown"):
                 raise _InvalidSource()
-            records.append({"snapshot_id": name[:-5], "application_id": _safe_application_id(
-                document.get("canonical_application_id")), "attempt_id": attempt_id,
-                "resume_hash": resume_hash, "submitted_at": submitted})
-            stamp = _timestamp(document.get("captured_at"))
+            if attempt_provenance == "verified" and (not attempt_id or not answers_hash):
+                raise _InvalidSource()
+            records.append({
+                "snapshot_id": name[:-5], "snapshot_kind": manifest["snapshot_kind"],
+                "application_id": application_id, "attempt_id": attempt_id,
+                "attempt_provenance": attempt_provenance,
+                "artifact_provenance": manifest.get("artifact_provenance", "hash_verified"),
+                "resume_hash": resume_hash, "answers_hash": answers_hash,
+                "submitted_at": submitted,
+                "recorded_at": _timestamp(manifest.get("recorded_at")),
+                "pr_number": manifest.get("pr_number"),
+            })
+            stamp = _timestamp(manifest.get("captured_at"))
             if stamp:
                 observed = max(observed, stamp) if observed else stamp
         return {"records": records, "observed_at": observed,

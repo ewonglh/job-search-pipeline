@@ -188,6 +188,24 @@ with tempfile.TemporaryDirectory() as root:
     assert empty_report["mature_cohorts"][0]["event_source_status"] == "fresh"
     assert empty_report["mature_cohorts"][0]["coverage"]["status"] == "partial"
 
+    legacy_facts = report_snapshot.normalize_snapshot(
+        [], [], {"schema": 1, "coverage": {"complete": False}, "events": []},
+        {"schema": 1, "scopes": {}}, sources, as_of=AS_OF, generated_at=NOW,
+        snapshot_facts={"c" * 64: {
+            "snapshot_kind": "legacy", "application_id": "link:https://jobs.example/legacy",
+            "attempt_id": "unbound-legacy-attempt", "attempt_provenance": "unknown",
+            "artifact_provenance": "hash_verified", "confirmation_status": "confirmed",
+            "submitted_at": "2026-01-02", "recorded_at": "2026-01-02T12:00:00Z",
+            "resume_hash": "d" * 64, "answers_hash": "e" * 64, "pr_number": 43,
+        }})
+    legacy_row = legacy_facts["facts"]["legacy_snapshots"][0]
+    assert legacy_row["snapshot_id"] == "c" * 64
+    assert legacy_row["attempt_id"] is None
+    assert legacy_row["attempt_provenance"] == "unknown"
+    assert legacy_row["resume_hash"] == "d" * 64
+    assert legacy_facts["facts"]["applications"] == []
+    assert legacy_facts["facts"]["confirmed_submissions"] == []
+
 
 # Queue-only local-midnight conversion and weekday/weekend goals use one clock.
 midnight_snapshot = report_snapshot.normalize_snapshot(
