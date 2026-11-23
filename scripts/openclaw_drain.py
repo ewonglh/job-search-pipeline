@@ -157,7 +157,8 @@ class OpenClawAgentAdapter:
 
     def __init__(self, binary: str, agent_id: str, queue_script: str,
                  timeout: float = 600.0,
-                 run: Callable[..., Any] = subprocess.run):
+                 run: Callable[..., Any] = subprocess.run,
+                 model: Optional[str] = None):
         if not binary or not isinstance(binary, str):
             raise ConfigError("OpenClaw binary must be configured")
         if not AGENT_ID_RE.fullmatch(agent_id):
@@ -165,8 +166,12 @@ class OpenClawAgentAdapter:
         if (isinstance(timeout, bool) or not isinstance(timeout, (int, float))
                 or not math.isfinite(timeout) or timeout < 1):
             raise ConfigError("agent timeout must be at least one second")
+        if model is not None and (not isinstance(model, str) or not model.strip()
+                                  or "\0" in model):
+            raise ConfigError("agent model override is malformed")
         self.binary, self.agent_id = binary, agent_id
         self.queue_script, self.timeout, self._run = queue_script, float(timeout), run
+        self.model = model.strip() if model is not None else None
 
     def start_turn(self, request: TurnRequest) -> TurnResult:
         prompt = _agent_prompt(request, self.queue_script)
@@ -182,6 +187,8 @@ class OpenClawAgentAdapter:
                 argv = [self.binary, "agent", "--agent", self.agent_id,
                         "--session-key", request.session_ref, "--message-file", prompt_path,
                         "--json", "--timeout", str(max(1, int(self.timeout)))]
+                if self.model:
+                    argv.extend(["--model", self.model])
                 try:
                     proc = self._run(argv, capture_output=True, text=True,
                                      timeout=self.timeout + 15, check=False)
@@ -532,7 +539,8 @@ def _run_command(args: argparse.Namespace) -> int:
         config = DrainConfig(runner_id, args.agent_id, args.max_attempts)
         queue = SubprocessQueueClient(args.queue_script, args.python)
         agent = OpenClawAgentAdapter(args.openclaw_bin, args.agent_id,
-                                     args.queue_script, args.turn_timeout)
+                                     args.queue_script, args.turn_timeout,
+                                     model=args.model)
         report = DrainRunner(config, queue, agent).run()
     except (ConfigError, QueueError) as exc:
         print("openclaw-drain: " + str(exc), file=sys.stderr)
@@ -553,6 +561,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--python", default=os.environ.get("JOBSEARCH_PYTHON", sys.executable))
     run.add_argument("--openclaw-bin", default=os.environ.get("JOBSEARCH_OPENCLAW_BIN", "openclaw"))
     run.add_argument("--agent-id", default=os.environ.get("JOBSEARCH_OPENCLAW_AGENT", "main"))
+    run.add_argument("--model", default=os.environ.get("JOBSEARCH_OPENCLAW_MODEL") or None)
     run.add_argument("--runner-id", default=os.environ.get("JOBSEARCH_RUNNER_ID"))
     run.add_argument("--max-attempts", type=int, default=_positive_int_env(
         "JOBSEARCH_DRAIN_MAX_ATTEMPTS", 1))

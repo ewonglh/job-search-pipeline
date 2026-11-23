@@ -206,7 +206,7 @@ def test_openclaw_adapter_uses_exact_session_and_owner_tuple():
         return SimpleNamespace(returncode=0, stdout='{"status":"ok","runId":"run-9"}')
 
     adapter = od.OpenClawAgentAdapter("/opt/openclaw", "main", "scripts/queue.py",
-                                      run=fake_run)
+                                      model="provider/model-v2", run=fake_run)
     req = od.TurnRequest(RUNNER, SESSION, 23, "attempt-23")
     result = adapter.start_turn(req)
     assert result == od.TurnResult(True, run_id="run-9", return_code=0)
@@ -214,6 +214,7 @@ def test_openclaw_adapter_uses_exact_session_and_owner_tuple():
     assert argv[:4] == ["/opt/openclaw", "agent", "--agent", "main"]
     assert argv[argv.index("--session-key") + 1] == SESSION
     assert argv[argv.index("--message-file") + 1] != "-"
+    assert argv[argv.index("--model") + 1] == "provider/model-v2"
     assert "attempt_id: attempt-23" in observed["prompt"]
     assert "runner_id: runner-a" in observed["prompt"]
     assert "session_ref: " + SESSION in observed["prompt"]

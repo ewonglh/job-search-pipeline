@@ -16,6 +16,8 @@ absolute command and executable digest in the durable owner record:
 export JOBSEARCH_OPENCLAW_BIN=/absolute/path/to/openclaw
 export JOBSEARCH_BROWSER_OWNERSHIP_VERIFIER="/absolute/path/to/scripts/openclaw_ownership.py --openclaw-bin /absolute/path/to/openclaw"
 export JOBSEARCH_OPENCLAW_AGENT=main
+# Optional: preserve a scheduled agent's model override for the claimed turn.
+export JOBSEARCH_OPENCLAW_MODEL=provider/model
 python3 scripts/openclaw_drain.py run --max-attempts 1
 ```
 
