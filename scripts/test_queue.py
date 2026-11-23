@@ -9,9 +9,11 @@ import json
 import os
 import shutil
 import tempfile
+from datetime import date
 from unittest import mock
 
 import queue as q
+import tailor
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FIX = os.path.join(HERE, "fixtures", "queue")
@@ -25,10 +27,39 @@ with open(os.path.join(FIX, "applications_merged.yaml"), encoding="utf-8") as fh
 def live_enqueue(queue_path, prs=PRS):
     # Inject the authenticated GitHub/read-main boundary, never a writable
     # fixture CLI flag. Real calls still require the observed owner's merge.
-    with mock.patch.object(q, "gh_merged_prs", return_value=prs), \
+    root = os.path.dirname(queue_path)
+    repo = os.path.join(root, "fixture-resume")
+    os.makedirs(os.path.join(repo, "data"), exist_ok=True)
+    postings = [
+        {"company": "Quantum Co", "role": "Software Engineer Intern",
+         "link": "https://example.com/jobs/quantum", "added": date.today().isoformat()},
+        {"company": "Ghost Co", "role": "Backend Engineer Intern",
+         "link": "https://www.internsg.com/job/ghost-co-backend",
+         "added": date.today().isoformat()},
+    ]
+    with open(os.path.join(repo, "data", "postings.json"), "w", encoding="utf-8") as fh:
+        json.dump(postings, fh)
+    skipped = os.path.join(root, "skipped.yaml")
+    gates = os.path.join(root, "gates.yaml")
+    for path in (skipped, gates):
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("[]\n")
+    def observed(_log, on_page=None):
+        if on_page:
+            on_page(prs)
+        return prs
+    files_by_pr = {int(row.get("number") or 0): row.get("files") for row in prs}
+    with mock.patch.object(q, "gh_merged_prs", side_effect=observed), \
+            mock.patch.object(q, "gh_pr_files",
+                              side_effect=lambda number, _log: files_by_pr.get(int(number))), \
             mock.patch.object(q, "read_main_tracker", return_value=TRACKER), \
-            mock.patch.object(q, "GH_REPO", "demo-user/resume"):
-        return q.main(["enqueue", "--queue", queue_path])
+            mock.patch.object(q, "GH_REPO", "demo-user/resume"), \
+            mock.patch.object(q, "REPO_DIR", repo), \
+            mock.patch.object(tailor, "SKIPPED_FILE", skipped), \
+            mock.patch.object(tailor, "GATE_FILE", gates), \
+            mock.patch.object(tailor, "fetch_jd", return_value={
+                "jd_text": "Current role description. " * 20}):
+        return q.main(["enqueue", "--queue", queue_path, "--repo", repo])
 
 # ---------------------------------------------------------------- yaml subset
 obj = [{"company": "Acme: Inc", "role": "SWE #1", "notes": "x | y",
@@ -213,10 +244,17 @@ try:
         assert q.main(["enqueue", "--queue", qfile] + flags) == 2
         assert not os.path.exists(qfile)
     # A non-owner merge and missing merge time are not enqueue authorization.
-    for bad in ([dict(pr, mergedBy={"login": "untrusted-fixture"}) for pr in PRS],
-                [dict(pr, mergedAt=None) for pr in PRS]):
-        assert live_enqueue(qfile, bad) == 0
+    for non_owner in (
+            [dict(pr, mergedBy={"login": "untrusted-fixture"}) for pr in PRS],
+            [dict(pr, mergedBy={"name": "demo-user"}) for pr in PRS]):
+        assert live_enqueue(qfile, non_owner) == 0
         assert q.load_queue(qfile) == []
+    missing_time = [dict(pr, mergedAt=None) for pr in PRS]
+    assert live_enqueue(qfile, missing_time) == 1
+    assert q.load_queue(qfile) == []
+    pending = q.load_merge_intake(qfile)["records"]["12"]
+    assert pending["state"] == "pending"
+    assert pending["reason_code"] == "metadata_unavailable"
 
     # real run writes the store
     buf = io.StringIO()
@@ -226,11 +264,12 @@ try:
     store = q.load_queue(qfile)
     assert [it["pr_number"] for it in store] == [12, 14], store
 
-    # re-run: silent (nothing new) but exit 0
+    # Re-run: no addition, with a structured healthy-empty summary.
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         rc = live_enqueue(qfile)
-    assert rc == 0 and buf.getvalue() == "", repr(buf.getvalue())
+    assert rc == 0 and "queued:" not in buf.getvalue(), repr(buf.getvalue())
+    assert '"outcome": "healthy_empty"' in buf.getvalue(), repr(buf.getvalue())
 
     # next -> oldest queued (PR 12)
     buf = io.StringIO()
