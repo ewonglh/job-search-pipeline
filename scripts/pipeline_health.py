@@ -56,6 +56,42 @@ def _source_usable(source):
     return isinstance(source, dict) and source.get("status") in ("fresh", "stale")
 
 
+def _age_summary(rows, timestamp_fields, reference, zone):
+    ages = []
+    unknown = 0
+    for row in rows:
+        stamp = None
+        for field in timestamp_fields:
+            stamp = _local_datetime(row.get(field), zone)
+            if stamp is not None:
+                break
+        if reference is None or stamp is None:
+            unknown += 1
+        else:
+            ages.append(max(0, int((reference - stamp).total_seconds())))
+    return {"oldest_age_seconds": max(ages) if ages else None,
+            "age_unknown_count": unknown}
+
+
+def _intake_lane(intake, lane, reference, zone):
+    lane_data = intake.get(lane, {}) if isinstance(intake, dict) else {}
+    latest = lane_data.get("latest") if isinstance(lane_data, dict) else None
+    if not isinstance(latest, dict):
+        return {"status": "unknown", "run_count": lane_data.get("run_count", 0)
+                if isinstance(lane_data, dict) else 0, "latest": None,
+                "age_seconds": None, "recent": lane_data.get("recent", [])
+                if isinstance(lane_data, dict) else []}
+    recorded = _local_datetime(latest.get("recorded_at"), zone)
+    age = max(0, int((reference - recorded).total_seconds())) if reference and recorded else None
+    outcome = latest.get("outcome")
+    if outcome not in {"healthy", "healthy_empty", "partial_failure", "total_failure", "failed"}:
+        outcome = "unknown"
+    return {"status": outcome,
+            "run_count": lane_data.get("run_count", 1), "latest": latest,
+            "age_seconds": age,
+            "recent": lane_data.get("recent", []) if isinstance(lane_data, dict) else []}
+
+
 def build_report(snapshot, *, timezone_name, weekday_goal, weekend_goal,
                  ready_buffer, as_of=None, stale_after_seconds=STALE_CLAIM_SECONDS):
     """Build a daily view from one normalized snapshot; performs no source reads."""
@@ -90,6 +126,17 @@ def build_report(snapshot, *, timezone_name, weekday_goal, weekend_goal,
     snapshot_unverifiable = 0
     pending_sync = 0
     sync_unknown = 0
+    ready_rows = [row for row in queue_rows if row.get("status") == "queued"]
+    blocked_rows = [row for row in queue_rows
+                    if row.get("status") in ("blocked", "failed")
+                    or (row.get("status") in ("queued", "in_progress")
+                        and row.get("blocker_code")
+                        and CODE_RE.fullmatch(str(row.get("blocker_code"))))]
+    unknown_rows = [row for row in queue_rows
+                    if row.get("status") == "outcome_unknown"
+                    or row.get("attempt_state") == "outcome_unknown"]
+    snapshot_backlog_rows = []
+    sync_backlog_rows = []
     blockers = {}
     unclassified_blockers = 0
     reference = _local_datetime(snapshot.get("generated_at"), zone)
@@ -103,11 +150,13 @@ def build_report(snapshot, *, timezone_name, weekday_goal, weekend_goal,
                     or not row.get("snapshot_id")
                     or row.get("snapshot_manifest_status") == "missing_or_invalid"):
                 snapshot_gaps += 1
+                snapshot_backlog_rows.append(row)
             elif row.get("snapshot_manifest_status") == "unavailable":
                 snapshot_unverifiable += 1
             sync = row.get("tracker_sync")
             if sync in ("pending", "error", "syncing"):
                 pending_sync += 1
+                sync_backlog_rows.append(row)
             elif sync != "synced":
                 sync_unknown += 1
         code = row.get("blocker_code")
@@ -125,6 +174,42 @@ def build_report(snapshot, *, timezone_name, weekday_goal, weekend_goal,
     scan_status = ("unknown" if ingestion_age is None else
                    "stale" if ingestion_age > ingestion_source.get("freshness_seconds", 86400)
                    else "fresh")
+    queue_usable = bool(queue_ok)
+    ready_ages = _age_summary(ready_rows, ("enqueued_at", "approved_at"), reference, zone)
+    blocked_ages = _age_summary(blocked_rows,
+                                ("blocked_at", "failed_at", "updated_at", "claimed_at"),
+                                reference, zone)
+    unknown_ages = _age_summary(unknown_rows,
+                                ("outcome_unknown_at", "claimed_at"), reference, zone)
+    snapshot_ages = _age_summary(snapshot_backlog_rows,
+                                 ("snapshot_prepared_at", "submitted_at"), reference, zone)
+    sync_ages = _age_summary(sync_backlog_rows,
+                             ("tracker_sync_started_at", "tracker_sync_failed_at", "submitted_at"),
+                             reference, zone)
+    active_attempts = [row for row in queue_rows if row.get("status") == "in_progress"]
+    browser_owners, browser_released, browser_unknown = [], 0, 0
+    for row in active_attempts:
+        released_at = _local_datetime(row.get("browser_released_at"), zone)
+        runner_id, session_ref = row.get("runner_id"), row.get("session_ref")
+        if released_at:
+            browser_released += 1
+        elif runner_id or session_ref:
+            claimed_at = _local_datetime(row.get("claimed_at"), zone)
+            browser_owners.append({
+                "runner_id": runner_id, "session_ref": session_ref,
+                "attempt_age_seconds": (max(0, int((reference - claimed_at).total_seconds()))
+                                        if reference and claimed_at else None),
+            })
+        else:
+            browser_unknown += 1
+    intake_source = sources.get("intake", {})
+    intake_facts = facts.get("intake", {})
+    intake = {"source_status": intake_source.get("status", "unavailable"),
+              "coverage_status": intake_source.get("coverage_status", "unknown"),
+              "coverage_reasons": intake_source.get("coverage_reasons", []),
+              "error_code": intake_source.get("error_code"),
+              "discovery": _intake_lane(intake_facts, "discovery", reference, zone),
+              "enqueue": _intake_lane(intake_facts, "enqueue", reference, zone)}
     submissions = {
         "count": (submission_count if tracker_ok else
                   submission_count if queue_ok and submission_count else None),
@@ -148,15 +233,30 @@ def build_report(snapshot, *, timezone_name, weekday_goal, weekend_goal,
                             "submissions": submissions},
         "ready_buffer": {"target": ready_buffer,
                           "queued": ready_count if queue_ok else None,
-                          "gap": max(0, ready_buffer - ready_count) if queue_ok else None},
+                          "gap": max(0, ready_buffer - ready_count) if queue_ok else None,
+                          "oldest_age_seconds": ready_ages["oldest_age_seconds"] if queue_usable else None,
+                          "age_unknown_count": ready_ages["age_unknown_count"] if queue_usable else None},
         "attempts": {"stale_in_progress": stale if queue_ok else None,
                      "in_progress": in_progress if queue_ok else None,
-                     "outcome_unknown": outcome_unknown if queue_ok else None},
+                     "outcome_unknown": outcome_unknown if queue_ok else None,
+                     "blocked": len(blocked_rows) if queue_usable else None,
+                     "oldest_blocked_age_seconds": blocked_ages["oldest_age_seconds"] if queue_usable else None,
+                     "blocked_age_unknown_count": blocked_ages["age_unknown_count"] if queue_usable else None,
+                     "oldest_unknown_age_seconds": unknown_ages["oldest_age_seconds"] if queue_usable else None,
+                     "unknown_age_unknown_count": unknown_ages["age_unknown_count"] if queue_usable else None},
+        "browser_ownership": {"active": len(browser_owners) if queue_usable else None,
+                              "released": browser_released if queue_usable else None,
+                              "unknown": browser_unknown if queue_usable else None,
+                              "owners": browser_owners if queue_usable else None},
         "tracker_sync": {"pending_or_error": pending_sync if queue_ok else None,
-                         "unknown_state": sync_unknown if queue_ok else None},
+                         "unknown_state": sync_unknown if queue_ok else None,
+                         "oldest_age_seconds": sync_ages["oldest_age_seconds"] if queue_usable else None,
+                         "age_unknown_count": sync_ages["age_unknown_count"] if queue_usable else None},
         "snapshot_gaps": {"known": snapshot_gaps if queue_ok else None,
                           "unverifiable_claims": snapshot_unverifiable if queue_ok else None,
                           "total": snapshot_gaps if queue_ok and not snapshot_unverifiable else None,
+                          "oldest_age_seconds": snapshot_ages["oldest_age_seconds"] if queue_usable else None,
+                          "age_unknown_count": snapshot_ages["age_unknown_count"] if queue_usable else None,
                           "assessment_complete": bool(queue_ok and _source_usable(sources.get("snapshots"))
                                                        and not snapshot_unverifiable),
                           "source_status": sources.get("snapshots", {}).get("status", "unavailable")},
@@ -168,6 +268,7 @@ def build_report(snapshot, *, timezone_name, weekday_goal, weekend_goal,
                       "last_scan_at": ingestion.get("last_scan_at"),
                       "age_seconds": ingestion_age,
                       "scope_count": ingestion.get("scope_count")},
+        "intake": intake,
         "sources": sources,
         "caveats": [
             "Unavailable sources have null dependent counts; a valid empty source is observed separately.",
@@ -181,18 +282,52 @@ def build_report(snapshot, *, timezone_name, weekday_goal, weekend_goal,
 def render_text(report):
     goal = report["submission_goal"]
     submissions = goal["submissions"]
+    ready = report["ready_buffer"]
+    attempts = report["attempts"]
+    ownership = report["browser_ownership"]
+    sync = report["tracker_sync"]
+    gaps = report["snapshot_gaps"]
+    def show(value):
+        return "unavailable" if value is None else str(value)
+    discovery = report["intake"]["discovery"]
+    enqueue = report["intake"]["enqueue"]
+    discovery_counts = (discovery.get("latest") or {}).get("counts", {})
+    enqueue_counts = (enqueue.get("latest") or {}).get("counts", {})
+    enqueue_admitted = enqueue_counts.get(
+        "admitted", enqueue_counts.get("added", enqueue_counts.get("accepted", 0)))
+    enqueue_excluded = enqueue_counts.get("excluded", enqueue_counts.get("rejected", 0))
+    enqueue_pending_metadata = enqueue_counts.get("pending_metadata", 0)
+    discovery_reasons = (discovery.get("latest") or {}).get("reasons", {})
+    enqueue_reasons = (enqueue.get("latest") or {}).get("reasons", {})
+    def reason_summary(reasons):
+        return ", ".join("{}={}".format(code, count)
+                         for code, count in sorted(reasons.items())) or "unknown"
     lines = ["Daily pipeline health · {} ({})".format(report["as_of"], report["timezone"]),
              "Confirmed submissions: {} / {} ({} coverage)".format(
                  goal["confirmed"] if goal["confirmed"] is not None else "unavailable",
                  goal["target"], submissions["coverage"]),
              "Ready buffer: {} / {}".format(
-                 report["ready_buffer"]["queued"] if report["ready_buffer"]["queued"] is not None else "unavailable",
-                 report["ready_buffer"]["target"]),
+                 show(ready["queued"]), ready["target"]),
+             "Queue age: ready {}s (unknown {}); blocked {} (oldest {}s); unknown {} (oldest {}s)".format(
+                 show(ready["oldest_age_seconds"]), show(ready["age_unknown_count"]),
+                 show(attempts["blocked"]), show(attempts["oldest_blocked_age_seconds"]),
+                 show(attempts["outcome_unknown"]), show(attempts["oldest_unknown_age_seconds"])),
              "Attempts: stale {}, in progress {}, outcome unknown {}".format(
-                 report["attempts"]["stale_in_progress"], report["attempts"]["in_progress"],
-                 report["attempts"]["outcome_unknown"]),
-             "Tracker sync pending/error: {}; snapshot gaps: {}".format(
-                 report["tracker_sync"]["pending_or_error"], report["snapshot_gaps"]),
+                 attempts["stale_in_progress"], attempts["in_progress"], attempts["outcome_unknown"]),
+             "Browser owner: active {}, released {}, unknown {}".format(
+                 show(ownership["active"]), show(ownership["released"]), show(ownership["unknown"])),
+             "Tracker sync pending/error: {} (oldest {}s); snapshot gaps: {} (oldest {}s)".format(
+                 sync["pending_or_error"], show(sync["oldest_age_seconds"]),
+                 gaps["total"], show(gaps["oldest_age_seconds"])),
+             "Intake: discovery {} ({}/{} processed/accepted, age {}s); enqueue {} "
+             "(admitted {}, excluded {}, pending metadata {}, active work {}, closed history {}, age {}s); "
+             "reasons discovery [{}], enqueue [{}]".format(
+                 discovery["status"], discovery_counts.get("processed", 0),
+                 discovery_counts.get("accepted", 0), show(discovery["age_seconds"]),
+                 enqueue["status"], enqueue_admitted, enqueue_excluded, enqueue_pending_metadata,
+                 enqueue_counts.get("active_work", 0), enqueue_counts.get("closed_history", 0),
+                 show(enqueue["age_seconds"]), reason_summary(discovery_reasons),
+                 reason_summary(enqueue_reasons)),
              "Ingestion: {} (last scan {}, age {} seconds)".format(
                  report["ingestion"]["status"], report["ingestion"]["last_scan_at"],
                  report["ingestion"]["age_seconds"])]

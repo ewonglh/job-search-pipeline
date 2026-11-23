@@ -215,8 +215,18 @@ assert health["submission_goal"]["confirmed"] == 1
 assert health["submission_goal"]["submissions"]["coverage"] == "complete"
 assert health["snapshot_gaps"]["known"] == 1
 assert health["tracker_sync"]["pending_or_error"] == 1
-assert health["attempts"] == {"stale_in_progress": 1, "in_progress": 2, "outcome_unknown": 1}
-assert health["ready_buffer"] == {"target": 1, "queued": 1, "gap": 0}
+assert health["attempts"]["stale_in_progress"] == 1
+assert health["attempts"]["in_progress"] == 2
+assert health["attempts"]["outcome_unknown"] == 1
+assert health["attempts"]["blocked"] == 1
+assert health["attempts"]["oldest_blocked_age_seconds"] == 24 * 3600
+assert health["attempts"]["unknown_age_unknown_count"] == 1
+assert health["ready_buffer"]["target"] == 1
+assert health["ready_buffer"]["queued"] == 1
+assert health["ready_buffer"]["gap"] == 0
+assert health["ready_buffer"]["age_unknown_count"] == 1
+assert health["browser_ownership"]["active"] == 0
+assert health["browser_ownership"]["unknown"] == 2
 assert health["blockers"]["by_code"] == {"portal_timeout": 1}
 assert health["blockers"]["unclassified"] == 1
 assert "SYNTHETIC FREE TEXT MUST NOT LEAK" not in json.dumps(midnight_snapshot)

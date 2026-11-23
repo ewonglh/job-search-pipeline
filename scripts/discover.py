@@ -22,6 +22,7 @@ Usage:
 those rows share this lane's role filter, location filter and store dedupe.
 """
 import argparse
+import intake_reporting
 import html as html_mod
 import json
 import os
@@ -399,26 +400,61 @@ def _page_urls(src):
     return urls
 
 
-def collect_internsg(today, log=lambda *a: None):
+def _coverage_row(kind, key):
+    return {"kind": kind, "source_id": intake_reporting.source_id(kind, key),
+            "fetch": "unknown", "parse": "not_attempted", "processed": 0, "accepted": 0}
+
+
+def _collect_page(url, parser, kind, coverage, log):
+    status = _coverage_row(kind, url)
+    if coverage is not None:
+        coverage.append(status)
+    try:
+        body = fetch(url)
+    except Exception:
+        status["fetch"] = "failed"
+        log("discover: source_unavailable " + status["source_id"])
+        return [], ["source_unavailable"]
+    status["fetch"] = "ok"
+    if re.search(r"cf-chl-|challenge-platform|verify (?:that )?you are human|"
+                 r"just a moment|captcha|access denied|checking your browser", body, re.I):
+        status["parse"] = "challenge"
+        log("discover: challenge_page " + status["source_id"])
+        return [], ["challenge_page"]
+    try:
+        rows = parser(body)
+    except Exception:
+        status["parse"] = "failed"
+        log("discover: parse_failed " + status["source_id"])
+        return [], ["parse_failed"]
+    if not rows and not re.search(
+            r"no (?:current |open |available |matching )?(?:jobs|positions|vacancies|opportunities|results)"
+            r"|0 (?:jobs|positions|results)|job-listing-(?:empty|no-results)", body, re.I):
+        status["parse"] = "unrecognized"
+        log("discover: parse_unrecognized " + status["source_id"])
+        return [], ["parse_unrecognized"]
+    status.update(parse="ok" if rows else "empty", processed=len(rows))
+    for row in rows:
+        row["_coverage_id"] = status["source_id"]
+    return rows, []
+
+
+def collect_internsg(today, log=lambda *a: None, coverage=None):
     raw, errors = [], []
     for name, src in INTERNSG_SOURCES:
         for page, url in enumerate(_page_urls(src), 1):
             if page > 1:
                 import time
                 time.sleep(PAGE_SLEEP)
-            try:
-                html_text = fetch(url)
-            except Exception as exc:  # network/SSL/HTTP
-                errors.append(f"{url}: {exc}")
-                log(f"discover: fetch failed {url}: {exc}")
-                continue
-            for p in parse_internsg(html_text):
+            rows, errs = _collect_page(url, parse_internsg, "internsg", coverage, log)
+            errors += errs
+            for p in rows:
                 p["source"] = name
                 raw.append(p)
     return raw, errors
 
 
-def collect_boards(today, log=lambda *a: None):
+def collect_boards(today, log=lambda *a: None, coverage=None):
     """Run every ATS board adapter in ``probe_boards.py`` and return its rows.
 
     The board configs live in ``probe_boards.BOARDS`` so the ATS knowledge
@@ -432,45 +468,51 @@ def collect_boards(today, log=lambda *a: None):
     """
     try:
         import probe_boards
-    except Exception as exc:  # noqa: BLE001 - boards are one source of several
-        msg = f"board: probe_boards unavailable: {type(exc).__name__}: {exc}"
-        log(msg)
-        return [], [msg]
+    except Exception:  # noqa: BLE001 - boards are one source of several
+        log("board: source_unavailable")
+        if coverage is not None:
+            coverage.append(_coverage_row("board", "adapter_unavailable"))
+            coverage[-1]["fetch"] = "failed"
+        return [], ["source_unavailable"]
     raw, errors = [], []
     for cfg in probe_boards.BOARDS:
+        status = _coverage_row("board", json.dumps(cfg, sort_keys=True))
+        if coverage is not None:
+            coverage.append(status)
         try:
             label, rows, detail = probe_boards.probe(cfg)
-        except Exception as exc:  # noqa: BLE001 - an old/incompatible module
-            msg = (f"board-error: {cfg.get('name') if isinstance(cfg, dict) else cfg}: "
-                   f"probe raised {type(exc).__name__}: {exc}")
-            log(msg)
-            errors.append(msg)
+        except Exception:  # noqa: BLE001 - an old/incompatible module
+            status["fetch"] = "failed"
+            log("board-error: source_unavailable " + status["source_id"])
+            errors.append("source_unavailable")
             continue
-        if label == "PROBED":
-            log(f"board: {cfg['name']}: {len(rows)} row(s) ({detail})")
-            raw += rows
-        elif label == "PROBED 0":
-            log(f"board-empty: {cfg['name']}: {detail}")
+        if label in ("PROBED", "PROBED 0"):
+            status.update(fetch="ok", parse="ok" if rows else "empty", processed=len(rows))
+            for row in rows:
+                row = dict(row)
+                row["_coverage_id"] = status["source_id"]
+                raw.append(row)
+            log("board: %s %s processed=%s" % (status["source_id"], status["parse"], len(rows)))
         else:
-            msg = f"board-error: {cfg['name']}: {label}: {detail}"
-            log(msg)
-            errors.append(msg)
+            challenge = bool(re.search(r"captcha|challenge|access.denied|blocked", str(label) + " " + str(detail), re.I))
+            status.update(fetch="ok" if challenge else "failed",
+                          parse="challenge" if challenge else "not_attempted")
+            code = "challenge_page" if challenge else "source_unavailable"
+            log("board-error: " + code + " " + status["source_id"])
+            errors.append(code)
     return raw, errors
 
 
-def collect_companies(cfg_list, today, log=lambda *a: None):
+def collect_companies(cfg_list, today, log=lambda *a: None, coverage=None):
     raw, errors = [], []
     for cfg in cfg_list:
         url = cfg.get("url")
         if not url:
             continue
-        try:
-            html_text = fetch(url)
-        except Exception as exc:
-            errors.append(f"{url}: {exc}")
-            log(f"discover: fetch failed {url}: {exc}")
-            continue
-        for p in parse_company_page(html_text, cfg):
+        rows, errs = _collect_page(url, lambda body: parse_company_page(body, cfg),
+                                   "company", coverage, log)
+        errors += errs
+        for p in rows:
             p["source"] = cfg.get("name", "")
             raw.append(p)
     return raw, errors
@@ -653,11 +695,22 @@ def build_parser():
     return ap
 
 
+def _report_intake(summary, dry_run, log):
+    summary = intake_reporting.sanitize_summary(summary)
+    log("discover: intake " + json.dumps(summary, sort_keys=True))
+    if not dry_run:
+        try:
+            intake_reporting.record_run("discovery", summary)
+        except Exception:  # reporting must not invalidate already durable discovery work
+            log("discover: intake_history_write_failed")
+
+
 def main(argv=None):
     args = build_parser().parse_args(argv)
     log = lambda *a: print(*a, file=sys.stderr)
     today = datetime.now().date()
     errors = []
+    coverage = []
 
     if args.import_json is not None:
         if args.boards:
@@ -677,30 +730,35 @@ def main(argv=None):
         # External lanes are assumed to have filtered location already; missing
         # location is accepted, but a non-Singapore location is still dropped.
         assume_sg = True
+        status = _coverage_row("import", "external")
+        status.update(fetch="ok", parse="ok" if incoming else "empty", processed=len(incoming))
+        coverage.append(status)
+        for row in incoming:
+            row["_coverage_id"] = status["source_id"]
     else:
         raw = []
         if not os.path.isfile(args.companies):
-            log("discover: companies configuration is missing: %s" % args.companies)
+            log("discover: companies configuration is missing")
             return 2
         try:
             with open(args.companies, encoding="utf-8") as fh:
                 cfg_list = parse_companies(fh.read())
-        except (OSError, ValueError) as exc:
-            log("discover: companies configuration is invalid: %s" % exc)
+        except (OSError, ValueError):
+            log("discover: companies configuration is invalid")
             return 2
-        internsg, errs = collect_internsg(today, log)
+        internsg, errs = collect_internsg(today, log, coverage)
         errors += errs
         raw += internsg
-        company_raw, errs = collect_companies(cfg_list, today, log)
+        company_raw, errs = collect_companies(cfg_list, today, log, coverage)
         errors += errs
         raw += company_raw
         if args.boards:
-            board_raw, errs = collect_boards(today, log)
+            board_raw, errs = collect_boards(today, log, coverage)
             errors += errs
             raw += board_raw
             log(f"discover: boards: {len(board_raw)} raw row(s) "
                 f"({len(errs)} board error(s))")
-        incoming = [normalize(p, today=today) for p in raw]
+        incoming = [dict(normalize(p, today=today), _coverage_id=p.get("_coverage_id")) for p in raw]
         assume_sg = False
 
     # A generic search/listing URL identifies no single posting; keep those
@@ -717,7 +775,20 @@ def main(argv=None):
             f"row(s) rejected by SWE-only role filter ({len(incoming)} kept)")
 
     filtered = filter_postings(incoming, today, days=args.days, assume_sg=assume_sg, log=log)
-    filtered = coalesce(filtered)
+    for status in coverage:
+        status["accepted"] = sum(1 for row in filtered if row.get("_coverage_id") == status["source_id"])
+    filtered = coalesce([{key: value for key, value in row.items() if key != "_coverage_id"}
+                         for row in filtered])
+    successful = sum(row["parse"] in ("ok", "empty") for row in coverage)
+    failed = len(coverage) - successful
+    summary = {"outcome": "total_failure" if not successful else "partial_failure" if failed
+               else "healthy" if filtered else "healthy_empty",
+               "counts": {"processed": sum(row["processed"] for row in coverage),
+                          "accepted": len(filtered), "added": 0},
+               "reasons": {code: errors.count(code) for code in set(errors)}, "sources": coverage}
+    if not successful:
+        _report_intake(summary, args.dry_run, log)
+        return 1
 
     # existing store (read-only in dry-run; clone/pull otherwise)
     if args.dry_run:
@@ -740,6 +811,12 @@ def main(argv=None):
         for p in new:
             print(f"{p['company']} \u00b7 {p['role']} \u00b7 {p['link']}")
 
+    summary["counts"]["added"] = len(new)
+    if not new:
+        reason = ("no_postings" if not summary["counts"]["processed"] else
+                  "filtered_out" if not filtered else "already_stored")
+        summary["reasons"][reason] = 1
+    _report_intake(summary, args.dry_run, log)
     if errors:
         log(f"discover: {len(errors)} source error(s)")
     return 0
