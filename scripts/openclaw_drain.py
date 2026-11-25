@@ -15,6 +15,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Protocol, Tuple
 
+from openclaw_version import supports_version_output
+
 
 RUNNER_EVIDENCE_SCHEMA = "job-search-openclaw-session-evidence/v1"
 RESOLVED_OUTCOMES = frozenset({"blocked", "failed", "skipped", "submitted", "retry"})
@@ -22,7 +24,6 @@ QUEUE_OUTCOMES = RESOLVED_OUTCOMES | {"outcome_unknown"}
 OWNER_ID_RE = re.compile(r"^[A-Za-z0-9._:@-]{1,128}$")
 AGENT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 OK_RUN_STATUSES = frozenset({"idle", "limit_reached"})
-SUPPORTED_OPENCLAW_VERSION = "OpenClaw 2026.10.1 (e178c39)"
 
 
 class ConfigError(ValueError):
@@ -528,7 +529,7 @@ def check_openclaw_version(binary: str,
                    timeout=5, check=False)
     except (OSError, subprocess.SubprocessError):
         return False
-    return proc.returncode == 0 and proc.stdout.strip() == SUPPORTED_OPENCLAW_VERSION
+    return proc.returncode == 0 and supports_version_output(proc.stdout)
 
 
 def _run_command(args: argparse.Namespace) -> int:

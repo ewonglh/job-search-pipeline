@@ -62,6 +62,7 @@ jobs:
           python test_notify_delivery.py
           python test_quiet_routing.py
           python test_openclaw_traces.py
+          python test_openclaw_version_contract.py
           python test_openclaw_drain.py
           python test_openclaw_ownership.py
           node test_run_email_ingest.mjs

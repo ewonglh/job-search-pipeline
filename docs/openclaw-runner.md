@@ -31,8 +31,12 @@ uses a fresh `agent:<agent-id>:jobs-runner-...` session key, which must never be
 reused. Increase the limit only when the schedule is intended to process more
 than one authorized queue row per invocation.
 
-The runner checks `openclaw --version` before claiming; it currently accepts
-only `OpenClaw 2026.10.1 (e178c39)`. It launches
+The runner and ownership verifier check `openclaw --version` before acting.
+Their shared gate accepts only the exact outputs `OpenClaw 2026.10.1 (e178c39)`
+and `OpenClaw 2026.11.8 (2d4ab29)`. The newer build is
+source-reviewed for interface compatibility; it is not operationally
+accepted. Keep the application drain held until the controlled pending-browser-
+action proof below passes. The runner launches
 `openclaw agent --agent ... --session-key ... --message-file ... --json`. The
 prompt carries the exact PR, attempt, runner, and session IDs
 and directs the agent to follow the absolute `skills/job-queue-drain/SKILL.md`
@@ -61,6 +65,31 @@ are the observed controls in OpenClaw 2026.10.1 (`e178c39`):
 - Browser requests bind to the turn abort signal and check current requester
   authority in
   `/home/cittagazze/.npm-global/lib/node_modules/openclaw/dist/browser-request-DqgU87BY.mjs:2223-2227,2257-2262,2323-2325`.
+
+The OpenClaw `2026.11.8` (`2d4ab29`) public-source review confirms the CLI and
+abort interfaces, agent binding validation, terminal persistence wait, and
+signal propagation into Browser Gateway actions. References in that release:
+
+- `dist/sessions-abort-DE6sPSp3.mjs:66-119,323-335,361-369` validates the
+  agent binding and waits for terminal lifecycle persistence.
+- `dist/chat-abort-lifecycle-internal-ChM03p20.mjs:55-64` handles abort
+  lifecycle signaling.
+- `dist/browser-request-DayigK53.mjs:1949-1965,2298-2309`,
+  `dist/dispatcher-CpOB7hDZ.mjs:26-96`, and
+  `dist/routes-BC1rdkyd.mjs:277-302,1229-1317,1420-1437` carry the signal
+  through Browser Gateway request dispatch and actions.
+
+This review establishes interface compatibility and signal propagation. It
+does not prove cancellation of every in-flight browser side effect. The
+separate controlled proof must still observe a pending action, an active-run
+abort, terminal read-back, and no later portal action before drain activation.
+
+For `2026.11.8`, the installed public `docs/hot-reload.md:260,400-404`
+documents browser policy hot reload by replacing Browser control, cancelling
+pending operations, and closing owned Chrome. Do not apply the older
+`2026.10.1` Gateway-restart assumption to that newer build. A temporary policy
+change still needs runtime proof of its positive effect and its rejection after
+restoration; config-file read-back alone is insufficient.
 
 The unique session key is the fence scope. Do not route an attempt through a
 detached browser worker or plugin that outlives the Gateway invocation signal.
@@ -92,7 +121,8 @@ checked when present. Incomplete or ambiguous listings fail closed.
 
 ## Offline verification
 
-From `scripts/`, run `python3 test_openclaw_drain.py` and
-`python3 test_openclaw_ownership.py`. The fake portal integration keeps an
-action outstanding, applies the session abort, waits for the action to be
-rejected, and checks that the old session cannot submit after owner release.
+From `scripts/`, run `python3 test_openclaw_version_contract.py`,
+`python3 test_openclaw_drain.py`, and `python3 test_openclaw_ownership.py`.
+The fake portal integration keeps an action outstanding, applies the session
+abort, waits for the action to be rejected, and checks that the old session
+cannot submit after owner release.
