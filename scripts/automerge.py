@@ -186,7 +186,14 @@ def load_skips():
 
 
 def load_merged_pr_index():
-    """Normalized posting link -> earliest merged PR number (via bodies)."""
+    """Normalized posting link -> earliest merged PR number (via bodies).
+
+    Merged history is immutable, so a merged app PR whose body carries no
+    usable posting link is reported and skipped rather than blocking every
+    readiness run. A link claimed by more than one merged PR keeps the earliest
+    merge, matching the oldest-first drain order. A repeat submission is still
+    refused by the queue and tracker checks in ``preflight_candidate``.
+    """
     prs = gh_json(["pr", "list", "--repo", GH_REPO, "--state", "merged",
                    "--limit", "1000", "--json", "number,body,mergedAt,headRefName"])
     if not isinstance(prs, list):
@@ -195,7 +202,8 @@ def load_merged_pr_index():
         raise ValueError("merged PR list may be truncated")
     idx = {}
     numbers = set()
-    for pr in prs:
+    unreadable, shared = [], []
+    for pr in sorted(prs, key=lambda item: str(item.get("mergedAt") or "~")):
         if not isinstance(pr, dict):
             raise ValueError("merged PR list contains a malformed entry")
         try:
@@ -213,11 +221,21 @@ def load_merged_pr_index():
             if link and "github.com" not in urllib.parse.urlsplit(link).netloc:
                 body_links.add(link)
         if len(body_links) != 1:
-            raise ValueError("merged app PR has missing or ambiguous posting identity")
+            unreadable.append(number)
+            continue
         link = next(iter(body_links))
-        if link in idx and idx[link] != number:
-            raise ValueError("merged PR list contains a duplicate posting")
+        if link in idx:
+            shared.append((idx[link], number, link))
+            continue
         idx[link] = number
+    if unreadable:
+        log("automerge: skipped {} merged app PR(s) with missing or ambiguous "
+            "posting identity: {}".format(
+                len(unreadable),
+                ", ".join("#{}".format(number) for number in sorted(unreadable))))
+    for earlier, later, link in shared:
+        log("automerge: merged PR #{} and #{} share a posting link; "
+            "keeping the earliest merge #{} ({})".format(earlier, later, earlier, link))
     return idx
 
 
