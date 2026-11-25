@@ -21,6 +21,14 @@ REJECTED = (
     "OpenClaw 2026.12.0 (abcdef0)",
     "OpenClaw 2026.11.8",
     "OpenClaw 2026.10.1 (e178c39)\nOpenClaw 2026.11.8 (2d4ab29)",
+    "\nOpenClaw 2026.11.8 (2d4ab29)\n",
+    "OpenClaw 2026.11.8 (2d4ab29)\n\n",
+    "OpenClaw 2026.11.8 (2d4ab29)\r\n\r\n",
+    " OpenClaw 2026.11.8 (2d4ab29)",
+    "OpenClaw 2026.11.8 (2d4ab29) ",
+    "OpenClaw 2026.11.8 (2d4ab29)\r",
+    None,
+    b"OpenClaw 2026.11.8 (2d4ab29)",
 )
 
 
@@ -57,7 +65,8 @@ def test_runner_and_verifier_share_exact_build_decision_and_bounded_cli_call():
     assert SUPPORTED_OPENCLAW_BUILDS == frozenset(SUPPORTED)
 
     for output in SUPPORTED:
-        _assert_both_gates(output + "\n", returncode=0, expected=True)
+        for ending in ("", "\n", "\r\n"):
+            _assert_both_gates(output + ending, returncode=0, expected=True)
     for output in REJECTED:
         _assert_both_gates(output, returncode=0, expected=False)
     _assert_both_gates(SUPPORTED[1], returncode=1, expected=False)

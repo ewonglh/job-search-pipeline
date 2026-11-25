@@ -33,7 +33,8 @@ than one authorized queue row per invocation.
 
 The runner and ownership verifier check `openclaw --version` before acting.
 Their shared gate accepts only the exact outputs `OpenClaw 2026.10.1 (e178c39)`
-and `OpenClaw 2026.11.8 (2d4ab29)`. The newer build is
+and `OpenClaw 2026.11.8 (2d4ab29)`, with at most one terminal LF or CRLF.
+Surrounding whitespace and additional lines are rejected. The newer build is
 source-reviewed for interface compatibility; it is not operationally
 accepted. Keep the application drain held until the controlled pending-browser-
 action proof below passes. The runner launches
