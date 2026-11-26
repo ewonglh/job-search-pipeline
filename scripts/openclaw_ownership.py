@@ -10,6 +10,8 @@ import argparse
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
+from openclaw_version import supports_version_output
+
 
 REQUEST_SCHEMA = "job-search-browser-termination-request/v1"
 EVIDENCE_SCHEMA = "job-search-openclaw-session-evidence/v1"
@@ -20,7 +22,6 @@ AGENT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 CHALLENGE_RE = re.compile(r"^[A-Fa-f0-9]{32,128}$")
 INPUT_MAX_BYTES = 16384
 RPC_TIMEOUT_MS = 7000
-SUPPORTED_OPENCLAW_VERSION = "OpenClaw 2026.10.1 (e178c39)"
 
 
 class VerificationError(ValueError):
@@ -165,7 +166,7 @@ def _check_version(binary: str) -> None:
                               timeout=5, check=False)
     except (OSError, subprocess.SubprocessError) as exc:
         raise VerificationError("OpenClaw version check failed: " + type(exc).__name__) from None
-    if proc.returncode != 0 or proc.stdout.strip() != SUPPORTED_OPENCLAW_VERSION:
+    if proc.returncode != 0 or not supports_version_output(proc.stdout):
         raise VerificationError("OpenClaw version is unsupported")
 
 
