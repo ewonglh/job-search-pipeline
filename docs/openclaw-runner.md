@@ -34,10 +34,10 @@ than one authorized queue row per invocation.
 The runner and ownership verifier check `openclaw --version` before acting.
 Their shared gate accepts only the exact outputs `OpenClaw 2026.10.1 (e178c39)`
 and `OpenClaw 2026.11.8 (2d4ab29)`, with at most one terminal LF or CRLF.
-Surrounding whitespace and additional lines are rejected. The newer build is
-source-reviewed for interface compatibility; it is not operationally
-accepted. Keep the application drain held until the controlled pending-browser-
-action proof below passes. The runner launches
+Surrounding whitespace and additional lines are rejected. The newer build has
+source-reviewed interface compatibility and passed the controlled acceptance
+check recorded below. A deployment must still verify its exact build, code and
+browser integration before enabling the application drain. The runner launches
 `openclaw agent --agent ... --session-key ... --message-file ... --json`. The
 prompt carries the exact PR, attempt, runner, and session IDs
 and directs the agent to follow the absolute `skills/job-queue-drain/SKILL.md`
@@ -84,6 +84,36 @@ This review establishes interface compatibility and signal propagation. It
 does not prove cancellation of every in-flight browser side effect. The
 separate controlled proof must still observe a pending action, an active-run
 abort, terminal read-back, and no later portal action before drain activation.
+
+### Controlled acceptance on 26 November 2026
+
+- Build: `OpenClaw 2026.11.8 (2d4ab29)`, built-in Browser Gateway integration.
+  The verifier implementation was the reviewed PR #77 candidate at `c23ec32`.
+- A fresh one-use session passed a no-tools readiness turn. Full tool events
+  from the connection owning the accepted run established the exact session,
+  run, call, target and button arguments while the synthetic click was pending.
+- The candidate verifier's first `sessions.abort` returned `aborted`; its
+  second returned `no-active-run`. The verdict matched the owner and fresh
+  challenge. Terminal-only cleanup was not used as proof of an active abort.
+- The test button became actionable after abort. The portal recorded zero
+  accepted or rejected actions during 20 seconds of observation (81 reads).
+  The synthetic session was terminal and its owned tab was then closed.
+- The temporary localhost policy was removed. The original settings matched
+  and actual Browser Gateway localhost navigation was blocked again. No
+  Gateway restart or scheduler change was part of the test.
+
+Original traces and owner identifiers remain in private deployment evidence.
+The acceptance applies to this build and built-in browser path; it does not
+extend to detached workers or plugins. Repeat the controlled check after a
+runtime or browser-integration change. Green offline tests alone cannot
+replace it.
+
+For live observation, human-readable session tails are diagnostic. Current
+timestamps include `Z`, deferred browser calls can have a `dispatch_action`
+wrapper, and thinking/text updates can be coalesced. Bind full tool events to
+the accepted run, match call IDs and exact arguments, and fail on transport
+gaps or unexpected tools. Display-only `item` events omit the action arguments
+and cannot establish a pending click on the intended target.
 
 For `2026.11.8`, the installed public `docs/hot-reload.md:260,400-404`
 documents browser policy hot reload by replacing Browser control, cancelling
