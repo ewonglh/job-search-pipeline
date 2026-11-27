@@ -484,5 +484,51 @@ test_denials()
 test_duplicate_verified_requisition_across_routes()
 test_strict_skip_input()
 test_duplicate_review_json_is_rejected()
+
+
+def test_merged_index_tolerates_unreadable_history():
+    """Merged bodies are immutable, so a bad one is skipped, not fatal."""
+    merged = [
+        {"number": 3, "headRefName": "app/legacy-no-link", "mergedAt": "2026-10-06T00:00:00Z",
+         "body": "### JD summary\n(link not recorded)"},
+        {"number": 9, "headRefName": "app/first-wins", "mergedAt": "2026-10-07T00:00:00Z",
+         "body": LINK},
+        {"number": 11, "headRefName": "app/two-links", "mergedAt": "2026-10-08T00:00:00Z",
+         "body": LINK + "\n\nAlso https://example.invalid/jobs/other-route"},
+        {"number": 12, "headRefName": "app/repost", "mergedAt": "2026-10-09T00:00:00Z",
+         "body": LINK},
+        {"number": 13, "headRefName": "main", "mergedAt": "2026-10-10T00:00:00Z",
+         "body": LINK},
+    ]
+    with mock.patch.object(am, "gh_json", return_value=merged), \
+            mock.patch.object(am, "log") as log:
+        index = am.load_merged_pr_index()
+
+    assert index == {LINK: 9}, index
+    reported = " ".join(" ".join(str(a) for a in call.args) for call in log.call_args_list)
+    assert "#3" in reported and "#11" in reported, reported
+    assert "keeping the earliest merge #9" in reported, reported
+
+
+def test_merged_index_still_fails_closed_on_malformed_list():
+    with mock.patch.object(am, "gh_json", return_value={"not": "a list"}):
+        try:
+            am.load_merged_pr_index()
+        except ValueError as exc:
+            assert "malformed" in str(exc), exc
+        else:
+            raise AssertionError("a non-list merged PR payload was accepted")
+
+    with mock.patch.object(am, "gh_json", return_value=[{"number": 1}, {"number": 1}]):
+        try:
+            am.load_merged_pr_index()
+        except ValueError as exc:
+            assert "ambiguous" in str(exc), exc
+        else:
+            raise AssertionError("duplicate PR numbers were accepted")
+
+
 test_provenance_preflight_and_cap()
+test_merged_index_tolerates_unreadable_history()
+test_merged_index_still_fails_closed_on_malformed_list()
 print("test_automerge: readiness, fail-closed inputs, and owner authority passed")
